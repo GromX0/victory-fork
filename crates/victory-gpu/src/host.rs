@@ -1505,11 +1505,13 @@ unsafe impl Send for CardWork {}
 static CARD_WORK: Mutex<Option<CardWork>> = Mutex::new(None);
 
 /// The compare of a declared range of a copy in the card's memory with
-/// its bytes from before, one thread per 64 KiB piece (cut at multiples of
-/// 64 KiB of title memory, as `Shadow::card_piece` cuts them): `differs`
+/// its bytes from before, 32 threads per 64 KiB piece (aligned in
+/// title memory as `Shadow::card_piece` cuts them): `differs`
 /// gets a dword per piece, 1 where a byte differs. The offsets are widened
 /// to 16 bytes; buffers are multiples of 64 KiB, and a piece flagged for a
 /// byte just outside the range costs a fetch that finds nothing.
+pub(crate) const CARD_COMPARE_PIECES_PER_GROUP: u32 = 2;
+
 pub(crate) const CARD_COMPARE: &str = r#"
 #define RS "RootConstants(num32BitConstants=6, b0), SRV(t0), UAV(u0), UAV(u1)"
 cbuffer Span : register(b0) {
@@ -1525,24 +1527,41 @@ ByteAddressBuffer now : register(t0);
 // last sent up (or hashed whole, the first time).
 RWByteAddressBuffer hashes : register(u0);
 RWByteAddressBuffer differs : register(u1);
+groupshared uint4 stripes[64];
+static const uint pieceBytes = 65536u;
 [RootSignature(RS)]
 [numthreads(64, 1, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= pieces) return;
-    uint piece = first + id.x;
-    uint lo = piece * 65536u;
-    lo = lo > skew ? lo - skew : 0u;
-    uint hi = min((piece + 1u) * 65536u - skew, size);
-    lo = lo & ~15u;
-    hi = (hi + 15u) & ~15u;
-    uint4 h = uint4(0x9E3779B9u, 0x85EBCA6Bu, 0xC2B2AE35u, 0x27D4EB2Fu);
-    [loop]
-    for (uint at = lo; at < hi; at += 16u) {
-        h = (h ^ now.Load4(at)) * uint4(0x01000193u, 0x9E3779B1u, 0x85EBCA77u, 0xC2B2AE3Du);
-        h = h.yzwx ^ (h >> 15);
+void main(uint index : SV_GroupIndex, uint3 group : SV_GroupID) {
+    // Adjacent lanes read adjacent words in each of two pieces.
+    uint localPiece = index / 32u;
+    uint lane = index % 32u;
+    uint offset = group.x * 2u + localPiece;
+    uint piece = first + offset;
+    uint4 start = uint4(0x9E3779B9u, 0x85EBCA6Bu, 0xC2B2AE35u, 0x27D4EB2Fu);
+    uint4 mix = uint4(0x01000193u, 0x9E3779B1u, 0x85EBCA77u, 0xC2B2AE3Du);
+    uint4 h = start ^ (lane * mix);
+    if (offset < pieces) {
+        uint lo = piece * pieceBytes;
+        lo = lo > skew ? lo - skew : 0u;
+        lo = min(lo, size);
+        uint hi = lo + min(size - lo, piece == 0u ? pieceBytes - skew : pieceBytes);
+        lo = lo & ~15u;
+        hi = (hi + 15u) & ~15u;
+        [loop]
+        for (uint at = lo + lane * 16u; at < hi; at += 32u * 16u) {
+            h = (h ^ now.Load4(at)) * mix;
+            h = h.yzwx ^ (h >> 15);
+        }
+    }
+    stripes[index] = h;
+    GroupMemoryBarrierWithGroupSync();
+    if (offset >= pieces || lane != 0u) return;
+    [unroll]
+    for (uint n = 1u; n < 32u; ++n) {
+        h ^= stripes[index + n];
     }
     if (compare != 0u) {
-        differs.Store(out_at + id.x * 4u, any(h != hashes.Load4(piece * 16u)) ? 1u : 0u);
+        differs.Store(out_at + offset * 4u, any(h != hashes.Load4(piece * 16u)) ? 1u : 0u);
         // With the copy-back on its own thread: the next compare of the
         // piece finds what is written from here on.
         if (compare == 2u) hashes.Store4(piece * 16u, h);
@@ -1557,11 +1576,9 @@ void main(uint3 id : SV_DispatchThreadID) {
 /// once (`VICTORY_CARD_REHASH_RUNS=1`; off by default), and not in a pass
 /// per range sent up.
 ///
-/// These passes are ours, they run on the card before every submission's
-/// lists, and no timing so far names them: each walks its 64 KiB pieces
-/// 16 bytes at a time, 4,096 steps one after the other, so a pass takes
-/// the time of one piece however few its pieces are. Run 102 sent up 514
-/// ranges a frame: 514 such passes. The same pieces are hashed either way;
+/// These passes run on the card before the submission's lists. Run 102
+/// sent up 514 ranges a frame, each with its own dispatch before joining.
+/// The same pieces are hashed either way;
 /// a piece hashed when it need not be, or not hashed when it should, costs
 /// a fetch that finds nothing and loses no shader write.
 fn rehash_runs() -> bool {
@@ -3180,7 +3197,7 @@ impl Host {
         }
         let code = code.ok_or_else(windows::core::Error::empty)?;
         let list = || self.make_prelude().ok_or_else(windows::core::Error::empty);
-        // A megabyte of results: 262,144 pieces, 16 GB of declared ranges
+        // A megabyte of results: 262,144 pieces, 16 GiB of declared ranges
         // in one submission.
         const RESULTS: u64 = 1 << 20;
         let (differs, data) = self.shared_buffer(RESULTS).ok_or_else(windows::core::Error::empty)?;
@@ -3332,7 +3349,7 @@ impl Host {
                         for run in runs {
                             let constants = [run.first, run.skew, size as u32, run.pieces, 0, 0];
                             list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
-                            list.Dispatch(run.pieces.div_ceil(64), 1, 1);
+                            list.Dispatch(run.pieces.div_ceil(CARD_COMPARE_PIECES_PER_GROUP), 1, 1);
                         }
                     }
                     list.Close()?;
@@ -3417,7 +3434,7 @@ impl Host {
                         list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
                         list.SetComputeRootShaderResourceView(1, r.shadow.buffer.GetGPUVirtualAddress());
                         list.SetComputeRootUnorderedAccessView(2, before.GetGPUVirtualAddress());
-                        list.Dispatch(r.span.pieces.div_ceil(64), 1, 1);
+                        list.Dispatch(r.span.pieces.div_ceil(CARD_COMPARE_PIECES_PER_GROUP), 1, 1);
                         CARD_PASSES[2].fetch_add(1, Ordering::Relaxed);
                     }
                     list.Close()?;

@@ -696,7 +696,7 @@ void main() {
         };
         let compare = compile_cs(&warp.device, crate::host::CARD_COMPARE).expect("the card compare must compile on WARP");
         const PIECE: usize = 64 << 10;
-        const PIECES: u32 = 3;
+        const PIECES: u32 = 9;
         let size = PIECE * PIECES as usize;
         let (_now, now_ptr, now_gpu) = warp.shared_buffer(size as u64);
         let (_hashes, _, hashes_gpu) = warp.shared_buffer(16 * u64::from(PIECES));
@@ -704,9 +704,8 @@ void main() {
         let content: Vec<u8> = (0..size).map(|i| (i * 31 + i / 251) as u8).collect();
         // SAFETY: the mapping holds `size` bytes.
         unsafe { std::ptr::copy_nonoverlapping(content.as_ptr(), now_ptr, size) };
-        // One pass over the three pieces; what it left in `differs` (7s
-        // where it stored nothing).
-        let run = |warp: &mut WarpHarness, mode: u32| -> [u32; 3] {
+        // Check the first two pieces and the last, in the partial group.
+        let run_with_skew = |warp: &mut WarpHarness, mode: u32, skew: u32| -> [u32; 3] {
             // SAFETY: our open list, live buffers, the compare's own root
             // signature; the mappings hold what is read and written.
             unsafe {
@@ -715,17 +714,19 @@ void main() {
                 }
                 warp.list.SetComputeRootSignature(&compare.root);
                 warp.list.SetPipelineState(&compare.pso);
-                let constants = [0u32, 0, size as u32, PIECES, 0, mode];
+                let constants = [0u32, skew, size as u32, PIECES, 0, mode];
                 warp.list.SetComputeRoot32BitConstants(0, 6, constants.as_ptr().cast(), 0);
                 warp.list.SetComputeRootShaderResourceView(1, now_gpu);
                 warp.list.SetComputeRootUnorderedAccessView(2, hashes_gpu);
                 warp.list.SetComputeRootUnorderedAccessView(3, differs_gpu);
-                warp.list.Dispatch(PIECES.div_ceil(64), 1, 1);
+                let groups = PIECES.div_ceil(crate::host::CARD_COMPARE_PIECES_PER_GROUP);
+                warp.list.Dispatch(groups, 1, 1);
             }
             warp.submit_and_wait();
             // SAFETY: as above.
-            [0, 1, 2].map(|piece| unsafe { differs_ptr.cast::<u32>().add(piece).read_volatile() })
+            [0, 1, PIECES as usize - 1].map(|piece| unsafe { differs_ptr.cast::<u32>().add(piece).read_volatile() })
         };
+        let run = |warp: &mut WarpHarness, mode| run_with_skew(warp, mode, 0);
         let at = PIECE + 1234;
         // SAFETY (each): inside the mapping.
         let set = |value: u8| unsafe { now_ptr.add(at).write_volatile(value) };
@@ -748,6 +749,29 @@ void main() {
         set(content[at]);
         assert_eq!(run(&mut warp, 2), [0, 1, 0]);
         assert_eq!(run(&mut warp, 2), [0, 0, 0]);
+
+        // Cover every lane, the final words of a piece, and a partial group.
+        for lane in 0..32 {
+            let at = size - 512 + lane * 16 + 15;
+            // SAFETY: the last 512 bytes of the mapped buffer are live.
+            unsafe { now_ptr.add(at).write_volatile(content[at] ^ 0x80) };
+            assert_eq!(run(&mut warp, 1), [0, 0, 1], "lane {lane}");
+            // SAFETY: the same byte is still mapped after the list finishes.
+            unsafe { now_ptr.add(at).write_volatile(content[at]) };
+        }
+        assert_eq!(run(&mut warp, 1), [0, 0, 0]);
+
+        // Skew moves the physical boundary between pieces in this copy.
+        let skew = 4096;
+        let edge = PIECE - skew;
+        assert_eq!(run_with_skew(&mut warp, 0, skew as u32), [7, 7, 7]);
+        for (at, expected) in [(edge - 1, [1, 0, 0]), (edge, [0, 1, 0])] {
+            // SAFETY: both offsets are in the mapped buffer.
+            unsafe { now_ptr.add(at).write_volatile(content[at] ^ 0x80) };
+            assert_eq!(run_with_skew(&mut warp, 1, skew as u32), expected);
+            // SAFETY: the same byte is still mapped after the list finishes.
+            unsafe { now_ptr.add(at).write_volatile(content[at]) };
+        }
     }
 
     /// The last record's span is its payload: a tight title buffer asks for
