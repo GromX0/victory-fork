@@ -1837,6 +1837,28 @@ mod barycentric_tests {
         bitcode::census::DECLARED.with(|d| d.borrow().iter().any(|f| f.starts_with(name)))
     }
 
+    /// `v_cmp_lt_i64` runs on the operands' dwords (alexdeliu faccfbc7: AMD's
+    /// compiler orders 64-bit integers wrongly when operands share a dword),
+    /// so the translation needs no 64-bit integer operations, with a
+    /// negative literal operand too (sign-extended for a signed compare).
+    #[test]
+    fn a_64_bit_compare_needs_no_64_bit_integers() {
+        let [e0, e1] = exp_mrt0(2);
+        let words = [
+            0x7D42_00FF, // v_cmp_lt_i64 vcc, literal, v[0:1]
+            0xFFFF_FFFE, // the literal: -2
+            0x7E06_02F2, // v_mov_b32 v3, 1.0
+            0x0204_0680, // v_cndmask_b32 v2, 0, v3, vcc
+            e0,
+            e1,
+            0xBF81_0000,
+        ];
+        let shader = pixel(&words, PERSP_CENTER).unwrap();
+        let (features, _) = parts(&shader);
+        assert_eq!(features & 0x8000, 0, "Int64Ops required: {features:#x}");
+        validate(&shader);
+    }
+
     /// A pixel program's `v_readfirstlane_b32` gives a helper lane its own
     /// value (upstream 0601955): the host's wave reads leave helper lanes
     /// out, so a waterfall loop with only helper lanes left would otherwise
