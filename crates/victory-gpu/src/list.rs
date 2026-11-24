@@ -1212,6 +1212,9 @@ extern "system" fn clear_rtv(
         ) else {
             return;
         };
+        if !crate::host::can_render_to(texture) {
+            return;
+        }
         // SAFETY: the title passes four floats (null is tolerated).
         let Some(color) = (unsafe { color.as_ref() }) else {
             return;

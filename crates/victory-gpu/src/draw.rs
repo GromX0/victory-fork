@@ -647,6 +647,13 @@ impl State {
                 }
                 continue;
             };
+            if !crate::host::can_render_to(texture) {
+                once!(
+                    handle = format_args!("{h:#x}"),
+                    "render target whose host texture cannot be rendered to"
+                );
+                continue;
+            }
             self.targets.push(record.resource as usize);
             #[cfg(feature = "diagnostics")]
             crate::capture::note_target(record.resource);
