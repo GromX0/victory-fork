@@ -191,7 +191,8 @@ pub fn shader_opt() -> u32 {
 /// Everything a translation depends on besides the container: the
 /// translator's own source (hashed at build time), the value of every
 /// `VICTORY_*` switch it reads, the host facts the device hands it (widest
-/// wave, view heap limit) and the settings above. The shader cache keys on
+/// wave for compute, and for pixel and vertex programs; view heap limit)
+/// and the settings above. The shader cache keys on
 /// this instead of on the whole executable, so a rebuild that leaves the
 /// translator alone keeps its translations. Call it after the device is made.
 pub fn translation_fingerprint() -> Vec<u8> {
@@ -208,6 +209,10 @@ pub fn translation_fingerprint() -> Vec<u8> {
         out.push(0);
     }
     out.extend_from_slice(&lower::host_max_wave().to_le_bytes());
+    // Over 32, console wave32 pixel programs take each half of a host wave
+    // as a wave of their own (KLBF 1d333f05: the wave switches are part of
+    // the key).
+    out.extend_from_slice(&lower::host_pixel_wave().to_le_bytes());
     out.extend_from_slice(&shader::view_heap_limit().to_le_bytes());
     out.extend_from_slice(&loop_limit().to_le_bytes());
     out.push(group_sync());
