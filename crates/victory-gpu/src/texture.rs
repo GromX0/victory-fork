@@ -66,6 +66,9 @@ struct Last {
     asked: u64,
     /// The frame a partly mapped texture was last read in.
     partial: Option<u64>,
+    /// The frame its memory was last found changed by the hash alone, with
+    /// no write the guard saw (a write through another view of its pages).
+    unseen: Option<u64>,
 }
 
 // SAFETY: the staging mapping is written only at submission, under
@@ -709,16 +712,28 @@ impl Staging {
         // texture's address, so the textures take turns.
         // `VICTORY_TEXTURE_GUARD=0` hashes at every check, as before.
         static GUARD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        // Whether the guard saw no write since the texture was last read.
+        let mut blind = false;
         if *GUARD.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_GUARD").is_none_or(|v| v != "0"))
             && let Some((now, written)) = waited(1, || crate::watch::writes(start, start + size, true))
         {
             const HASH_EVERY: u64 = 8;
+            // A texture found changed where the guard saw no write is one
+            // the title writes through another view of its pages, and it
+            // is hashed at every check for as long as it keeps changing: a
+            // film plays through a ring of three such textures, one shown
+            // per frame, and with each looked at on its own eighth frame
+            // the picture went back and forth between moments of the film.
+            const UNSEEN_FOR: u64 = 64;
             let unwritten = last.asked != 0 && written.iter().all(|&(_, w)| w <= last.asked);
             last.asked = now;
-            let turn = crate::frame::current().wrapping_add((start >> 16) as u64).is_multiple_of(HASH_EVERY);
-            if unwritten && !turn {
+            let frame = crate::frame::current();
+            let turn = frame.wrapping_add((start >> 16) as u64).is_multiple_of(HASH_EVERY);
+            let hot = last.unseen.is_some_and(|at| frame < at + UNSEEN_FOR);
+            if unwritten && !turn && !hot {
                 return 0;
             }
+            blind = unwritten;
         }
         // From here on the texture's memory may be read in place. Held until
         // that read is done: the runtime changes what title memory shows
@@ -781,6 +796,9 @@ impl Staging {
                     return size;
                 }
                 last.hash = Some(hash);
+                if blind {
+                    last.unseen = Some(crate::frame::current());
+                }
                 self.detile(tiled);
                 #[cfg(feature = "diagnostics")]
                 crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
@@ -797,6 +815,9 @@ impl Staging {
             return size;
         }
         last.hash = Some(hash);
+        if blind {
+            last.unseen = Some(crate::frame::current());
+        }
         self.detile(tiled);
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
