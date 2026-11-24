@@ -6,6 +6,16 @@
 //! with "token on time-out" (starting its next frame at once) and is paced
 //! by a blocking wait for the flip before each present.
 //!
+//! A flip wait that comes after its tick has passed (the frame took longer
+//! than an interval) ends at once, and the clock starts again from then:
+//! the next flip is due a whole interval later. Waiting for the tick after
+//! would show every frame of 34 to 66 ms at 66.7 ms (15 fps at a 30 fps
+//! interval), as a console without variable refresh would; our presents
+//! are not tied to a display's refresh, so a late frame costs only its
+//! own lateness. Frames on time still flip on the tick, never sooner than
+//! an interval after the last flip. Origin and vblank waits still end on
+//! the next tick, of the clock as a late flip set it.
+//!
 //! shortcut: event offsets are ignored (every event is at the tick); tie
 //! the clock to presentation if a title paces by them.
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
@@ -20,6 +30,8 @@ use crate::object::{HRESULT, S_FALSE, S_OK, This};
 const TIMEOUT: HRESULT = S_FALSE;
 /// The frame-origin event: the one that starts frames and makes tokens.
 const ORIGIN: u32 = 0;
+/// The flip event: the title waits for it before each present.
+const FLIP: u32 = 2;
 /// Make the frame's token even if the wait times out (the title starts the
 /// frame early).
 const TOKEN_ON_TIMEOUT: u32 = 2;
@@ -94,18 +106,27 @@ fn last(kind: u32) -> &'static AtomicU64 {
 
 /// The next tick after now and after the last one a wait for `kind` ended
 /// on (an event happens once per tick: a wait woken a little early must not
-/// let the next one end on the same tick), and how long until it.
+/// let the next one end on the same tick), and how long until it. A flip
+/// whose tick has passed is late: it takes the tick just passed, at once,
+/// and the clock starts again from now.
 fn next_tick(kind: u32) -> (u64, Duration) {
     let mut clock = clock();
+    let now = Instant::now();
     let c = clock.get_or_insert_with(|| Clock {
-        start: Instant::now(),
+        start: now,
         interval: SIXTIETH,
         first: 0,
     });
-    let elapsed = c.start.elapsed().as_nanos();
+    let elapsed = now.saturating_duration_since(c.start).as_nanos();
     let interval = c.interval.as_nanos().max(1);
-    let tick =
-        (c.first + (elapsed / interval + 1) as u64).max(last(kind).load(Ordering::Relaxed) + 1);
+    // The last tick at or before now.
+    let passed = c.first + (elapsed / interval) as u64;
+    let due = last(kind).load(Ordering::Relaxed) + 1;
+    if kind == FLIP && due <= passed {
+        (c.start, c.first) = (now, passed);
+        return (passed, Duration::ZERO);
+    }
+    let tick = (passed + 1).max(due);
     let at = u128::from(tick - c.first) * interval;
     (
         tick,
@@ -116,7 +137,8 @@ fn next_tick(kind: u32) -> (u64, Duration) {
 /// Device method: blocks until the next tick (or the time-out); an origin
 /// wait then hands out the new frame's token. Other events keep the token
 /// the title passes. Ticks are absolute (start plus whole intervals), so
-/// lateness never accumulates.
+/// waking late from a wait never accumulates; only a late flip moves the
+/// clock (see [`next_tick`]).
 pub(crate) extern "system" fn wait(
     _: This,
     kind: u32,
@@ -225,7 +247,6 @@ mod tests {
         // The title's loop (the clock is global, so in the same test): an
         // origin poll that times out (and starts the frame), then a
         // blocking flip wait. Each flip takes its own tick.
-        const FLIP: u32 = 2;
         assert_eq!(set_interval(null, null, 5_000, 3, 0), S_OK);
         let mut token = 0;
         let flips: Vec<u64> = (0..4)
@@ -242,5 +263,26 @@ mod tests {
         // Even when a flip wait begins on the tick another just ended on.
         let (tick, _) = next_tick(FLIP);
         assert!(tick > flips[3]);
+
+        // A late frame flips at once, and the next one a whole interval
+        // after it, not on the old clock's next tick (which would come
+        // after 50 ms).
+        assert_eq!(set_interval(null, null, 100_000, 3, 0), S_OK);
+        let mut flip = || {
+            let started = Instant::now();
+            let hr = wait(null, FLIP, u32::MAX, std::ptr::null(), 0, &mut token);
+            assert_eq!(hr, S_OK);
+            (started.elapsed(), Instant::now(), LAST[2].load(Ordering::Relaxed))
+        };
+        let (_, on_time, before) = flip();
+        std::thread::sleep(Duration::from_millis(150));
+        let (late, flipped, tick) = flip();
+        assert!(late < Duration::from_millis(30), "a late flip waited {late:?}");
+        assert!(tick > before, "{tick} after {before}");
+        let (_, next, after) = flip();
+        let gap = next - flipped;
+        assert!(gap >= Duration::from_millis(95), "the next flip came {gap:?} later");
+        assert_eq!(after, tick + 1);
+        assert!(flipped - on_time >= Duration::from_millis(150));
     }
 }
