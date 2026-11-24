@@ -519,6 +519,7 @@ extern "system" fn execute(this: This, count: u32, lists: *const This) {
     }
     #[cfg(windows)]
     if let Some(host) = crate::host::host() {
+        crate::descriptor::resync_title_writes();
         // SAFETY: the title passes `count` lists.
         let lists = unsafe { std::slice::from_raw_parts(lists, count as usize) };
         if cuts() && !this.is_null() {
