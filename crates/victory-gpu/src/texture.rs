@@ -645,6 +645,9 @@ pub(crate) fn upload(list: &HostList, resource: This, texture: &ID3D12Resource) 
         // SAFETY: an open list; both locations name live resources.
         unsafe { list.list.CopyTextureRegion(&to, 0, 0, 0, &from, None) };
     }
+    // Its flight reads the staging buffer on the card: a later detile into
+    // it waits for that flight (`crate::host::staging_wait`).
+    list.note_staging_copy(staging.clone());
     // When the list is submitted, its copy takes what the staging buffer
     // holds by then: noted before the check below, which sets `dirty`
     // again if it detiles (the next list then uploads once more).
@@ -871,6 +874,10 @@ impl Staging {
 
     /// Detiles `tiled` (the texture's memory) into the staging buffer.
     fn detile(&self, tiled: &[u8]) {
+        // A flight still copying from the staging buffer on the card would
+        // read it half rewritten: that flight lands first (#141, only when
+        // the buffer is actually written again).
+        crate::host::staging_wait(self.in_flight());
         self.dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         #[cfg(feature = "diagnostics")]
         if tiled.iter().all(|&b| b == 0) {

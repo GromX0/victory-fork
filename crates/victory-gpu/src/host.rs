@@ -1646,6 +1646,10 @@ struct Deferred {
     refreshed: std::collections::HashSet<(usize, usize, usize)>,
     /// Textures whose contents the list brings up to date.
     textures: std::collections::HashSet<usize>,
+    /// Staging buffers the list's commands copy from (`crate::texture::upload`
+    /// recorded a copy): the flight of its submission reads them on the card,
+    /// so a later detile into them waits for it ([`staging_wait`]).
+    staging_copies: Vec<std::sync::Arc<crate::texture::Staging>>,
     /// Bottom-of-pipe writes, done once the list has run: address, what,
     /// bytes.
     writes: Vec<(usize, crate::queue::Written, usize)>,
@@ -2159,6 +2163,20 @@ fn staging_in_flight_at(runs: &[&HostList], finished: u64) -> bool {
 
 fn staging_in_flight(runs: &[&HostList]) -> bool {
     staging_in_flight_at(runs, FINISHED.load(Ordering::Acquire))
+}
+
+/// With [`relay_exact`] flights in the air: before a texture's staging
+/// buffer is detiled into (its title memory changed), the flight numbered
+/// `in_flight`, the last that copies from it on the card, lands. Nothing
+/// waits when the texture is only sampled, or when it changed and no
+/// flight in the air copies from it. Called from the submission's
+/// preparing (`Staging::detile`), which may hold the submission lock; the
+/// thread that lands flights never takes it.
+pub(crate) fn staging_wait(in_flight: u64) {
+    if in_flight == 0 || !late() || !relay_exact() || FINISHED.load(Ordering::Acquire) >= in_flight {
+        return;
+    }
+    relay_wait(WHY_READ, |_| FINISHED.load(Ordering::Acquire) >= in_flight);
 }
 
 /// With flights in the air, after the submission's write-watch asking:
@@ -2696,6 +2714,53 @@ mod late_tests {
         let release = crate::object::slot::<extern "system" fn(crate::object::This) -> u32>(
             resource, 0x10,
         );
+        assert_eq!(release(resource), 0);
+    }
+
+    /// Only a list that records a copy from a texture's staging buffer notes
+    /// it for its flight (`staging_copies`, marked in flight at submission);
+    /// a later list that only samples the unchanged texture notes nothing,
+    /// so flights that sample the same textures do not wait for each other.
+    #[test]
+    fn only_lists_that_copy_from_a_staging_buffer_note_it() {
+        let Some(host) = super::host() else { return };
+        let heap_words: [u32; 5] = [1, 0, 0, 1, 1];
+        let desc_words: [u32; 14] = [3, 0, 0, 0, 16, 0, 4, 65537, 28, 1, 0, 256, 0, 0];
+        // SAFETY: plain repr(C) structs matching D3D12 layouts.
+        let (heap, desc) = unsafe {
+            (
+                std::mem::transmute::<[u32; 5], crate::resource::HeapProperties>(heap_words),
+                std::mem::transmute::<[u32; 14], crate::resource::ResourceDesc>(desc_words),
+            )
+        };
+        let iid = crate::object::guid(0x696442be, 0xa72e, 0x4059, [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad]);
+        let mut resource = std::ptr::null();
+        assert_eq!(
+            crate::resource::create_committed(std::ptr::null(), &heap, 0, &desc, 0, std::ptr::null(), &iid, &mut resource),
+            crate::object::S_OK
+        );
+        let tex = crate::resource::host_resource(resource).expect("host texture");
+        let first = host.new_list().expect("host list");
+        crate::texture::upload(&first, resource, tex);
+        assert_eq!(first.deferred().staging_copies.len(), 1, "the first use records the copy");
+        // What its submission does after the copy: uploaded, not dirty.
+        for step in &first.deferred().copies {
+            if let super::Step::Host(work) = step {
+                work();
+            }
+        }
+        let second = host.new_list().expect("host list");
+        crate::texture::upload(&second, resource, tex);
+        assert!(second.deferred().staging_copies.is_empty(), "a list that only samples copies nothing");
+        assert!(
+            second.deferred().copies.iter().any(|s| matches!(s, super::Step::Texture(_))),
+            "its check at submission stays"
+        );
+        first.close();
+        second.close();
+        drop(first);
+        drop(second);
+        let release = crate::object::slot::<extern "system" fn(crate::object::This) -> u32>(resource, 0x10);
         assert_eq!(release(resource), 0);
     }
 }
@@ -4061,12 +4126,12 @@ impl Host {
                 self.settle(&mut submitted, why);
             }
         }
-        if late && staging_in_flight(runs) {
-            if relay_exact() {
-                relay_wait(WHY_READ, |_| !staging_in_flight(runs));
-            } else {
-                self.settle(&mut submitted, WHY_READ);
-            }
+        // With the relay exact the wait is at the detile itself, only when a
+        // staging buffer a flight still copies from is written again
+        // ([`staging_wait`]); without it, flights are settled here, from
+        // the submitting thread, before the detiles of this submission.
+        if late && !relay_exact() && staging_in_flight(runs) {
+            self.settle(&mut submitted, WHY_READ);
         }
         let behind = late && flying();
         // Before this submission counts as started: what the sweep lets go
@@ -4172,11 +4237,14 @@ impl Host {
         }
         let prepared = std::time::Instant::now();
         if late {
+            // Only the staging buffers this flight copies from on the card:
+            // a list that merely samples a texture (its check at submission
+            // finding it unchanged) reads no staging buffer, and marking
+            // those made every later flight that samples the same textures
+            // wait for this one.
             for list in runs {
-                for step in &list.deferred().copies {
-                    if let Step::Texture(staging) = step {
-                        staging.mark_in_flight(this_submission);
-                    }
+                for staging in &list.deferred().staging_copies {
+                    staging.mark_in_flight(this_submission);
                 }
             }
             *submitted += 1;
@@ -5266,6 +5334,12 @@ impl HostList {
     /// submitted, keeping it alive until the list is reset.
     pub(crate) fn defer_texture(&self, staging: std::sync::Arc<crate::texture::Staging>) {
         self.deferred().copies.push(Step::Texture(staging));
+    }
+
+    /// The list's commands copy from `staging` on the card: its flight is
+    /// noted in it at submission ([`staging_wait`]).
+    pub(crate) fn note_staging_copy(&self, staging: std::sync::Arc<crate::texture::Staging>) {
+        self.deferred().staging_copies.push(staging);
     }
 
     /// Runs the list's submission-time steps; refreshes go into `batch`
