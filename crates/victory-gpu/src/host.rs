@@ -2638,6 +2638,45 @@ static LATE_STATS: [std::sync::atomic::AtomicU64; 18] = [const { std::sync::atom
 /// card, by why they settled (the `WHY_` places).
 static LATE_WAITED: [std::sync::atomic::AtomicU64; 11] = [const { std::sync::atomic::AtomicU64::new(0) }; 11];
 
+/// `VICTORY_HEAP_SYNC_CARD=1`: before descriptor records the title copied
+/// into a heap are made again (`crate::descriptor::sync_heaps`) with
+/// flights in the air, the submitting thread waits until the card has run
+/// those flights, not until they have landed too. Off by default.
+///
+/// That point settled every flight, landing included: its copy-back, its
+/// read-backs, its bottom-of-pipe writes and fences. All it guards against
+/// is a slot changing under a flight that still reads it on the card (a
+/// GPU page fault and a lost device, Slaktarn700/xs-proton a7773fff on an
+/// RX 9070 XT): making a slot again writes host descriptors, the stride
+/// table and the views' resources, all of which only the card reads, and
+/// reads nothing landing writes. Objects the making lets go still wait for
+/// the flights' landing ([`retire`]). What follows the point in the
+/// submission already copes with flights in the air (it does whenever no
+/// record changed): reading title memory they may write settles them
+/// there, for that reason.
+///
+/// It was the most frequent settle of the cell's steady state (run
+/// 20261125-130040: of 8.1 settles a frame, 6.1 "synchronous", 28.1 ms of
+/// the 38.8 ms a frame the submitting thread waited for the card; the
+/// present is sent ahead and synchronous submissions do not occur there, so
+/// all but the sweep's one every 1.5 s were these). Without the landing the
+/// wait ends when the card does; the relay thread lands the flights while
+/// the next submission is prepared.
+pub(crate) fn heap_sync_card() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| switch_on(std::env::var("VICTORY_HEAP_SYNC_CARD").ok().as_deref()))
+}
+
+/// Whether a switch's value turns it on: `1` (spaces aside).
+fn switch_on(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim() == "1")
+}
+
+/// Since the last frame-rate line, at the point of [`heap_sync_card`]:
+/// settles of every flight in the air and their microseconds; waits for
+/// the card alone and their microseconds.
+static HEAP_SETTLES: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
 /// Whether `[from, to)` touches one of `ranges` (in order, joined).
 fn touches(ranges: &[(usize, usize)], from: usize, to: usize) -> bool {
     if from >= to {
@@ -3561,6 +3600,19 @@ fn late_line(frames: f64) {
             w[WHY_MOST],
             w[WHY_WRITES],
             w[WHY_FENCE],
+        );
+    }
+    {
+        let h: Vec<f64> = HEAP_SETTLES.iter().map(|h| h.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+        tracing::info!(
+            "for slots made again from records the title copied into a heap, per frame: {:.1} settles of every flight in \
+             the air, {:.1} ms (counted above as synchronous); {:.1} waits for the card alone, {:.1} ms \
+             (VICTORY_HEAP_SYNC_CARD=1: {})",
+            h[0],
+            h[1] / 1000.0,
+            h[2],
+            h[3] / 1000.0,
+            if heap_sync_card() { "on" } else { "off" },
         );
     }
     if relay() {
@@ -5613,6 +5665,50 @@ impl Host {
         working(was_working);
     }
 
+    /// Before slots of a heap are made again from records the title copied
+    /// into it, with flights in the air (`crate::descriptor::sync_heaps`):
+    /// none of them may still read those slots on the card. Every flight is
+    /// settled, or with [`heap_sync_card`] the card's having run them is
+    /// waited for. `submitted` is the submission lock's value.
+    fn settle_for_heaps(&self, submitted: &mut u64) {
+        let began = std::time::Instant::now();
+        let card_only = heap_sync_card() && self.wait_for_card(*submitted);
+        if !card_only {
+            self.settle(submitted, WHY_SYNC);
+        }
+        let at = if card_only { 2 } else { 0 };
+        HEAP_SETTLES[at].fetch_add(1, Ordering::Relaxed);
+        HEAP_SETTLES[at + 1].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
+    }
+
+    /// Waits until the card has run every submission sent so far
+    /// (`submitted`, the submission lock's value: the last value signalled
+    /// on the host's fence), without settling them: their landing goes on
+    /// behind, on the thread that lands flights or at the next settle.
+    /// Counted as waiting for the card on the frame line. False if the
+    /// fence cannot be waited for (nothing was waited for then).
+    fn wait_for_card(&self, submitted: u64) -> bool {
+        // SAFETY: the host's fence and event, used under the submission
+        // lock, which the caller holds.
+        unsafe {
+            if self.fence.GetCompletedValue() >= submitted {
+                return true;
+            }
+            if let Err(e) = self.fence.SetEventOnCompletion(submitted, self.event) {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| tracing::warn!(error = %e, "the card's progress cannot be waited for: flights are settled instead"));
+                return false;
+            }
+            let was_working = working(false);
+            let waiting = std::time::Instant::now();
+            WaitForSingleObject(self.event, INFINITE);
+            stood(waiting);
+            working(was_working);
+            SUBMISSION_US[1].fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
+        true
+    }
+
     /// [`Host::execute`], or with `late` the first half of
     /// [`Host::execute_late`]: the lists are prepared and sent, and what is
     /// to be done once they have run comes back with the submission lock
@@ -5657,7 +5753,7 @@ impl Host {
         // only when some slot does change.
         crate::descriptor::sync_heaps(|| {
             if late && flying() {
-                self.settle(&mut submitted, WHY_SYNC);
+                self.settle_for_heaps(&mut submitted);
             }
         });
         let behind = late && flying();
@@ -9420,5 +9516,91 @@ mod buffer_state_tests {
         assert_eq!(s.update(1, 'a', BUFFER_READ), Some(BUFFER_WRITE));
         let lasts: Vec<_> = s.lasts().map(|(r, l)| (*r, l)).collect();
         assert_eq!(lasts, [('a', BUFFER_READ)]);
+    }
+}
+
+#[cfg(test)]
+mod heap_sync_tests {
+    use super::*;
+
+    /// `VICTORY_HEAP_SYNC_CARD` is on only when it says `1`.
+    #[test]
+    fn the_switch_is_on_only_when_set_to_1() {
+        for off in [None, Some(""), Some("0"), Some("2"), Some("yes"), Some("on")] {
+            assert!(!switch_on(off), "{off:?}");
+        }
+        assert!(switch_on(Some("1")));
+        assert!(switch_on(Some(" 1 ")));
+    }
+
+    /// A submission sent ahead, then the wait for the card alone: when it
+    /// returns the card has run the submission (which was never put in the
+    /// line of flights, so no settle could have waited for it).
+    #[test]
+    fn the_wait_for_the_card_alone_ends_when_the_card_has_run_what_was_sent() {
+        let Some(host) = host() else {
+            return; // no host GPU here
+        };
+        const LEN: u64 = 32 << 20;
+        let buffer = |state| {
+            let heap = D3D12_HEAP_PROPERTIES {
+                Type: D3D12_HEAP_TYPE_DEFAULT,
+                ..Default::default()
+            };
+            let desc = D3D12_RESOURCE_DESC {
+                Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                Width: LEN,
+                Height: 1,
+                DepthOrArraySize: 1,
+                MipLevels: 1,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                ..Default::default()
+            };
+            let mut made: Option<ID3D12Resource> = None;
+            // SAFETY: valid heap and buffer descriptions.
+            unsafe {
+                host.device
+                    .CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, None, &mut made)
+                    .expect("a buffer");
+            }
+            made.expect("a buffer")
+        };
+        let (from, to) = (buffer(D3D12_RESOURCE_STATE_COMMON), buffer(D3D12_RESOURCE_STATE_COMMON));
+        let list = host.new_list().expect("a host list");
+        // Work enough that the card is likely still at it when the wait
+        // begins.
+        for _ in 0..4 {
+            // SAFETY: an open list; two live buffers of `LEN` bytes, which
+            // copies promote from the common state.
+            unsafe { list.list.CopyBufferRegion(&to, 0, &from, 0, LEN) };
+        }
+        list.close();
+        let (submitted, sent) = host.submit(&[&list], true).expect("sent ahead");
+        assert!(host.wait_for_card(*submitted), "the fence can be waited for");
+        // SAFETY: a plain query on our fence.
+        assert!(unsafe { host.fence.GetCompletedValue() } >= *submitted, "the card has run it");
+        drop(sent);
+        drop(submitted);
+        // Waiting again for what has run returns at once.
+        let submitted = host.submitted.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(host.wait_for_card(*submitted));
+    }
+
+    /// Without the switch the point settles as before (here, with nothing in
+    /// the air, at once), and is counted as a settle of every flight.
+    #[test]
+    fn the_heap_point_settles_everything_without_the_switch() {
+        let Some(host) = host() else {
+            return; // no host GPU here
+        };
+        if heap_sync_card() {
+            return; // the switch is set for this process
+        }
+        let before = HEAP_SETTLES[0].load(Ordering::Relaxed);
+        let mut submitted = host.submitted.lock().unwrap_or_else(|e| e.into_inner());
+        host.settle_for_heaps(&mut submitted);
+        drop(submitted);
+        assert!(HEAP_SETTLES[0].load(Ordering::Relaxed) > before);
     }
 }
