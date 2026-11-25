@@ -333,6 +333,18 @@ default profile, first launches (translator changed: cache cold):
 Seen in the Series X run (owner's screen): characters lit and textured
 indoors, but glowing eyes, an over-exposed image and a magenta patch.
 
+| `20261125-110017-fx-switches` | Series X, `VICTORY_ASYNC_SUBMIT=1 VICTORY_QUEUE2=1 VICTORY_TEXTURE_NO_WAIT=1 VICTORY_INDIRECT_WINDOW=1` (fxceless's frame-rate switches) | 420 s, no error, no device loss | 127 s | **7.4 fps, 135 ms/frame** (peaks 8.0): preparing 64, GPU **50** (76 without), copying back **30** (79 without); ~4,470 draws (a later scene: the save moves on) |
+
+Seen in that run (a bar, later in the story): a character's face drawn as a
+dark stretched slab ("web triangles", also in KLBF's open list), magenta on
+faces and a bottle, dark areas black (no ray-traced light: the structure
+builder is off unless `VICTORY_BVH_BUILDER=1`). Owner's screenshot of the
+cell, same build: lit through the window, purple papers, magenta blocks.
+
+Ray tracing, state of the forks: Xeltax/VIcky `rt` (VICKY-RT.md) runs the
+builder on an RTX 4080 at 502-583 ms a frame against 361 off, and the dark
+corner of the cell is not lit yet. Research, not a switch to turn on.
+
 ## Next
 
 1. Series S device loss: try `VICTORY_FILL_WAIT=1` (fxceless's fills that
