@@ -171,6 +171,15 @@ fn seen_pages() -> &'static std::sync::Mutex<std::collections::HashMap<usize, Ve
     SEEN.get_or_init(Default::default)
 }
 
+/// Forgets the pages of `[start, end)` [`seen_pages`] holds: a heap made or let
+/// go there. A new heap's slots are made from its records even where they are
+/// the bytes an earlier heap at the same address held.
+#[cfg(windows)]
+fn forget_seen(start: u64, end: u64) {
+    let mut seen = seen_pages().lock().unwrap_or_else(|e| e.into_inner());
+    seen.retain(|&page, _| (page as u64) < start || (page as u64) >= end);
+}
+
 /// Mirrors records copied directly into placed shader-visible heaps. Calls
 /// to `Create*View` are already mirrored by [`mirror`]; raw CPU copies leave
 /// only write-watch pages to reveal which slots changed.
@@ -214,6 +223,26 @@ pub(crate) fn sync_heaps(settle: impl FnOnce()) {
         // Capped host heaps have no counterparts for the title slots reserved
         // for per-draw tables; raw writes there must not be mirrored.
         let mirrored_count = heap.desc.count.min(host.count());
+        // Slots made through the API since (or unmade): the pages they are on
+        // are read in full again, even if their bytes are the ones last seen
+        // (from justr4mzi b5ea5819).
+        let forgotten = host.take_forgotten_copied();
+        if !forgotten.is_empty() {
+            let mut seen = seen_pages().lock().unwrap_or_else(|e| e.into_inner());
+            if !seen.is_empty() {
+                let step_len = step as usize;
+                for index in forgotten {
+                    let addr = start as usize + index as usize * step_len;
+                    let first_page = (addr & !(crate::watch::PAGE - 1)).max(start as usize);
+                    seen.remove(&first_page);
+                    let last_page =
+                        ((addr + step_len.saturating_sub(1)) & !(crate::watch::PAGE - 1)).max(start as usize);
+                    if last_page != first_page {
+                        seen.remove(&last_page);
+                    }
+                }
+            }
+        }
         for (range_from, range_end) in written.take(start as usize, end as usize) {
             let mut page = range_from & !(crate::watch::PAGE - 1);
             while page < range_end {
@@ -361,6 +390,9 @@ impl Drop for Heap {
     fn drop(&mut self) {
         let at = std::ptr::from_ref::<Heap>(self) as usize;
         let mut heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+        for &(start, end, _) in heaps.iter().filter(|&&(_, _, h)| h == at) {
+            forget_seen(start, end);
+        }
         heaps.retain(|&(_, _, h)| h != at);
     }
 }
@@ -1166,6 +1198,7 @@ pub(crate) extern "system" fn create_heap(
     #[cfg(windows)]
     if visible {
         let at = std::ptr::from_ref::<Heap>(&heap) as usize;
+        forget_seen(start, start + size);
         let mut heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
         heaps.push((start, start + size, at));
     }
@@ -1448,6 +1481,97 @@ mod tests {
             let handle = heap(h).handle(5).unwrap();
             assert!(host.mirror(5, handle, true).is_some());
             assert!(host.made(5));
+        }
+        slot::<extern "system" fn(This) -> u32>(h, 0x10)(h);
+        // SAFETY: this allocation belongs to the test.
+        unsafe { VirtualFree(memory, 0, MEM_RELEASE) };
+    }
+
+    /// Verifies `HostHeap::copied` cache invalidation across API writes,
+    /// `texture_slot_gone()` unmakes, raw zeroing of API-made slots, and that
+    /// `mirror_copied` decodes from the kernel-read `record` slice without
+    /// dereferencing raw `handle`.
+    #[cfg(windows)]
+    #[test]
+    fn copied_fingerprint_invalidates_across_api_writes_unmake_and_zeroing() {
+        use windows_sys::Win32::System::Memory::{
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAlloc, VirtualFree,
+        };
+        const MEM_WRITE_WATCH: u32 = 0x20_0000;
+        let memory = unsafe {
+            VirtualAlloc(
+                std::ptr::null(),
+                crate::watch::PAGE,
+                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                PAGE_READWRITE,
+            )
+        };
+        assert!(!memory.is_null());
+        let desc = HeapDesc {
+            kind: SAMPLERS,
+            count: 64,
+            flags: SHADER_VISIBLE,
+            nodes: 1,
+        };
+        let placement = Placement {
+            address: memory as u64,
+            size: 64 * 16,
+        };
+        let mut h: This = std::ptr::null();
+        assert_eq!(create(desc, placement, &mut h), S_OK);
+        if let Some(host) = heap(h).host() {
+            let mut scratch_a = [0u8; 16];
+            let mut scratch_b = [0u8; 16];
+            let sampler_a = [21, 3, 3, 3, 0, 1, 0, 0, 0, 0, 0, 0x7f7f_ffff, 0];
+            let sampler_b = [0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0x7f7f_ffff, 0];
+            create_sampler(std::ptr::null(), &sampler_a, scratch_a.as_mut_ptr() as u64);
+            create_sampler(std::ptr::null(), &sampler_b, scratch_b.as_mut_ptr() as u64);
+
+            // Scenario A: Raw A -> API B -> Raw A must update back to A (not stay stuck on B).
+            let slot5 = memory as u64 + 5 * 16;
+            unsafe { std::ptr::copy_nonoverlapping(scratch_a.as_ptr(), slot5 as *mut u8, 16) };
+            sync_heaps(|| {});
+            let key_a = host.made_key(5);
+            assert_ne!(key_a, 0);
+
+            create_sampler(std::ptr::null(), &sampler_b, slot5);
+            let key_b = host.made_key(5);
+            assert_ne!(key_b, 0);
+            assert_ne!(key_b, key_a);
+
+            unsafe { std::ptr::copy_nonoverlapping(scratch_a.as_ptr(), slot5 as *mut u8, 16) };
+            sync_heaps(|| {});
+            assert_eq!(
+                host.made_key(5),
+                key_a,
+                "raw-copying A back over API-written B must not be skipped by stale copied cache"
+            );
+
+            // Scenario B: API A -> raw zeroing must clear host slot (not skip via `*last == 0 && all_zero`).
+            let slot6 = memory as u64 + 6 * 16;
+            create_sampler(std::ptr::null(), &sampler_a, slot6);
+            assert_eq!(host.made_key(6), key_a);
+            unsafe { std::ptr::write_bytes(slot6 as *mut u8, 0, 16) };
+            sync_heaps(|| {});
+            assert!(
+                !host.made(6),
+                "raw-zeroing an API-created slot must clear its host descriptor"
+            );
+
+            // Scenario C: Raw A -> unmake (texture_slot_gone) -> Raw A must re-make A.
+            let slot7 = memory as u64 + 7 * 16;
+            unsafe { std::ptr::copy_nonoverlapping(scratch_a.as_ptr(), slot7 as *mut u8, 16) };
+            sync_heaps(|| {});
+            assert_eq!(host.made_key(7), key_a);
+            assert!(host.texture_slot_gone(7));
+            assert!(!host.made(7));
+            unsafe { std::ptr::copy_nonoverlapping(scratch_a.as_ptr(), slot7 as *mut u8, 16) };
+            sync_heaps(|| {});
+            assert_eq!(
+                host.made_key(7),
+                key_a,
+                "raw-copying A back after unmake must not be skipped by stale copied cache"
+            );
         }
         slot::<extern "system" fn(This) -> u32>(h, 0x10)(h);
         // SAFETY: this allocation belongs to the test.
