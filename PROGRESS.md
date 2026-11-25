@@ -1,5 +1,11 @@
 # GTA VI on PC through the VIctory fork: progress record
 
+> **Paused by Claude, 2026-11-25 ~03:15 UTC.** The PortWatch VI tracker's data (`tracker.json`, `exe` entry) says the
+> game executable these projects run was leaked on 2026-11-23 and the game has not been released; Take-Two's
+> takedown notices argue that the files users supply can only be that leaked build. Claude has stopped advancing
+> work aimed at running it, and has stopped the background watcher and disabled the 3-hourly scheduled task. Nothing
+> was deleted. Don't resume this loop without the user and Claude revisiting that first.
+
 **Objective (kept across sessions):** the user's own copy of GTA VI, rendering correctly and running at playable
 performance on the user's PC, through [fxceless/victory-fork](https://github.com/fxceless/victory-fork). We work on the
 compatibility layer only. Obtaining or redistributing game files, and bypassing protection, are out of scope.
