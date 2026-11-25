@@ -9,7 +9,10 @@
 
     frame-<n>.png                                  the presented frame
     frame-<n>-<i>-<resource>-<w>x<h>-f<format>.png every target of frame n,
-                                                   i in first-use order
+                                                   i in first-use order (an
+                                                   R32_UINT one also as
+                                                   ...-f42as67.png: the
+                                                   R9G9B9E5 light it packs)
     frame-<n>-ops.txt                              the frame's draws,
                                                    dispatches and copies
     frame-<n>-values.txt                           per target: largest value
@@ -187,16 +190,18 @@ function Read-Values([string]$Path) {
 }
 
 function Invoke-Frame([string]$Dir, [long]$N) {
-    $pattern = '^frame-' + $N + '-(\d+)-(0x[0-9a-fA-F]+)-(\d+)x(\d+)-f(\d+)\.png$'
+    # (`-f42as67`: an R32_UINT target shown decoded as R9G9B9E5, the packed light it holds)
+    $pattern = '^frame-' + $N + '-(\d+)-(0x[0-9a-fA-F]+)-(\d+)x(\d+)-f(\d+)(?:as(\d+))?\.png$'
     $targets = Get-ChildItem -LiteralPath $Dir -Filter "frame-$N-*.png" |
         Where-Object { $_.Name -match $pattern } |
         ForEach-Object {
             [void]($_.Name -match $pattern)
+            $shown = if ($matches[6]) { [int]$matches[6] } else { [int]$matches[5] }
             [pscustomobject]@{
                 Index = [int]$matches[1]; Resource = $matches[2].ToLower(); W = [int]$matches[3]; H = [int]$matches[4]
-                Format = [int]$matches[5]; Path = $_.FullName; Name = $_.BaseName
+                Format = [int]$matches[5]; Shown = $shown; Path = $_.FullName; Name = $_.BaseName
             }
-        } | Sort-Object Index
+        } | Sort-Object Index, Shown
     if (-not $targets) { Write-Host "frame ${N}: no dumped targets"; return $null }
     $refPath = Join-Path $Dir "frame-$N.png"
     $hasRef = (-not $NoReference) -and (Test-Path -LiteralPath $refPath)
@@ -232,14 +237,14 @@ function Invoke-Frame([string]$Dir, [long]$N) {
         if ($v -and $v.GreenBad -and -not $firstGreen) { $firstGreen = $t }
         $screenLike = ([math]::Abs($t.W / [double]$t.H - $aspect) -le 0.03 * $aspect) -and ($t.W * 4 -ge $screenW)
         if (-not $AllSizes -and -not $screenLike) { continue }
-        $c = Read-Cells $t.Path ($CubeFormats -contains $t.Format) $Grid $gy
+        $c = Read-Cells $t.Path ($CubeFormats -contains $t.Shown) $Grid $gy
         $counted = New-Object 'System.Collections.Generic.HashSet[int]' -ArgumentList (, [int[]]@($c.Cells))
         if ($ref) { $counted.IntersectWith($ref.Cells) }
         $new = New-Object 'System.Collections.Generic.HashSet[int]' -ArgumentList (, [int[]]@($counted))
         $new.ExceptWith($seen)
         $seen.UnionWith($counted)
         $row = [pscustomobject]@{
-            '#' = $t.Index; Resource = $t.Resource; Size = "$($t.W)x$($t.H)"; Fmt = $t.Format
+            '#' = $t.Index; Resource = $t.Resource; Size = "$($t.W)x$($t.H)"; Fmt = $($t.Name -replace ".*-f", "")
             'Purple%' = $c.Percent; Cells = $counted.Count; New = $new.Count
             'NaN r/g/b' = $(if ($v) { $v.Nan } else { '' }); 'Inf r/g/b' = $(if ($v) { $v.Inf } else { '' })
             'Neg r/g/b' = $(if ($v) { $v.Negative } else { '' })
@@ -274,7 +279,8 @@ function New-SelfTestFolder {
         @('frame-7-01-0x1b00-640x360-f10.png', (, ($spot + @(250, 250, 250)))),           # the spot lit, white
         @('frame-7-02-0x1c00-640x360-f10.png', (, ($spot + @(250, 90, 245)))),            # the spot purple: the answer
         @('frame-7-03-0x1d00-640x360-f87.png', (, ($spot + @(240, 70, 230)))),            # still purple later
-        @('frame-7-04-0x1e00-64x64-f10.png', (, @(0.0, 0.0, 1.0, 1.0, 255, 0, 255)))        # a small table: not counted
+        @('frame-7-04-0x1e00-64x64-f10.png', (, @(0.0, 0.0, 1.0, 1.0, 255, 0, 255))),       # a small table: not counted
+        @('frame-7-05-0x1f00-640x360-f42as67.png', (, ($spot + @(235, 60, 225))))           # packed light, decoded: later
     )
     foreach ($p in $pictures) {
         $bmp = New-Object System.Drawing.Bitmap $w, $h

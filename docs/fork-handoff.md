@@ -501,10 +501,16 @@ reference frame of that shot is available.
    list would not close and the run would stop. Such copies now go through a
    buffer (`list::copies_through_buffer`). The NaN guard on image stores takes
    every NaN of a float operation's result; other values (packed light) keep
-   the old rule. Next: `VICTORY_SHADER_SAVE` for `34fb51b8a0312e82` to read how
-   it packs R9G9B9E5 (an exponent taken from an f16 conversion would lose the
-   largest channel near each power of two with the host's rounding toward zero:
-   `VICTORY_F16_NEAREST=1` is the A/B).
+   the old rule. `34fb51b8a0312e82` (saved with `VICTORY_SHADER_SAVE`) packs
+   R9G9B9E5 without any f16 conversion: channels clamped to [0, 65408], the
+   largest rounded to nine bits by an integer add of 0x07804000, each channel's
+   bits the low bits of an f32 sum with that power of two. Its translation gives
+   the console's words bit for bit on the card at every power of two and tie,
+   and the card stores such words to R32_UINT as they are, NaN and denormal
+   patterns included (`valu_tests`): the packer is not where the rainbow
+   speckle comes from. Dumps now show R32_UINT targets also as R9G9B9E5
+   (`-f42as67`), so `purple-pass.ps1` can say whether the packed light is
+   already speckled (then the lighting pass's inputs) or not (then a reader).
 2. Frame rate: the card is ~55% busy; the CPU side (copies 40-55 ms,
    preparing 70-90 ms a frame) is the limit.
 3. Series S device loss: try `VICTORY_FILL_WAIT=1` (fxceless's fills that
