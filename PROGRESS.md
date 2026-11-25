@@ -301,7 +301,7 @@ Findings:
 
 ## Next steps
 
-1. **User at the PC:** the paths, then the baseline script's `summary.txt` (default switches), and screenshots only
+1. **User at the PC:** connect Remote Control to an empty folder (e.g. `C:\dev`); we run `tools/setup-pc.ps1 -Root C:\dev -GameDir <game folder>` (not yet run anywhere), then the paths, then the baseline script's `summary.txt` (default switches), and screenshots only
    if you choose.
 2. Us: reproduce, or contradict, the author's L2–L5 claims on your machine and fill in the evidence table.
 3. Us: pick the largest measured problem. For frame time that means "preparing" versus "on the GPU" and which part of
