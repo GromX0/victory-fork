@@ -477,6 +477,36 @@ and buildings plausible; characters drawn as crude low-detail shapes
 flower beds as rainbow speckle (the magenta vegetation defect). No Xbox
 reference frame of that shot is available.
 
+### 2026-11-25 evening: first full-length runs (page file 32-64 GB on C:)
+
+Build 021227d3 (int/harvest-test), Series X, cell and opening cutscene,
+warm pipeline library, scripted Enter, 420 s each, nothing else running.
+"Steady world" is the frame lines with 3,000+ draws after the first 12.
+
+| Run | Switches | Ran | Median | p90 | Prep / GPU wait / copy back |
+| --- | --- | --- | --- | --- | --- |
+| m-base | none | 436 s, no device loss | 133.4 ms (7.5 fps) | 136.6 | 64.5 / 44.0 / 31.2 |
+| m-heapsync | `VICTORY_HEAP_SYNC_CARD=1` | 436 s | 128.4 ms (7.8 fps) | 131.8 | 62.0 / 46.1 / 31.7 |
+| m-stale | `VICTORY_STALE_OVERLAP=1` | 436 s | 133.3 ms | 136.8 | no gain: narrow waits 13.3-13.6 ms each |
+| m-rt | builder + guard + trace + check | 83 s | - | - | title read of -1 at +0x55ceb22 |
+
+- Device loss: none in four runs of 7 min (it came at 45-110 s before
+  01f194bf, the null slot for buffers picked at a texture's slot).
+- HEAP_SYNC_CARD: settles 8.5 → 3.8 a frame (49.8 → 25.3 ms) but 5-6
+  card-only waits of 18-20 ms in their place; net ~5 ms. Kept, off by
+  default until more runs.
+- STALE_OVERLAP: rejected (the declaring flights are at the back).
+- Where the frame goes now: preparing 63 ms, of it copies 38 ms for
+  ~180 MB (116 MB sent up in 317 ranges, 16,782 pieces compared on the
+  card, 1,210 fetched = 78.6 MB); copy back 31 ms for 63 MB.
+- Capture (diagnostics, -Targets, frames 1678-1756): characters and faces
+  render with detail (the crude shapes were streaming); eyes glow
+  white-violet with dark rings (frame 1721); purple first appears in a
+  2560x1440 RGBA16F target written by the foliage's indirect draws
+  (vertex 72c739b61097456d / 25ebc92075b62822 / 1d7b30217b395cd8 with
+  many pixel shaders), not in lighting or post. The light packer
+  34fb51b8a0312e82 matches the console bit for bit (card tests).
+
 ## Next
 
 1. Purple in the brightest colours: captures of a frame with a ceiling light
