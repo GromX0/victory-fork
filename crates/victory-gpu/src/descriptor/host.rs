@@ -1591,6 +1591,25 @@ impl HostHeap {
         }
     }
 
+    /// Whether [`mirror`](Self::mirror) outside a draw could change host
+    /// slot `index` from the record at `handle`: the record names another
+    /// view than the slot was made from, or the slot holds a view and the
+    /// record names none, or its view's resource was released since.
+    /// Conservative: yes when unsure.
+    pub(crate) fn would_change(&self, index: u32, handle: u64) -> bool {
+        if index >= self.count {
+            return false;
+        }
+        // SAFETY: the handle is a descriptor slot in title memory.
+        let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        let made = self.made.lock().unwrap_or_else(|e| e.into_inner())[index as usize];
+        if tag != VIEW_TAG {
+            return made != 0;
+        }
+        let key = u64::from(generation) << 32 | u64::from(i);
+        made != key || view_at(i, generation).is_none()
+    }
+
     /// Makes host slot `index` from the record the title has at `handle`
     /// if it changed since, and returns the view recorded there. Buffer
     /// views are made only for draws (`for_draw`), which also copy their

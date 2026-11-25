@@ -172,6 +172,12 @@ fn mirror(handle: u64) {
 #[cfg(windows)]
 pub(crate) fn resync_title_writes() {
     use std::sync::atomic::Ordering::Relaxed;
+    // Slots to make again: (heap, index, record). Looked for first and
+    // made after: with submissions sent ahead (`crate::host::late`) a slot
+    // must not change under a submission still reading it on the card (a
+    // GPU page fault, SQC data, under Proton), so those are settled first,
+    // and only when some slot does change.
+    let mut todo: Vec<(usize, u32, u64)> = Vec::new();
     // Held throughout: registered heaps stay alive while it is.
     let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
     for &(start, end, at) in heaps.iter() {
@@ -195,10 +201,28 @@ pub(crate) fn resync_title_writes() {
             let to = ((p as u64 + 1) * page).min(end);
             for i in (from - start) / step..(to - start).div_ceil(step) {
                 let i = i as u32;
-                if i < heap.desc.count {
-                    host.mirror(i, start + u64::from(i) * step, false);
+                let handle = start + u64::from(i) * step;
+                if i < heap.desc.count && host.would_change(i, handle) {
+                    todo.push((at, i, handle));
                 }
             }
+        }
+    }
+    drop(heaps);
+    if todo.is_empty() {
+        return;
+    }
+    crate::host::settle_for_present();
+    let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+    for (at, i, handle) in todo {
+        // A heap let go in between is skipped (its slots go with it).
+        if !heaps.iter().any(|&(_, _, h)| h == at) {
+            continue;
+        }
+        // SAFETY: registered heaps are live (removed when dropped).
+        let heap = unsafe { &*(at as *const Heap) };
+        if let Some(Some(host)) = heap.host.get() {
+            host.mirror(i, handle, false);
         }
     }
 }
