@@ -1023,7 +1023,10 @@ impl HostHeap {
         let mut run = 0;
         let mut found = None;
         let mut last = usize::MAX;
-        for at in starts.take(if enough { DYNAMIC as usize } else { 0 }) {
+        // `starts` is bounded by the heap already. A cap of DYNAMIC slots cut
+        // the second search's n - 1 past the cursor off whenever the heap has
+        // all DYNAMIC slots, so the run around the cursor was still missed.
+        for at in starts.take(if enough { usize::MAX } else { 0 }) {
             // A run cannot wrap past the end.
             if at != last.wrapping_add(1) {
                 run = 0;
@@ -3186,17 +3189,19 @@ mod tests {
         let Some(heap) = HostHeap::new(false, 4) else {
             return; // no host GPU
         };
-        // Allocate slots 0..8, advancing cursor to 8.
-        let a = heap.dynamic(8).unwrap();
-        // Allocate slots 8..16, advancing cursor to 16.
-        let b = heap.dynamic(8).unwrap();
-        assert_eq!((a, b), (4, 12));
+        // Dynamic slot `d` is title index `4 + d` (the heap's 4 static slots
+        // come first). Take every dynamic slot, give back 0..12 and take
+        // those 12 again: every slot is taken and the search cursor is at 12.
+        let all = heap.dynamic(heap.dynamic).unwrap();
+        assert_eq!(all, 4);
+        heap.release(4, 12);
+        assert_eq!(heap.dynamic(12), Some(4));
 
-        // Release slots 10..14 (crossing cursor at 12).
-        // Before the fix, a request of 4 slots starting search at 12 scanned 12..end then 0..12,
-        // missing the contiguous run at 10..14.
-        heap.release(14, 4);
-        let c = heap.dynamic(4);
-        assert_eq!(c, Some(14));
+        // Free dynamic slots 10..14, around the cursor. The search from 12
+        // to the end sees only 12 and 13; before the fix the search from
+        // the start stopped at 12 and saw only 10 and 11, so the run of 4
+        // was never found.
+        heap.release(4 + 10, 4);
+        assert_eq!(heap.dynamic(4), Some(4 + 10));
     }
 }
