@@ -179,20 +179,23 @@ pub fn read_title(at: u64, out: &mut [u8]) -> bool {
     }
 }
 
-/// The bytes a structure whose header is `bytes` spans around its header
+/// The bytes a structure whose header is `bytes` spans from its header on
 /// (`XboxBvh4Header`, the layout `docs/raytracing-plan.md` cites: flags
 /// with the format version in the low 16 bits, the 64-byte units after the
-/// header at byte 4, the parent pointers' offset at byte 0x38, negative
-/// when they lie before the header): (bytes before the header, bytes from
-/// it). None if `bytes` do not hold a plausible header.
-pub fn header_extent(bytes: &[u8; 64]) -> Option<(u64, u64)> {
+/// header at byte 4). None if `bytes` do not hold a plausible header.
+///
+/// Nothing before the header is the structure's. Its dword at 0x38, which
+/// a fork's reading took as a negative offset to parent pointers before
+/// it, is not one: run `20261125-192940` crashed on a title pointer
+/// 0xe00 bytes before a rehydrated structure, in the 1 MiB block before
+/// the structure's own, which a range taken that way had let through.
+pub fn header_size(bytes: &[u8; 64]) -> Option<u64> {
     let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     /// No single structure is larger.
     const MOST: u64 = 1 << 30;
-    let (flags, units, parents) = (word(0), word(4), word(0x38) as i32);
+    let (flags, units) = (word(0), word(4));
     let size = 64 * (u64::from(units) + 1);
-    let below = u64::from(parents.min(0).unsigned_abs());
-    ((1..=6).contains(&(flags & 0xffff)) && size <= MOST && below <= MOST).then_some((below, size))
+    ((1..=6).contains(&(flags & 0xffff)) && size <= MOST).then_some(size)
 }
 
 /// A call into the builder begins on this thread: until [`leave`], the
@@ -422,17 +425,18 @@ fn line() {
 mod tests {
     use super::*;
 
+    /// Run `20261125-192940`'s rehydration: 834,816 bytes from the header
+    /// and a dword at 0x38 of -28,096. Nothing before the header is the
+    /// structure's.
     #[test]
-    fn a_header_tells_its_extent() {
+    fn a_header_tells_its_size_and_nothing_before_it() {
         let mut h = [0u8; 64];
         h[0..4].copy_from_slice(&(0x8000_0004u32).to_le_bytes());
-        h[4..8].copy_from_slice(&63u32.to_le_bytes());
-        h[0x38..0x3c].copy_from_slice(&(-256i32).to_le_bytes());
-        assert_eq!(header_extent(&h), Some((256, 4096)));
-        h[0x38..0x3c].copy_from_slice(&128i32.to_le_bytes());
-        assert_eq!(header_extent(&h), Some((0, 4096)));
+        h[4..8].copy_from_slice(&(834_816u32 / 64 - 1).to_le_bytes());
+        h[0x38..0x3c].copy_from_slice(&(-28_096i32).to_le_bytes());
+        assert_eq!(header_size(&h), Some(834_816));
         h[0..4].copy_from_slice(&9u32.to_le_bytes());
-        assert_eq!(header_extent(&h), None);
+        assert_eq!(header_size(&h), None);
         assert!(!read_title(0, &mut [0u8; 4]));
     }
 

@@ -2211,6 +2211,36 @@ impl State {
         });
     }
 
+    /// Runs a console `DispatchX(x, y, z, flags)` on the host. With bit 5
+    /// (`USE_THREAD_DIMENSIONS`) of the flags, `x`, `y`, `z` count threads,
+    /// not thread groups: the host dispatches the groups that hold them
+    /// ([`thread_groups`]). The ray-tracing structure builder dispatches
+    /// this way, and taken as groups its counts ran up to 64 times the
+    /// threads (fork PR #646 found it; its host half).
+    /// shortcut: the threads past the count in a last, partial group run as
+    /// well. The console masks them off at entry; masking them here needs
+    /// the translator's half of #646 (a host word with the counts).
+    pub(crate) fn dispatch_x(&mut self, list: &HostList, x: u32, y: u32, z: u32, flags: u32) {
+        if flags & USE_THREAD_DIMENSIONS == 0 {
+            return self.dispatch(list, x, y, z);
+        }
+        let group = crate::pipeline::host_pipeline(self.pipeline as This)
+            .and_then(|p| p.stages.first().map(|s| s.translated().threads))
+            .unwrap_or([1; 3]);
+        let Some(([gx, gy, gz], partial)) = thread_groups([x, y, z], group) else {
+            return;
+        };
+        if partial {
+            once!(
+                threads = ?[x, y, z],
+                group = ?group,
+                "a DispatchX counting threads ends in a partial group: its extra threads run (the \
+                 console masks them off)"
+            );
+        }
+        self.dispatch(list, gx, gy, gz);
+    }
+
     /// Runs a dispatch on the host.
     pub(crate) fn dispatch(&mut self, list: &HostList, x: u32, y: u32, z: u32) {
         // It may write the arguments a window holds clamped.
@@ -3708,6 +3738,43 @@ pub(crate) fn depth_bounds(list: &HostList, min: f32, max: f32) {
     {
         // SAFETY: an open list on a device that supports depth bounds.
         unsafe { l1.OMSetDepthBounds(min, max) };
+    }
+}
+
+/// `COMPUTE_DISPATCH_INITIATOR` bit 5, `USE_THREAD_DIMENSIONS`: a `DispatchX`
+/// whose counts are threads.
+const USE_THREAD_DIMENSIONS: u32 = 0x20;
+
+/// The thread groups of size `group` that hold `threads` threads, and
+/// whether the last group along an axis is partial. None for no threads.
+fn thread_groups(threads: [u32; 3], group: [u32; 3]) -> Option<([u32; 3], bool)> {
+    if threads.contains(&0) {
+        return None;
+    }
+    let mut groups = [0; 3];
+    let mut partial = false;
+    for i in 0..3 {
+        let g = group[i].max(1);
+        groups[i] = threads[i].div_ceil(g);
+        partial |= !threads[i].is_multiple_of(g);
+    }
+    Some((groups, partial))
+}
+
+#[cfg(test)]
+mod dispatch_x_tests {
+    use super::thread_groups;
+
+    /// A builder stage counting 1,000 threads in groups of 64: 16 groups,
+    /// not 1,000 (64,000 threads).
+    #[test]
+    fn thread_counts_become_the_groups_that_hold_them() {
+        assert_eq!(thread_groups([1000, 1, 1], [64, 1, 1]), Some(([16, 1, 1], true)));
+        assert_eq!(thread_groups([1024, 1, 1], [64, 1, 1]), Some(([16, 1, 1], false)));
+        assert_eq!(thread_groups([33, 9, 1], [32, 8, 1]), Some(([2, 2, 1], true)));
+        // A size not known: the counts as groups of one.
+        assert_eq!(thread_groups([7, 1, 1], [0, 0, 0]), Some(([7, 1, 1], false)));
+        assert_eq!(thread_groups([0, 1, 1], [64, 1, 1]), None);
     }
 }
 

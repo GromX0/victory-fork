@@ -133,6 +133,8 @@ pub(crate) struct Translated {
     /// Whether it walks ray-tracing structures: it has a node test
     /// (`image_bvh*_intersect_ray`; timed with `VICTORY_BVH_CHECK`).
     pub(crate) traces: bool,
+    /// A compute program's thread-group size (`numthreads`), else zeros.
+    pub(crate) threads: [u32; 3],
 }
 
 #[cfg(windows)]
@@ -193,22 +195,24 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
     let stores = programs.is_empty() || programs.iter().any(stores);
     let raw_stores = programs.is_empty() || programs.iter().any(raw_stores);
     let traces = programs.iter().any(traces);
-    let used = programs
-        .into_iter()
-        .find(|p| {
-            matches!(
-                p.stage,
-                HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs
-            )
-        })
-        .map(|p| p.used)
-        .unwrap_or_default();
+    let main = programs.into_iter().find(|p| {
+        matches!(
+            p.stage,
+            HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs
+        )
+    });
+    let threads = match main.as_ref().map(|p| &p.io) {
+        Some(victory_shader::native::StageIo::Cs(cs)) => cs.threads,
+        _ => [0; 3],
+    };
+    let used = main.map(|p| p.used).unwrap_or_default();
     Ok(Translated {
         host,
         used,
         stores,
         raw_stores,
         traces,
+        threads,
     })
 }
 
