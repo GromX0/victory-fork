@@ -57,8 +57,15 @@ Milestones (from execution only):
 | E | Sustained session, stable, paced | **no**: run `20261125-093256-default-warm` aborted at 373 s, "memory allocation of 2823609 bytes failed" (0xC0000409) after a pipeline refused with E_OUTOFMEMORY; the title commits ~24 GB and other apps held 28 GB of a 44 GB limit. Redo with memory freed |
 
 Findings of those runs, for "Next": the "warm" run still dropped up to
-6,292 draws a frame for pipelines being made (the saved library was
-327 KB), so pipelines do not survive a launch; five shaders do not
+6,292 draws a frame (the saved library was 327 KB). That read as
+pipelines not surviving a launch, which was wrong (agent/pipelines,
+ec27e329): a second launch of the same build loads 2,286-2,772 pipelines
+from the library and makes 1-101; the AMD driver keeps ~146 bytes per
+pipeline there and the code in its own cache. The drops are draws of the
+ray-tracing builder (off) and skipped on purpose, the frame line now
+says so; the slow frames of a second launch are texture uploads. Pipelines
+are rebuilt only when the translation changes: `victory warm` makes them
+before playing; five shaders do not
 translate (b22a16a178976e1b 16-bit wave sum, ceb5eb68cd99cb07 descriptor
 address, 2fd01fca16993001 / 6b6db9f1a526daeb / 7d0f14ce44746d7e descriptor
 read as data) and mesh pipeline f5e50eb2108c425b+ce3f0432a08f1d35 is
@@ -436,8 +443,9 @@ on the host).
    no longer wait for flights, new and NVIDIA-only so far), then the FSR 4
    pipelines (the title's `FFX_FSR4_*` passes; KLBF runs Series S with FSR
    on an RX 9070 XT without device loss, on its own stack).
-4. Pipelines that survive a launch (Skillter's pipeline-library fixes,
-   upstream `translate --cache --pipelines`, mangrove's `victory warm`).
+4. Pipelines: they do survive a launch (see the findings above); after a
+   build that changes the translation, `victory warm` (ec27e329) makes the
+   pipelines earlier runs described before playing.
 5. KLBF's Lab 31/33 work as separate ports: myokex's wall fixes, upstream
    #334 (buffer-state tracking: characters and faces), #1271 (`glc` loads
    coherent on RDNA).
