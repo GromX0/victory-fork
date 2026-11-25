@@ -75,9 +75,18 @@ pub fn take(dxil: &[u8]) -> Option<Census> {
         .map(|w| w.2)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The functions the module this thread wrote last declares (tests read
+    /// them: the written bitcode packs symbol names into 6-bit characters).
+    pub(crate) static DECLARED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
 /// Counts `m`, whose written form is `bitcode`, and keeps the result for
 /// [`take`].
 pub(crate) fn note(m: &Module, bitcode: &[u8]) {
+    #[cfg(test)]
+    DECLARED.with(|d| *d.borrow_mut() = m.funcs.iter().map(|f| f.name.clone()).collect());
     if !enabled() {
         return;
     }

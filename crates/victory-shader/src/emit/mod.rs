@@ -1765,6 +1765,32 @@ mod barycentric_tests {
         validate(&shader);
     }
 
+    /// Whether the module this thread wrote last declares a function whose
+    /// name starts with `name`.
+    fn declares(name: &str) -> bool {
+        bitcode::census::DECLARED.with(|d| d.borrow().iter().any(|f| f.starts_with(name)))
+    }
+
+    /// A pixel program's `v_readfirstlane_b32` gives a helper lane its own
+    /// value (upstream 0601955): the host's wave reads leave helper lanes
+    /// out, so a waterfall loop with only helper lanes left would otherwise
+    /// never see its value come round and run to the loop limit.
+    #[test]
+    fn a_pixel_first_lane_read_asks_whether_the_lane_is_a_helper() {
+        let [e0, e1] = exp_mrt0(2);
+        let words = [
+            0x7E00_0500, // v_readfirstlane_b32 s0, v0
+            0x7E04_0200, // v_mov_b32 v2, s0
+            e0,
+            e1,
+            0xBF81_0000,
+        ];
+        let shader = pixel(&words, PERSP_CENTER).unwrap();
+        assert!(declares("dx.op.waveReadLaneFirst"), "no first-lane read");
+        assert!(declares("dx.op.isHelperLane"), "no helper-lane query");
+        validate(&shader);
+    }
+
     /// Two kinds of barycentrics read directly: one element per mode.
     #[test]
     fn two_barycentric_modes_get_two_elements() {
