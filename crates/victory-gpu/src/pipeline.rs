@@ -130,6 +130,9 @@ pub(crate) struct Translated {
     /// global store or atomic ([`raw_stores`]); true when its code is not
     /// known.
     pub(crate) raw_stores: bool,
+    /// Whether it walks ray-tracing structures: it has a node test
+    /// (`image_bvh*_intersect_ray`; timed with `VICTORY_BVH_CHECK`).
+    pub(crate) traces: bool,
 }
 
 #[cfg(windows)]
@@ -189,6 +192,7 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
     let host = crate::shader_cache::host_shader(container)?;
     let stores = programs.is_empty() || programs.iter().any(stores);
     let raw_stores = programs.is_empty() || programs.iter().any(raw_stores);
+    let traces = programs.iter().any(traces);
     let used = programs
         .into_iter()
         .find(|p| {
@@ -204,6 +208,7 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         used,
         stores,
         raw_stores,
+        traces,
     })
 }
 
@@ -348,6 +353,16 @@ fn stores(program: &victory_shader::NativeProgram) -> bool {
             Encoding::Sop1 => name.is_none_or(|n| matches!(n, "s_setpc_b64" | "s_swappc_b64")),
             _ => false,
         }
+    })
+}
+
+/// Whether a console program has a ray-tracing node test.
+#[cfg(windows)]
+fn traces(program: &victory_shader::NativeProgram) -> bool {
+    use victory_shader::gfx10::decode;
+    decode(&program.code).is_ok_and(|code| {
+        code.iter()
+            .any(|i| i.name().is_some_and(|n| n.starts_with("image_bvh")))
     })
 }
 

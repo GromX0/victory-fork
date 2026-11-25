@@ -429,6 +429,40 @@ The plan for that per-store check:
 
 ### Step 3: check the structures on the host and time the passes
 
+**Done (`VICTORY_BVH_CHECK=1`, `crates/victory-gpu/src/bvhcheck.rs`).**
+
+- **Checks.** A thread of the HLE reads, once a second, the structures the
+  wrappers know whose last build is at least a second old. Top levels go
+  first, then the oldest, within 64 MiB a second (`=<n>` sets n MiB). Each
+  structure is read from title memory, where the guard's copy-back or the
+  in-place pool puts it, and walked from the root at header+0x30.
+- **What is counted:**
+  - bad headers and roots;
+  - pointers outside the structure;
+  - nodes reached twice;
+  - NaN and inverted boxes, and leaves of the wrong level;
+  - triangles and instance transforms that are not finite;
+  - instances whose bottom level no call named (dangling);
+  - depth.
+
+  Every 10 s one line per class: top levels, bottom levels built, bottom
+  levels rehydrated.
+- **The control group.** Rehydrated bottom levels come ready built in the
+  title's data. If they walk clean and built ones do not, the builder is
+  wrong. If both fail, the checker's reading of the format is.
+- **Timing.** Each dispatch of a builder program, and of a program with a
+  node test, sits between two GPU timestamps in its host list. They are read
+  when the list is reset and summed by program, and a line every 10 s gives
+  builder and traversal milliseconds and dispatches a frame and the slowest
+  8 programs. Dispatches overlap on the card, so the sums are a pass's
+  time; single programs are approximate.
+- **Shortcut.** A structure being copied back while it is read can show
+  faults it does not have. Top levels are rebuilt every frame, so a few of
+  theirs may be torn reads. A fault in every top level, line after line,
+  is not.
+
+The original plan for this step:
+
 - Once a frame, for each top and bottom level the trace knows, walk the
   console format (header, box, triangle and instance nodes per `bvh.rs` and
   the Xbox layout). Count:

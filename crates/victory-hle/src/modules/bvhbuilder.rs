@@ -465,6 +465,9 @@ struct Structure {
     rehydrated: bool,
     /// Made by a compacting copy.
     compacted: bool,
+    /// When it was last built, and last checked (`VICTORY_BVH_CHECK`).
+    built: Instant,
+    checked: Option<Instant>,
 }
 
 /// Where a build's sizes came from ([`found`]), in the summary's order.
@@ -988,10 +991,13 @@ unsafe fn note_desc(
             builds: 0,
             rehydrated: false,
             compacted: false,
+            built: Instant::now(),
+            checked: None,
         });
         s.top = inputs.top();
         s.builds += 1;
         s.rehydrated |= rehydrate;
+        s.built = Instant::now();
         if found.dest.is_some() {
             s.extent = found.dest;
         }
@@ -1017,6 +1023,132 @@ unsafe fn note_desc(
             "the ray-tracing structure builder: a structure (VICTORY_BVH_TRACE)"
         );
     }
+}
+
+/// The classes of structures checked ([`check_loop`]): top levels, bottom
+/// levels the builder built, bottom levels rehydrated. Rehydrated ones come
+/// ready built in the title's data, so they show whether the checker reads
+/// the format right; the others show whether the builder wrote it right.
+const CLASSES: [&str; 3] = [
+    "top levels",
+    "bottom levels built",
+    "bottom levels rehydrated",
+];
+
+fn class_of(s: &Structure) -> usize {
+    match (s.top, s.rehydrated) {
+        (true, _) => 0,
+        (false, false) => 1,
+        (false, true) => 2,
+    }
+}
+
+/// How long after its build a structure is left before it is read: its
+/// work has run and come back to title memory by then.
+const SETTLE: Duration = Duration::from_secs(1);
+
+/// What to check now, within `budget` bytes: top levels first, then the
+/// structures built longest ago, each once after each build. With the
+/// bottom levels by address (bytes before and from it) for the instances.
+fn pick(
+    state: &State,
+    budget: u64,
+) -> (
+    Vec<(u64, Structure)>,
+    std::collections::BTreeMap<u64, (u64, u64)>,
+) {
+    let now = Instant::now();
+    let mut due: Vec<(u64, Structure)> = state
+        .structures
+        .iter()
+        .filter(|(_, s)| {
+            now.duration_since(s.built) >= SETTLE && s.checked.is_none_or(|c| c < s.built)
+        })
+        .map(|(&a, s)| (a, *s))
+        .collect();
+    due.sort_unstable_by_key(|(_, s)| (!s.top, s.built));
+    let mut bytes = 0;
+    due.retain(|(_, s)| {
+        let take = bytes < budget;
+        bytes += s.extent.map_or(64 << 10, |(below, from)| below + from);
+        take
+    });
+    let bottoms = state
+        .structures
+        .iter()
+        .filter(|(_, s)| !s.top)
+        .map(|(&a, s)| (a, s.extent.unwrap_or((0, 0))))
+        .collect();
+    (due, bottoms)
+}
+
+/// For an instance's bottom-level address: whether a call named a bottom
+/// level that holds it, and the bytes left from it if known.
+fn bottom_at(
+    bottoms: &std::collections::BTreeMap<u64, (u64, u64)>,
+    address: u64,
+) -> Option<Option<u64>> {
+    let (&at, &(_, from)) = bottoms.range(..=address).next_back()?;
+    if address == at {
+        return Some((from > 0).then_some(from));
+    }
+    (address < at + from).then(|| Some(at + from - address))
+}
+
+/// The thread of `VICTORY_BVH_CHECK`: once a second it checks what
+/// [`pick`] gives, and every 10 seconds it logs each class.
+fn check_loop() {
+    let budget = victory_gpu::bvhcheck::budget();
+    let builder = std::env::var("VICTORY_BVH_BUILDER").unwrap_or_default();
+    let mut all: [victory_gpu::bvhcheck::Report; 3] = Default::default();
+    let mut window: [victory_gpu::bvhcheck::Report; 3] = Default::default();
+    let mut last_line = Instant::now();
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let (due, bottoms) = with_state(|s| pick(s, budget));
+        let mut checked = Vec::with_capacity(due.len());
+        for (at, s) in &due {
+            let (r, _) =
+                victory_gpu::bvhcheck::check(*at, s.top, s.extent, &|a| bottom_at(&bottoms, a));
+            let class = class_of(s);
+            all[class].add(&r);
+            window[class].add(&r);
+            checked.push((*at, s.built));
+        }
+        let now = Instant::now();
+        with_state(|state| {
+            for (at, built) in checked {
+                if let Some(s) = state.structures.get_mut(&at)
+                    && s.built == built
+                {
+                    s.checked = Some(now);
+                }
+            }
+        });
+        if last_line.elapsed() >= LINE_EVERY {
+            last_line = Instant::now();
+            for (k, class) in CLASSES.iter().enumerate() {
+                victory_gpu::bvhcheck::log(class, &builder, &all[k], &window[k]);
+            }
+            window = Default::default();
+        }
+    }
+}
+
+/// Starts [`check_loop`] once, with `VICTORY_BVH_CHECK`.
+fn start_checks() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    if !victory_gpu::bvhcheck::on() {
+        return;
+    }
+    STARTED.call_once(|| {
+        let spawned = std::thread::Builder::new()
+            .name("victory-bvh-check".to_owned())
+            .spawn(check_loop);
+        if let Err(e) = spawned {
+            tracing::warn!(error = %e, "the ray-tracing structure checks did not start (VICTORY_BVH_CHECK)");
+        }
+    });
 }
 
 /// The DLL's own entry points, by [`Entry`] (0 until bound).
@@ -1143,10 +1275,13 @@ unsafe extern "system" fn copy(
                 builds: 0,
                 rehydrated: false,
                 compacted: true,
+                built: Instant::now(),
+                checked: None,
             });
             s.compacted = true;
             s.builds += 1;
             s.extent = extent;
+            s.built = Instant::now();
         }
         if spell(state, Entry::Copy) {
             tracing::info!(
@@ -1321,18 +1456,22 @@ pub struct Traced<'a> {
 }
 
 impl<'a> Traced<'a> {
-    /// On with `VICTORY_BVH_TRACE` or `VICTORY_BVH_GUARD=1`: the guard
-    /// takes its ranges from the wrappers.
+    /// On with `VICTORY_BVH_TRACE`, `VICTORY_BVH_GUARD=1` or
+    /// `VICTORY_BVH_CHECK` (which starts the checks): the guard and the checks
+    /// take their ranges and structures from the wrappers.
     pub fn new(inner: &'a dyn ImportResolver) -> Traced<'a> {
         let guard = victory_gpu::bvhguard::on();
-        let on = level() > 0 || guard;
+        let check = victory_gpu::bvhcheck::on();
+        let on = level() > 0 || guard || check;
         if on {
             tracing::info!(
                 spelled = level(),
                 guard,
+                check_bytes_per_second = victory_gpu::bvhcheck::budget(),
                 "the ray-tracing structure builder's entry points are wrapped (VICTORY_BVH_TRACE, \
-                 VICTORY_BVH_GUARD)"
+                 VICTORY_BVH_GUARD, VICTORY_BVH_CHECK)"
             );
+            start_checks();
         }
         Traced { inner, on }
     }
@@ -1733,6 +1872,8 @@ mod tests {
                 builds: 1,
                 rehydrated: false,
                 compacted: false,
+                built: Instant::now(),
+                checked: None,
             },
         );
         let update = found(
@@ -1794,5 +1935,79 @@ mod tests {
             at: 0x10_0000_1000,
             bytes: Some(600)
         }));
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+
+    fn structure(top: bool, extent: Option<(u64, u64)>, age: u64) -> Structure {
+        Structure {
+            top,
+            extent,
+            builds: 1,
+            rehydrated: false,
+            compacted: false,
+            built: Instant::now() - Duration::from_secs(age),
+            checked: None,
+        }
+    }
+
+    /// Settled structures only, top levels first, then the oldest, within
+    /// the budget; once each after each build.
+    #[test]
+    fn checks_take_top_levels_first_and_keep_to_the_budget() {
+        let mut state = State::new();
+        state
+            .structures
+            .insert(0x1000, structure(false, Some((0, 4096)), 5));
+        state
+            .structures
+            .insert(0x2000, structure(false, Some((0, 4096)), 9));
+        state
+            .structures
+            .insert(0x3000, structure(true, Some((0, 8192)), 2));
+        // Built just now: not yet.
+        state
+            .structures
+            .insert(0x4000, structure(false, Some((0, 64)), 0));
+        let (due, bottoms) = pick(&state, 9000);
+        let order: Vec<u64> = due.iter().map(|(a, _)| *a).collect();
+        // The top level (8 KiB) takes most of the budget; the oldest
+        // bottom level goes in before the budget is passed.
+        assert_eq!(order, vec![0x3000, 0x2000]);
+        assert_eq!(bottoms.len(), 3);
+        // Checked after its build: not again.
+        let s = state.structures.get_mut(&0x2000).unwrap();
+        s.checked = Some(Instant::now());
+        let (due, _) = pick(&state, 1 << 30);
+        let order: Vec<u64> = due.iter().map(|(a, _)| *a).collect();
+        assert_eq!(order, vec![0x3000, 0x1000]);
+    }
+
+    #[test]
+    fn an_instance_finds_the_bottom_level_that_holds_it() {
+        let bottoms: std::collections::BTreeMap<u64, (u64, u64)> =
+            [(0x1000, (0, 0x400)), (0x8000, (0, 0))]
+                .into_iter()
+                .collect();
+        assert_eq!(bottom_at(&bottoms, 0x1000), Some(Some(0x400)));
+        assert_eq!(bottom_at(&bottoms, 0x1100), Some(Some(0x300)));
+        assert_eq!(bottom_at(&bottoms, 0x1400), None);
+        assert_eq!(bottom_at(&bottoms, 0x800), None);
+        // Known, size unknown.
+        assert_eq!(bottom_at(&bottoms, 0x8000), Some(None));
+        assert_eq!(bottom_at(&bottoms, 0x8100), None);
+    }
+
+    #[test]
+    fn classes_tell_rehydrated_from_built() {
+        let mut s = structure(false, None, 0);
+        assert_eq!(class_of(&s), 1);
+        s.rehydrated = true;
+        assert_eq!(class_of(&s), 2);
+        s.top = true;
+        assert_eq!(class_of(&s), 0);
     }
 }

@@ -2265,9 +2265,29 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| self.op_text(format!("dispatch {x}x{y}x{z}"), true));
+        let timed = self.ray_timing(list, p);
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
+        crate::bvhcheck::end(list, timed);
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// With `VICTORY_BVH_CHECK`: the first timestamp around a dispatch of
+    /// the structure builder or of a program that walks structures
+    /// ([`crate::bvhcheck`]).
+    fn ray_timing(&self, list: &HostList, p: &HostPipeline) -> Option<u32> {
+        use crate::bvhcheck::Class;
+        if !crate::bvhcheck::on() {
+            return None;
+        }
+        let class = if crate::pipeline::is_builder(self.pipeline as This) {
+            Class::Builder
+        } else if p.stages.iter().any(|s| s.translated().traces) {
+            Class::Traversal
+        } else {
+            return None;
+        };
+        crate::bvhcheck::begin(list, class, &p.name)
     }
 
     /// What a draw or dispatch runs, for the device-removed report
@@ -3274,6 +3294,7 @@ impl State {
         if let Some((s, _)) = &counter {
             list.buffer_state(&s.buffer, crate::host::BUFFER_READ);
         }
+        let timed = if kind == DISPATCH { self.ray_timing(list, p) } else { None };
         // SAFETY: an open list with everything set; the scratch buffer and
         // host copies are kept alive by the list, and the signature is cached.
         unsafe {
@@ -3305,6 +3326,7 @@ impl State {
                 list.list.SetComputeRoot32BitConstant(param, 0, dword);
             }
         }
+        crate::bvhcheck::end(list, timed);
         if kind == MESH {
             self.mesh_scissor(list, false);
         }
