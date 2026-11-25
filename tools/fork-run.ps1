@@ -79,7 +79,8 @@ $facts = [ordered]@{
     commit       = $commit
     branch       = (git -C $repo rev-parse --abbrev-ref HEAD).Trim()
     dirty        = $dirty
-    rustc        = (rustc -V)
+    # Not needed with -NoBuild, so a missing rustc must not stop the run.
+    rustc        = $(if (Get-Command rustc -ErrorAction SilentlyContinue) { rustc -V } else { 'not on PATH' })
     gpu          = $gpu
     cpu          = $cpu
     os           = $os
