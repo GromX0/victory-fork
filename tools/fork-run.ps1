@@ -70,7 +70,12 @@ param(
     # (Windows grows the page file there until the disk is full).
     [int]$CommitGrowLimitGB = 38,
     [int]$CommitFreeMinGB = 0,
-    [int]$PageDriveMinGB = 6
+    [int]$PageDriveMinGB = 6,
+    # The run is also stopped within -CommitMarginGB of the most commit Windows
+    # will allow (-CommitCeilingGB; 0: RAM plus the page files' largest size,
+    # worked out at the start).
+    [double]$CommitCeilingGB = 0,
+    [double]$CommitMarginGB = 2
 )
 $ErrorActionPreference = 'Stop'
 $repo = (git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
@@ -184,21 +189,50 @@ $err = Join-Path $run 'victory.err.log'
 # an AMD card and left ~11 GB behind after the process ended, until a restart
 # (alexanderskyequinn/victory-chapter-ii d0f69012): the run is stopped before
 # the system runs short, and what is left afterwards is recorded.
+# GlobalMemoryStatusEx: no WMI in the loop (a WMI query is what failed when
+# the system ran out of commit, which ended the script and left the game
+# running unwatched).
+Add-Type -Namespace Fork -Name Mem -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)] public struct Status { public uint Length; public uint Load; public ulong TotalPhys; public ulong AvailPhys; public ulong TotalPageFile; public ulong AvailPageFile; public ulong TotalVirtual; public ulong AvailVirtual; public ulong AvailExtendedVirtual; }
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool GlobalMemoryStatusEx(ref Status s);
+'@
 function Get-Commit {
-    $os = Get-CimInstance Win32_OperatingSystem
+    $s = New-Object Fork.Mem+Status
+    $s.Length = [uint32][System.Runtime.InteropServices.Marshal]::SizeOf($s)
+    if (-not [Fork.Mem]::GlobalMemoryStatusEx([ref]$s)) { throw 'GlobalMemoryStatusEx failed' }
     [pscustomobject]@{
-        UsedGB  = [math]::Round(($os.TotalVirtualMemorySize - $os.FreeVirtualMemory) / 1MB, 1)
-        LimitGB = [math]::Round($os.TotalVirtualMemorySize / 1MB, 1)
-        FreeGB  = [math]::Round($os.FreeVirtualMemory / 1MB, 1)
+        UsedGB  = [math]::Round(($s.TotalPageFile - $s.AvailPageFile) / 1GB, 1)
+        LimitGB = [math]::Round($s.TotalPageFile / 1GB, 1)
+        FreeGB  = [math]::Round($s.AvailPageFile / 1GB, 1)
     }
 }
+# The most commit Windows will ever allow: RAM plus the page files' largest
+# size. A system-managed page file grows to 3x RAM at most, and to an eighth
+# of its volume (on a 249 GB C: that is 31 GB, a 62 GB ceiling with 32 GB
+# of RAM, where the seriess-v3 run died).
+function Get-CommitCeilingGB {
+    $ram = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB
+    if ((Get-CimInstance Win32_ComputerSystem).AutomaticManagedPagefile) {
+        $files = 0
+        foreach ($u in Get-CimInstance Win32_PageFileUsage) {
+            $vol = (Get-Volume -DriveLetter $u.Name.Substring(0, 1)).Size / 1GB
+            $files += [math]::Min(3 * $ram, $vol / 8)
+        }
+    } else {
+        $files = ((Get-CimInstance Win32_PageFileSetting | Measure-Object MaximumSize -Sum).Sum) / 1KB
+    }
+    [math]::Round($ram + $files, 1)
+}
+$ceiling = $(if ($CommitCeilingGB -gt 0) { $CommitCeilingGB } else { Get-CommitCeilingGB })
+$facts['commit_ceiling_gb'] = $ceiling
 $before = Get-Commit
 $facts['commit_before'] = $before
 Write-Host ("commit before: {0} of {1} GB used, {2} GB free" -f $before.UsedGB, $before.LimitGB, $before.FreeGB)
 # The drives that hold a page file: their free space is the real limit.
 $pageDrives = @(Get-CimInstance Win32_PageFileUsage | ForEach-Object { $_.Name.Substring(0, 1) } | Sort-Object -Unique)
 function Get-PageDriveFreeGB {
-    ($pageDrives | ForEach-Object { (Get-Volume -DriveLetter $_).SizeRemaining / 1GB } | Measure-Object -Minimum).Minimum
+    # DriveInfo, not Get-Volume: no WMI while the system may be short of commit.
+    ($pageDrives | ForEach-Object { ([System.IO.DriveInfo]::new($_)).AvailableFreeSpace / 1GB } | Measure-Object -Minimum).Minimum
 }
 $pageFree = Get-PageDriveFreeGB
 Write-Host ("page file drive(s) {0}: {1:N1} GB free" -f ($pageDrives -join ','), $pageFree)
@@ -215,16 +249,22 @@ $started = Get-Date
 $stopReason = $null
 $peak = $before.UsedGB
 while (-not $p.WaitForExit(2000)) {
-    $now = Get-Commit
+    try { $now = Get-Commit } catch { $now = $null }
+    if (-not $now) {
+        $stopReason = 'the commit check failed (the system is out of commit)'
+    } else {
     $peak = [math]::Max($peak, $now.UsedGB)
     if ($now.UsedGB - $before.UsedGB -gt $CommitGrowLimitGB) {
         $stopReason = "commit grew by $([math]::Round($now.UsedGB - $before.UsedGB, 1)) GB (limit $CommitGrowLimitGB)"
+    } elseif ($now.UsedGB -gt $ceiling - $CommitMarginGB) {
+        $stopReason = "commit at $($now.UsedGB) GB, within $CommitMarginGB GB of the most Windows allows ($ceiling GB)"
     } elseif ($now.FreeGB -lt $CommitFreeMinGB) {
         $stopReason = "only $($now.FreeGB) GB of commit left (minimum $CommitFreeMinGB)"
     } elseif ((Get-PageDriveFreeGB) -lt $PageDriveMinGB) {
         $stopReason = "the page file's drive is down to $([math]::Round((Get-PageDriveFreeGB), 1)) GB free (minimum $PageDriveMinGB)"
     } elseif ($Seconds -gt 0 -and ((Get-Date) - $started).TotalSeconds -ge $Seconds) {
         $stopReason = "time limit of $Seconds s"
+    }
     }
     if ($stopReason) {
         # A window close first (the process lets go of its device and heaps
