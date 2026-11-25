@@ -1107,7 +1107,9 @@ void main() {
             if ahead {
                 for i in filled.len()..RECORDS as usize {
                     assert_eq!(out[i * 8..i * 8 + 3], [0, 0, 0], "unfilled slot {i} must come out empty");
-                    assert_eq!(out[i * 8 + 3], u32::MAX, "the words after the record are copied as they are");
+                    // The last record ends at its payload; nothing after it is copied.
+                    let after = if i + 1 == RECORDS as usize { 0 } else { u32::MAX };
+                    assert_eq!(out[i * 8 + 3], after, "the words after the record are copied as they are");
                 }
                 assert_eq!(spent, charged_filled, "unfilled slots charge nothing");
                 assert_eq!(largest, 519, "and are not counted as asked for");
@@ -1213,7 +1215,9 @@ void main() {
             assert_eq!(rec[2], 1000 + i as u32);
             assert_eq!(rec[3], (-200i32 + i as i32) as u32);
             assert_eq!(rec[4], 5000 + i as u32);
-            assert_eq!(rec[5], 0xCAFE_0000 | (i as u32));
+            // The last record ends at its payload; nothing after it is copied.
+            let after = if i + 1 == RECORDS as usize { 0 } else { 0xCAFE_0000 | (i as u32) };
+            assert_eq!(rec[5], after);
         }
         assert_eq!((kept, zeroed), (2, (RECORDS as usize) - 2));
     }
