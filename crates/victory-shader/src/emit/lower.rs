@@ -3655,9 +3655,10 @@ impl<'a> Lower<'a> {
     /// `VICTORY_NAN_GUARD` (on unless `0`): a float a pixel program exports to a colour
     /// target, or a store writes to a typed image or buffer, with NaN made 0 and an infinity
     /// ±65504, so one bad pixel does not stay in a history the title blends into each frame.
-    /// `strict` (float targets): every NaN. Otherwise only the NaNs the GPU makes (0x7FC00000,
-    /// either sign) and infinities: a typed store may carry an integer's bits, and all-ones or
-    /// other NaN patterns are common integers.
+    /// `strict` (float targets, and image stores of a float operation's result): every NaN.
+    /// Otherwise only the NaNs the GPU makes (0x7FC00000, either sign) and infinities: a
+    /// typed store may carry an integer's bits, and all-ones or other NaN patterns are common
+    /// integers (`valu_tests`).
     // shortcut: raw buffer stores are left as they are (no type to go by).
     fn nan_guard(&mut self, f: V, strict: bool) -> V {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -10049,7 +10050,10 @@ impl<'a> Lower<'a> {
                 // d16: two f16 channels per VGPR, low half first.
                 let r = if *d16 { k / 2 } else { k };
                 let v = inst.read(Reg::V(reg + r)).ok_or("image store data")?;
-                vals.push(if *d16 {
+                // A float operation's result: any NaN is guarded, not only the GPU's own (other
+                // values may be integer words, packed light, whose bits must pass).
+                let made = !*d16 && self.floats.contains_key(&v);
+                vals.push((made, if *d16 {
                     let mut x = self.i32_of(v)?;
                     if k % 2 == 1 {
                         let k16 = self.s.m.i32(16);
@@ -10060,9 +10064,9 @@ impl<'a> Lower<'a> {
                         .op(self.cur, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[x])
                 } else {
                     self.float_of(v)?
-                });
+                }));
             }
-            let vals: Vec<V> = vals.into_iter().map(|v| self.nan_guard(v, false)).collect();
+            let vals: Vec<V> = vals.into_iter().map(|(made, v)| self.nan_guard(v, made)).collect();
             let h = self.handle(site, src, false, props)?;
             let at = self.begin_guarded(guard);
             let mut args = vec![h];

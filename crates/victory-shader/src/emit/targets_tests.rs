@@ -242,3 +242,188 @@ fn bright_colours_keep_every_channel_in_r9g9b9e5_and_f16_targets() {
         eprintln!("no device renders to R9G9B9E5; not run");
     }
 }
+
+/// `draw_pixel` into a `size` x `size` target, then the target copied into a texture of
+/// `copy_to` (whole, or with `boxed` all but its first row and column): the target's bytes
+/// and the copy's.
+fn draw_and_copy(
+    host: &Host,
+    ps: &HostShader,
+    format: DXGI_FORMAT,
+    texel: usize,
+    size: u32,
+    copy_to: DXGI_FORMAT,
+    boxed: bool,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let vs = position_vs();
+    let root = host.root_signature(&vs, ps)?;
+    let pso = host.pipeline_into(&root, &vs.dxil, None, &ps.dxil, Some((format, false)))?;
+    let vertices = [
+        -1.0, 1.0, 0.5, 1.0, -1.0, -3.0, 0.5, 1.0, 3.0, 1.0, 0.5, 1.0,
+    ];
+    host.draw_and_copy(
+        &root,
+        &pso,
+        &Draw {
+            roots: Vec::new(),
+            textures: &[],
+            samplers: &[],
+            vertices: &vertices,
+            stride: 16,
+            size: (size, size),
+            mesh_groups: 0,
+        },
+        format,
+        texel,
+        [0.0; 4],
+        copy_to,
+        boxed,
+    )
+}
+
+/// The console copies a texture into one of another format of the same texel width as it
+/// is, bit for bit (the title's own copies between its R9G9B9E5 and R11G11B10 targets and
+/// R32_UINT textures). The host passes such copies to the card as they come (on NVIDIA the
+/// R9G9B9E5 side is a stand-in and the copy is skipped). Drawn first, so that the source is
+/// a target as the card keeps one (compressed), then copied whole, and a box of it.
+#[test]
+fn copies_between_formats_of_one_texel_width_keep_the_bits() {
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return;
+    };
+    let pairs = [
+        (DXGI_FORMAT_R9G9B9E5_SHAREDEXP, DXGI_FORMAT_R32_UINT),
+        (DXGI_FORMAT_R9G9B9E5_SHAREDEXP, DXGI_FORMAT_R11G11B10_FLOAT),
+        (DXGI_FORMAT_R9G9B9E5_SHAREDEXP, DXGI_FORMAT_R8G8B8A8_UNORM),
+        (DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R32_UINT),
+        (DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R9G9B9E5_SHAREDEXP),
+        (DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R9G9B9E5_SHAREDEXP),
+        (DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R9G9B9E5_SHAREDEXP),
+    ];
+    let colours: [[f32; 4]; 2] = [[0.5, 0.25, 1.0, 1.0], [40000.0, 65000.0, 30000.0, 1.0]];
+    let mut lost = Vec::new();
+    for (from, to) in pairs {
+        if !renders_to(&host, from) {
+            eprintln!("no {from:?} targets; skipped");
+            continue;
+        }
+        for c in colours {
+            let ps = color_ps(c.map(f32::to_bits));
+            for (size, boxed) in [(1, false), (128, false), (128, true)] {
+                let (target, copy) = match draw_and_copy(&host, &ps, from, 4, size, to, boxed) {
+                    Ok(both) => both,
+                    // The RX 9070 refuses a box copied between most such pairs (all but R32's
+                    // family and R9G9B9E5): its list does not close. `victory-gpu` copies those
+                    // through a buffer (`list::copies_through_buffer`).
+                    Err(e) if boxed => {
+                        eprintln!("{from:?} -> {to:?} boxed: refused ({e})");
+                        continue;
+                    }
+                    Err(e) => panic!("{from:?} to {to:?}: {e}"),
+                };
+                let word = |b: &[u8]| u32::from_le_bytes(b[..4].try_into().unwrap());
+                // (boxed: the texels of the first row and column were not copied)
+                let copied = |n: usize| !boxed || (!n.is_multiple_of(size as usize) && n >= size as usize);
+                let differ = target
+                    .chunks(4)
+                    .zip(copy.chunks(4))
+                    .enumerate()
+                    .filter(|&(n, (a, b))| copied(n) && a != b)
+                    .count();
+                let last = target.len() - 4;
+                eprintln!(
+                    "{from:?} -> {to:?} {size}x{size} boxed {boxed} {c:?}: target {:#010x}, copy {:#010x}, {differ} texels differ",
+                    word(&target[last..]),
+                    word(&copy[last..]),
+                );
+                if differ != 0 {
+                    lost.push(format!("{from:?} -> {to:?} {size}x{size} boxed {boxed} {c:?}: {differ} texels"));
+                }
+            }
+        }
+    }
+    assert!(lost.is_empty(), "copies that changed bits: {lost:#?}");
+}
+
+/// A compute shader storing `color` through a typed UAV at heap slot 0 (texel 0, 0).
+fn store_cs(color: [f32; 4]) -> HostShader {
+    let mut s = Shader::new(false);
+    s.threads = Some([1, 1, 1]);
+    let e = s.entry;
+    let zero = s.m.i32(0);
+    // a 2D texture UAV of four f32 channels (the translator's typed image store)
+    let h = s.heap_handle(e, zero, false, false, (2 | 0x1000, 0x409));
+    let u = s.m.undef(s.t.i32);
+    let mut args = vec![h, zero, zero, u];
+    args.extend(color.map(|c| s.m.f32(c.to_bits())));
+    args.push(s.m.i8(0xF));
+    let void = s.t.void;
+    s.op(e, "textureStore.f32", Attr::NoUnwind, void, 67, &args);
+    s.m.terminate(e, Term::Ret);
+    shader(HwStage::Cs, s.finish())
+}
+
+/// Typed stores into an R9G9B9E5 texture (the title's targets of it may also allow
+/// unordered access, and the RX 9070 says it takes typed stores of the format) keep every
+/// channel as the D3D rules say, also for a texture that is a render target too.
+#[test]
+fn typed_stores_into_r9g9b9e5_keep_every_channel() {
+    use super::host::{Dispatch, Root, View};
+    let _one = super::valu_tests::ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let Ok(host) = Host::new(false) else {
+        eprintln!("no SM 6.6 hardware device; not run");
+        return;
+    };
+    let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+        Format: DXGI_FORMAT_R9G9B9E5_SHAREDEXP,
+        ..Default::default()
+    };
+    // SAFETY: a plain query into our own structure.
+    let asked = unsafe {
+        host.device.CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT,
+            (&raw mut support).cast(),
+            size_of_val(&support) as u32,
+        )
+    };
+    if asked.is_err() || support.Support2.0 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE.0 == 0 {
+        eprintln!("no typed stores of R9G9B9E5 here; not run");
+        return;
+    }
+    let cases: &[[f32; 3]] = &[
+        [1.0, 0.5, 0.25],
+        [60000.0, 65000.0, 50000.0],
+        [40000.0, 70000.0, 40000.0],
+        [65504.0, 65504.0, 65504.0],
+        [-1.0, 5.0, 5.0],
+    ];
+    for flags in [D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET] {
+        for &c in cases {
+            let cs = store_cs([c[0], c[1], c[2], 1.0]);
+            if let Ok(mut v) = super::validator::Validator::load(super::validator::Validator::default_path().as_deref()) {
+                let mut copy = cs.dxil.clone();
+                v.validate(&mut copy).expect("DXIL validation failed");
+            }
+            let (root, pso) = host.compute_pipeline(&cs).unwrap_or_else(|e| panic!("pipeline: {e}"));
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(vec![0]))],
+                        views: &[View::FormatTextureUav(1, 1, DXGI_FORMAT_R9G9B9E5_SHAREDEXP, flags)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("dispatch: {e}"));
+            check_rgb9e5(&format!("typed store, flags {flags:?}"), c, out[0][0]);
+        }
+    }
+}

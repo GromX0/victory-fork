@@ -1038,6 +1038,12 @@ extern "system" fn copy_texture_region(
         }
         const _: () =
             assert!(size_of::<CopyLocation>() == size_of::<D3D12_TEXTURE_COPY_LOCATION>());
+        if src.kind != FOOTPRINT
+            && let Some(texture) = crate::resource::host_resource(src.resource)
+            && copy_through_buffer(list, to, &to_location, [x, y, z], texture, &from, source_box)
+        {
+            return;
+        }
         // SAFETY: an open list; both locations in the host's layout, naming
         // live resources; the box is the title's (same layout).
         unsafe {
@@ -1053,6 +1059,117 @@ extern "system" fn copy_texture_region(
     }
     #[cfg(not(windows))]
     let _ = (this, dst, x, y, z, src, source_box);
+}
+
+/// Whether the host takes a copy of a box from a texture of host format `a` into one of `b`
+/// only through a buffer: two formats of the same texel width (no block formats) of
+/// different families, other than R32's family and R9G9B9E5, which it copies between. The
+/// RX 9070 refuses the rest (the list then fails to close and the run stops); it copies
+/// whole resources of any two (`victory-shader` `targets_tests`). The console copies the
+/// bits, whatever the formats; on AMD the title's R9G9B9E5 targets are in that format (on
+/// NVIDIA a stand-in, whose copies are skipped: [`unlike`]).
+#[cfg(windows)]
+fn copies_through_buffer(a: u32, b: u32) -> bool {
+    use crate::resource::{element, family};
+    let r32 = |f: u32| family(f) == 39;
+    match (element(a), element(b)) {
+        (Some((n, 1)), Some((m, 1))) if n == m => {
+            family(a) != family(b) && !(r32(a) && b == 67 || a == 67 && r32(b))
+        }
+        _ => false,
+    }
+}
+
+/// [`copy_texture_region`] from texture `from` (its location `from_at`, the title's box
+/// `source_box`) into `to` (`to_at`, at `corner`) through a buffer of ours, as the bits
+/// are, where [`copies_through_buffer`] says so; false (nothing recorded) otherwise, and for
+/// depth textures.
+#[cfg(windows)]
+fn copy_through_buffer(
+    list: &crate::host::HostList,
+    to: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    to_at: &CopyLocation,
+    corner: [u32; 3],
+    from: &windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    from_at: &CopyLocation,
+    source_box: *const [u32; 6],
+) -> bool {
+    use windows::Win32::Graphics::Direct3D12::*;
+    use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
+    // SAFETY: live resources.
+    let (d_to, d_from) = unsafe { (to.GetDesc(), from.GetDesc()) };
+    let (a, b) = (d_from.Format.0 as u32, d_to.Format.0 as u32);
+    let depth = |d: &D3D12_RESOURCE_DESC| d.Flags.0 & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL.0 != 0;
+    if !copies_through_buffer(a, b) || depth(&d_to) || depth(&d_from) {
+        return false;
+    }
+    let (Some(host), Some((element, _))) = (crate::host::host(), crate::resource::element(a)) else {
+        return false;
+    };
+    // The box, else the source subresource (its index is the location's first word).
+    let sub = from_at.footprint.offset as u32;
+    // SAFETY: a non-null box names six dwords.
+    let extent = match unsafe { source_box.as_ref() } {
+        Some(&[left, top, front, right, bottom, back]) => {
+            [right.saturating_sub(left), bottom.saturating_sub(top), back.saturating_sub(front)]
+        }
+        None => {
+            let mut part = D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default();
+            // SAFETY: a plain query for one subresource of a live texture.
+            unsafe {
+                host.device.GetCopyableFootprints(&d_from, sub, 1, 0, Some(&mut part), None, None, None)
+            };
+            [part.Footprint.Width, part.Footprint.Height, part.Footprint.Depth]
+        }
+    };
+    let [w, h, d] = extent;
+    if w == 0 || h == 0 || d == 0 {
+        return true;
+    }
+    let pitch = (u64::from(w) * element).next_multiple_of(256);
+    let Some(buffer) = host.uav_buffer(pitch * u64::from(h) * u64::from(d)) else {
+        return false;
+    };
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::info!(from = a, to = b, "a copy between two formats the host copies between only through a buffer: so copied, as the bits are")
+    });
+    let rows = |format: u32| D3D12_TEXTURE_COPY_LOCATION {
+        // SAFETY: a borrowed pointer the location never releases.
+        pResource: unsafe { std::mem::transmute_copy(&buffer) },
+        Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+            PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                Offset: 0,
+                Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                    Format: DXGI_FORMAT(format as i32),
+                    Width: w,
+                    Height: h,
+                    Depth: d,
+                    RowPitch: pitch as u32,
+                },
+            },
+        },
+    };
+    let (common, read, written) = (
+        D3D12_RESOURCE_STATE_COMMON,
+        D3D12_RESOURCE_STATE_COPY_SOURCE,
+        D3D12_RESOURCE_STATE_COPY_DEST,
+    );
+    let host_box = (!source_box.is_null()).then(|| source_box.cast::<D3D12_BOX>());
+    let [x, y, z] = corner;
+    // SAFETY: an open list; the locations name live resources in the host's layout (the
+    // texture locations the caller made), the buffer holds the box's rows and rests in the
+    // common state between copies; the box is the title's.
+    unsafe {
+        list.list.ResourceBarrier(&[crate::host::transition(&buffer, common, written)]);
+        list.list.CopyTextureRegion(&rows(a), 0, 0, 0, std::ptr::from_ref(from_at).cast(), host_box);
+        list.list.ResourceBarrier(&[crate::host::transition(&buffer, written, read)]);
+        list.list.CopyTextureRegion(std::ptr::from_ref(to_at).cast(), x, y, z, &rows(b), None);
+        list.list.ResourceBarrier(&[crate::host::transition(&buffer, read, common)]);
+    }
+    list.keep(&buffer);
+    true
 }
 
 /// Records a texture to buffer copy (a read back) of [`copy_texture_region`]
@@ -2339,6 +2456,118 @@ mod tests {
 
         let release = |object: This| slot::<extern "system" fn(This) -> u32>(object, 0x10)(object);
         for object in [list, allocator, texture, src, dst] {
+            assert_eq!(release(object), 0);
+        }
+    }
+
+    /// A copy of a box from a target in R9G9B9E5 (the title's targets of it are that format
+    /// on a host that renders to it: AMD) into one in R11G11B10, and of a whole level from
+    /// R11G11B10 into R10G10B10A2: the card refuses both as copies between textures (the
+    /// list fails to close), so they go through a buffer, and the console's bits arrive.
+    #[cfg(windows)]
+    #[test]
+    fn copies_between_formats_the_card_refuses_keep_the_bits() {
+        use crate::resource::PlacedFootprint;
+        use windows::Win32::Graphics::Direct3D12::{
+            D3D12_HEAP_PROPERTIES, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_DESC,
+            D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET, D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{
+            DXGI_FORMAT, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+        };
+        assert!(super::copies_through_buffer(67, 26) && super::copies_through_buffer(26, 24));
+        assert!(!super::copies_through_buffer(67, 42) && !super::copies_through_buffer(28, 29));
+        assert!(!super::copies_through_buffer(71, 24), "block formats");
+
+        let Some(host) = crate::host::host() else {
+            return;
+        };
+        let null = std::ptr::null();
+        let mut allocator = null;
+        assert_eq!(create_allocator(null, 0, &ALLOCATOR_IIDS[0], &mut allocator), S_OK);
+        let mut list = null;
+        assert_eq!(create_list(null, 0, 0, allocator, null, &LIST_IIDS[1], &mut list), S_OK);
+        let iid = crate::object::guid(
+            0x696442be, 0xa72e, 0x4059, [0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad],
+        );
+        let heap = D3D12_HEAP_PROPERTIES {
+            Type: D3D12_HEAP_TYPE_DEFAULT,
+            CreationNodeMask: 1,
+            VisibleNodeMask: 1,
+            ..Default::default()
+        };
+        let buffer = D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+            Width: 1024,
+            Height: 1,
+            DepthOrArraySize: 1,
+            MipLevels: 1,
+            Format: DXGI_FORMAT_UNKNOWN,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            ..Default::default()
+        };
+        let target = |format: u32| D3D12_RESOURCE_DESC {
+            Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Width: 4,
+            Height: 4,
+            Format: DXGI_FORMAT(format as i32),
+            Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
+            Flags: D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+            ..buffer
+        };
+        let create = |desc: &D3D12_RESOURCE_DESC| {
+            let mut resource = null;
+            assert_eq!(
+                crate::resource::create_committed(
+                    null, (&raw const heap).cast(), 0, std::ptr::from_ref(desc).cast(),
+                    0, null.cast(), &iid, &mut resource,
+                ),
+                S_OK
+            );
+            resource
+        };
+        let (shared, small, ten) = (create(&target(67)), create(&target(26)), create(&target(24)));
+        let (src, back_small, back_ten) = (create(&buffer), create(&buffer), create(&buffer));
+        let (src_data, _) = crate::resource::buffer_bytes(src).unwrap();
+        let (small_data, _) = crate::resource::buffer_bytes(back_small).unwrap();
+        let (ten_data, _) = crate::resource::buffer_bytes(back_ten).unwrap();
+        let texel = |x: usize, y: usize| 0x8400_0000u32 | ((y * 4 + x) as u32 * 0x0004_0201);
+        // SAFETY: the title buffers span 1024 writable bytes, rows 256 apart.
+        unsafe {
+            for y in 0..4 {
+                for x in 0..4 {
+                    src_data.add(y * 256 + x * 4).cast::<u32>().write_unaligned(texel(x, y));
+                }
+            }
+            small_data.write_bytes(0xa5, 1024);
+            ten_data.write_bytes(0xa5, 1024);
+        }
+        let at = |resource| CopyLocation { resource, kind: 0, footprint: PlacedFootprint::new(0, 0, 0, 0, 0, 0) };
+        let rows = |resource, format| CopyLocation { resource, kind: 1, footprint: PlacedFootprint::new(0, format, 4, 4, 1, 256) };
+        // the R9G9B9E5 target's bits from the buffer; a 3x3 box of it to (1, 1) of the
+        // R11G11B10 one; that one whole into the R10G10B10A2 one; both read back
+        copy_texture_region(list, &at(shared), 0, 0, 0, &rows(src, 67), null.cast());
+        copy_texture_region(list, &at(small), 1, 1, 0, &at(shared), &[0, 0, 0, 3, 3, 1]);
+        copy_texture_region(list, &at(ten), 0, 0, 0, &at(small), null.cast());
+        copy_texture_region(list, &rows(back_small, 26), 0, 0, 0, &at(small), null.cast());
+        copy_texture_region(list, &rows(back_ten, 24), 0, 0, 0, &at(ten), null.cast());
+        assert_eq!(close(list), S_OK);
+        host.execute(&[host_list(list).expect("host list")]);
+        for (name, data) in [("R11G11B10", small_data), ("R10G10B10A2", ten_data)] {
+            for y in 1..4 {
+                for x in 1..4 {
+                    // SAFETY: the list completed; the read-back rows are 256 bytes apart.
+                    let got = unsafe { data.add(y * 256 + x * 4).cast::<u32>().read_unaligned() };
+                    let want = texel(x - 1, y - 1);
+                    assert_eq!(got, want, "{name} texel ({x}, {y}): {got:#010x}, want {want:#010x}");
+                }
+            }
+        }
+        let release = |object: This| slot::<extern "system" fn(This) -> u32>(object, 0x10)(object);
+        for object in [list, allocator, shared, small, ten, src, back_small, back_ten] {
             assert_eq!(release(object), 0);
         }
     }
