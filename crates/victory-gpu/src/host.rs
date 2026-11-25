@@ -9796,3 +9796,45 @@ mod stale_overlap_tests {
         assert!(!stale_overlap() || relay_exact());
     }
 }
+
+#[cfg(test)]
+mod upload_memory_tests {
+    /// Investigation (run by hand, `--ignored`): whether the driver gives
+    /// back the commit of upload buffers we release. Makes and releases 400
+    /// buffers of 30 MB one at a time and prints the process's committed
+    /// bytes before, at the end, and after a pause. On 2026-11-25 the world
+    /// load held 13.5 GB of write-combined memory in 24-32 MB allocations in
+    /// the host's address range while our own live upload buffers were under
+    /// 2 GB.
+    /// Result on the RX 9070 (driver 32.0.32029.2010): committed MB before 55,
+    /// peak 256, after releasing all 256, 3 s later 256: freed upload memory
+    /// is reused, not hoarded; churn does not explain the 13.5 GB.
+    #[test]
+    #[ignore = "investigation: needs the GPU, prints memory figures"]
+    fn released_upload_buffers_give_their_commit_back() {
+        use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let committed = || {
+            // SAFETY: plain data the call fills in.
+            let mut c: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+            c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            // SAFETY: our own process and a sized structure.
+            unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb) };
+            c.PagefileUsage as u64 >> 20
+        };
+        let Some(host) = super::host() else { return };
+        let before = committed();
+        let mut peak = before;
+        for i in 0..400u64 {
+            let size = (30 << 20) + (i % 7) * (1 << 20);
+            let made = host.upload_buffer(size);
+            assert!(made.is_some(), "upload buffer {i}");
+            peak = peak.max(committed());
+            drop(made);
+        }
+        let end = committed();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let later = committed();
+        eprintln!("committed MB: before {before}, peak while making {peak}, after releasing all {end}, 3 s later {later}");
+    }
+}
