@@ -11,6 +11,8 @@
 #[cfg(windows)]
 pub mod apu;
 pub mod audio;
+/// Not a served DLL: wraps the title's own `XboxBvhBuilder.dll`.
+pub mod bvhbuilder;
 pub mod d3d12x;
 pub mod display;
 pub mod dsp;

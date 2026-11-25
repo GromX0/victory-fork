@@ -135,7 +135,10 @@ pub fn run(
         show(name, dll.bind_imports(&with_dlls, policy)?);
     }
     let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
-    show(&exe_name, image.bind_imports(&with_dlls, policy)?);
+    // With `VICTORY_BVH_TRACE`, the title's calls into its ray-tracing
+    // structure builder go through wrappers that log them.
+    let traced = victory_hle::modules::bvhbuilder::Traced::new(&with_dlls);
+    show(&exe_name, image.bind_imports(&traced, policy)?);
     if !execute {
         println!("not executing (pass --execute to start the title)");
         return Ok(());

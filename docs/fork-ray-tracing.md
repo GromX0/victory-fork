@@ -4,6 +4,12 @@ Status, 2026-11-25: **nothing is lit by ray tracing yet.** Most of the
 machinery translates and is unit-tested; it has not yet run end to end in the
 game. Everything here is off by default.
 
+The plan from here, with its evidence, is `docs/raytracing-plan.md`. One
+correction to what follows: the title does describe its geometry. Every
+build reaches `XboxBvhBuilder.dll` as standard D3D12 build descriptions,
+with vertex and index buffers, instances, destination and scratch, and
+`VICTORY_BVH_TRACE=1` logs them.
+
 ## What the title does
 
 The title's indirect light (probes, bounce, reflections) and the
