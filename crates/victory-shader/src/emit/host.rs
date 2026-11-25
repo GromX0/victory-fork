@@ -704,6 +704,42 @@ impl Host {
         texel: usize,
         clear: [f32; 4],
     ) -> Result<Vec<u8>, String> {
+        let mut out = self.draw_inner(root, pso, d, format, texel, clear, None)?;
+        Ok(out.swap_remove(0))
+    }
+
+    /// [`Host::draw_into`], then the target copied into a render-target texture of `copy_to`,
+    /// a format of the same texel width: whole (`CopyResource`), or with `boxed` all but its
+    /// first row and column, to the same place (`CopyTextureRegion` with a box). The target's
+    /// bytes and the copy's (where nothing was copied, what the texture held).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_and_copy(
+        &self,
+        root: &ID3D12RootSignature,
+        pso: &ID3D12PipelineState,
+        d: &Draw,
+        format: DXGI_FORMAT,
+        texel: usize,
+        clear: [f32; 4],
+        copy_to: DXGI_FORMAT,
+        boxed: bool,
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        let mut out = self.draw_inner(root, pso, d, format, texel, clear, Some((copy_to, boxed)))?;
+        let copy = out.pop().ok_or("no copy")?;
+        Ok((out.swap_remove(0), copy))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_inner(
+        &self,
+        root: &ID3D12RootSignature,
+        pso: &ID3D12PipelineState,
+        d: &Draw,
+        format: DXGI_FORMAT,
+        texel: usize,
+        clear: [f32; 4],
+        copy_to: Option<(DXGI_FORMAT, bool)>,
+    ) -> Result<Vec<Vec<u8>>, String> {
         let dev = &self.device;
         let (w, h) = d.size;
         // SAFETY: D3D12 calls with descriptions that outlive them; resources
@@ -956,36 +992,69 @@ impl Host {
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
             )]);
             let pitch = (w as usize * texel).next_multiple_of(256);
-            let readback = make(
-                D3D12_HEAP_TYPE_READBACK,
-                &buf_desc((pitch * h as usize) as u64),
-                D3D12_RESOURCE_STATE_COPY_DEST,
-                None,
-            )?;
-            let dst = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: std::mem::transmute_copy(&readback),
-                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
-                        Offset: 0,
-                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                            Format: format,
-                            Width: w,
-                            Height: h,
-                            Depth: 1,
-                            RowPitch: pitch as u32,
+            let mut sources = vec![(target.clone(), format)];
+            if let Some((to, boxed)) = copy_to {
+                let copy = make(
+                    D3D12_HEAP_TYPE_DEFAULT,
+                    &D3D12_RESOURCE_DESC {
+                        Format: to,
+                        ..tex_desc(w, h, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+                    },
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                )?;
+                if boxed {
+                    let at = |r: &ID3D12Resource| D3D12_TEXTURE_COPY_LOCATION {
+                        pResource: std::mem::transmute_copy(r),
+                        Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                        Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                    };
+                    let part = D3D12_BOX { left: 1, top: 1, front: 0, right: w, bottom: h, back: 1 };
+                    list.CopyTextureRegion(&at(&copy), 1, 1, 0, &at(&target), Some(&part));
+                } else {
+                    list.CopyResource(&copy, &target);
+                }
+                list.ResourceBarrier(&[transition(
+                    &copy,
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE,
+                )]);
+                sources.push((copy, to));
+            }
+            let mut readbacks = Vec::new();
+            for (texture, format) in &sources {
+                let readback = make(
+                    D3D12_HEAP_TYPE_READBACK,
+                    &buf_desc((pitch * h as usize) as u64),
+                    D3D12_RESOURCE_STATE_COPY_DEST,
+                    None,
+                )?;
+                let dst = D3D12_TEXTURE_COPY_LOCATION {
+                    pResource: std::mem::transmute_copy(&readback),
+                    Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                    Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                        PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                            Offset: 0,
+                            Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                                Format: *format,
+                                Width: w,
+                                Height: h,
+                                Depth: 1,
+                                RowPitch: pitch as u32,
+                            },
                         },
                     },
-                },
-            };
-            let src = D3D12_TEXTURE_COPY_LOCATION {
-                pResource: std::mem::transmute_copy(&target),
-                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
-                    SubresourceIndex: 0,
-                },
-            };
-            list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+                };
+                let src = D3D12_TEXTURE_COPY_LOCATION {
+                    pResource: std::mem::transmute_copy(texture),
+                    Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                    Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                        SubresourceIndex: 0,
+                    },
+                };
+                list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+                readbacks.push(readback);
+            }
             list.Close().map_err(err)?;
             queue.ExecuteCommandLists(&[Some(list.cast().map_err(err)?)]);
             let fence: ID3D12Fence = dev.CreateFence(0, D3D12_FENCE_FLAG_NONE).map_err(err)?;
@@ -1002,17 +1071,23 @@ impl Host {
             if let Err(e) = dev.GetDeviceRemovedReason() {
                 return Err(format!("device removed: {}", err(e)));
             }
-            let mut p = std::ptr::null_mut();
-            readback.Map(0, None, Some(&mut p)).map_err(err)?;
-            let mut out = Vec::with_capacity(w as usize * h as usize * texel);
-            for y in 0..h as usize {
-                let row =
-                    std::slice::from_raw_parts(p.cast::<u8>().add(y * pitch), w as usize * texel);
-                out.extend_from_slice(row);
+            let mut outs = Vec::new();
+            for readback in &readbacks {
+                let mut p = std::ptr::null_mut();
+                readback.Map(0, None, Some(&mut p)).map_err(err)?;
+                let mut out = Vec::with_capacity(w as usize * h as usize * texel);
+                for y in 0..h as usize {
+                    let row = std::slice::from_raw_parts(
+                        p.cast::<u8>().add(y * pitch),
+                        w as usize * texel,
+                    );
+                    out.extend_from_slice(row);
+                }
+                readback.Unmap(0, None);
+                outs.push(out);
             }
-            readback.Unmap(0, None);
-            drop(keep);
-            Ok(out)
+            drop((keep, sources));
+            Ok(outs)
         }
     }
 }
@@ -1051,6 +1126,9 @@ pub enum View<'a> {
     TextureUav(u32, u32),
     /// An R32_UINT texture UAV (width, height), zeroed (atomics).
     UintTextureUav(u32, u32),
+    /// A texture UAV of a format of 4-byte texels (width, height, format, more resource
+    /// flags), zeroed; read back as its dwords.
+    FormatTextureUav(u32, u32, DXGI_FORMAT, D3D12_RESOURCE_FLAGS),
     /// A typed RGBA16F buffer UAV of this many elements, zeroed.
     HalfUav(u32),
     /// A constant buffer of these dwords.
@@ -1153,18 +1231,14 @@ impl Host {
             };
             // Texel words: 4 for RGBA32F, 1 for R32_UINT.
             let footprint_as =
-                |r: &ID3D12Resource, w: u32, h: u32, words: u32| D3D12_TEXTURE_COPY_LOCATION {
+                |r: &ID3D12Resource, w: u32, h: u32, words: u32, format: DXGI_FORMAT| D3D12_TEXTURE_COPY_LOCATION {
                     pResource: std::mem::transmute_copy(r),
                     Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
                     Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
                         PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
                             Offset: 0,
                             Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                                Format: if words == 1 {
-                                    DXGI_FORMAT_R32_UINT
-                                } else {
-                                    DXGI_FORMAT_R32G32B32A32_FLOAT
-                                },
+                                Format: format,
                                 Width: w,
                                 Height: h,
                                 Depth: 1,
@@ -1173,7 +1247,9 @@ impl Host {
                         },
                     },
                 };
-            let footprint = |r: &ID3D12Resource, w: u32, h: u32| footprint_as(r, w, h, 4);
+            let footprint = |r: &ID3D12Resource, w: u32, h: u32| {
+                footprint_as(r, w, h, 4, DXGI_FORMAT_R32G32B32A32_FLOAT)
+            };
             let subresource = |r: &ID3D12Resource| D3D12_TEXTURE_COPY_LOCATION {
                 pResource: std::mem::transmute_copy(r),
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
@@ -1359,6 +1435,26 @@ impl Host {
                         )?;
                         uavs.push((t, Some((w, h)), 1, rb));
                     }
+                    View::FormatTextureUav(w, h, format, flags) => {
+                        let t = make(
+                            D3D12_HEAP_TYPE_DEFAULT,
+                            &texture_as(
+                                w,
+                                h,
+                                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | flags,
+                                format,
+                            ),
+                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        )?;
+                        dev.CreateUnorderedAccessView(&t, None, None, at);
+                        let pitch = (w * 4).next_multiple_of(256);
+                        let rb = make(
+                            D3D12_HEAP_TYPE_READBACK,
+                            &buffer(u64::from(pitch * h), D3D12_RESOURCE_FLAG_NONE),
+                            D3D12_RESOURCE_STATE_COPY_DEST,
+                        )?;
+                        uavs.push((t, Some((w, h)), 1, rb));
+                    }
                     View::Cbv(data) => {
                         let b = upload(data)?;
                         dev.CreateConstantBufferView(
@@ -1464,7 +1560,7 @@ impl Host {
                 )]);
                 match size {
                     Some((w, h)) => list.CopyTextureRegion(
-                        &footprint_as(rb, *w, *h, *n),
+                        &footprint_as(rb, *w, *h, *n, r.GetDesc().Format),
                         0,
                         0,
                         0,

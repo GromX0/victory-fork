@@ -2239,3 +2239,152 @@ fn v_cvt_pkrtz_f16_f32_rounds_both_halves_toward_zero() {
         }
     });
 }
+
+/// A 1-thread compute program like [`build_cs`] that runs `body` and then stores
+/// v[6:9] to texel (0, 0) of the RGBA32F texture UAV at heap slot 0 (`image_store`,
+/// all four channels), its descriptor loaded from the table into s[8:15].
+fn build_image_store_cs(body: &[u32]) -> HostShader {
+    let mut words = vec![
+        s_mov_b32(5, 0x80),
+        0x3D << 26 | 0x03 << 18 | 8 << 6 | 2, // s_load_dwordx8 s[8:15], s[4:5], 0
+        125 << 25,
+    ];
+    for i in 0..4u8 {
+        words.push(vop1(0x001, i + 1, sgpr(i))); // v_mov_b32 v1..v4, s0..s3
+    }
+    words.extend_from_slice(body);
+    words.push(vop1(0x001, 10, 0x80)); // v_mov_b32 v10, 0
+    words.push(vop1(0x001, 11, 0x80)); // v_mov_b32 v11, 0
+    // image_store v[6:9], v[10:11], s[8:15] dmask:0xf dim:2D unorm
+    words.push(0xF000_0000 | 0x08 << 18 | 1 << 12 | 0xF << 8 | 1 << 3);
+    words.push(10 | 6 << 8 | 2 << 16);
+    words.push(S_ENDPGM);
+    let code: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let native = NativeProgram {
+        stage: HwStage::Cs,
+        wave64: false,
+        vgprs: 12,
+        layout: vec![
+            RootParam {
+                root: RootType::Constants,
+                table_offset_dwords: 0,
+                sgprs: 4,
+                base_register: 0,
+                user_data: 0,
+                slot: 0,
+            },
+            RootParam {
+                root: RootType::Table,
+                table_offset_dwords: 0,
+                sgprs: 1,
+                base_register: 0,
+                user_data: 4,
+                slot: 1,
+            },
+        ],
+        used: vec![UsedResource {
+            kind: ResourceType::Uav,
+            root: RootType::Table,
+            table_offset_dwords: 0,
+            lower_bound: 0,
+            stride: 0,
+            dwords: 8,
+            user_data: 4,
+            slot: 1,
+        }],
+        io: StageIo::Cs(ComputeIo {
+            rsrc2: 5 << 1,
+            threads: [1, 1, 1],
+        }),
+        code,
+    };
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    let st = structure::structure(&p).expect("structure");
+    let res =
+        resource::track(&p, &native.layout, native.stage, Some(&st)).expect("resource::track");
+    let io = io::raise(&p, &native).expect("io::raise");
+    let lowered = lower::lower(&lower::Parts {
+        native: &native,
+        p: &p,
+        st: &st,
+        io: &io,
+        res: &res,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        prims: Vec::new(),
+        mesh_stride: 0,
+    })
+    .expect("lower");
+    let shader = HostShader {
+        stage: HwStage::Cs,
+        dxil: lowered.dxil,
+        user_data: lowered.user_data,
+        samplers: lowered.samplers,
+        static_samplers: Vec::new(),
+        root_cbvs: lowered.root_cbvs,
+        root_srvs: lowered.root_srvs,
+        root_uavs: lowered.root_uavs,
+        root_indexed_views: res.root_indexed_views,
+    };
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    shader
+}
+
+/// The NaN guard on typed image stores: a NaN a float operation of the program made, of
+/// any bits (a payload carried from its input, a negative one), stores as 0, not only the
+/// GPU's own 0x7FC00000. Every other value (a word made by integer operations, such as the
+/// packed R9G9B9E5 light the title stores to R32_UINT textures this way, or one only moved)
+/// keeps the old rule, so its bits pass unless they are exactly 0x7FC00000 or an infinity.
+#[test]
+fn the_nan_guard_on_image_stores_takes_every_nan_a_float_operation_makes() {
+    let shader = build_image_store_cs(&[
+        vop2(0x08, 6, 0xF2, 1), // v_mul_f32 v6, 1.0, v1
+        vop2(0x1C, 7, 0x80, 2), // v_or_b32 v7, 0, v2
+        vop2(0x08, 8, 0xF2, 3), // v_mul_f32 v8, 1.0, v3
+        vop1(0x001, 9, vgpr(4)), // v_mov_b32 v9, v4
+    ]);
+    let cases: [([u32; 4], [u32; 4]); 3] = [
+        // a payload NaN and a negative one from float operations; a NaN-looking integer
+        // word; a float moved
+        ([0x7F80_0001, 0xFFC1_2345, 0xFFC0_0001, 0x3F80_0000], [0, 0xFFC1_2345, 0, 0x3F80_0000]),
+        // numbers pass; infinities from float operations are +-65504 as before
+        ([0x3F80_0000, 0x0000_0001, 0x7F80_0000, 0x7FC0_0001], [0x3F80_0000, 1, 0x477F_E000, 0x7FC0_0001]),
+        ([0xBF80_0000, 0x7FC0_0000, 0xFF80_0000, 0x7FC0_0000], [0xBF80_0000, 0, 0xC77F_E000, 0]),
+    ];
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut ran = 0;
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let Ok(host) = Host::new(warp) else { continue };
+        let (root, pso) = host
+            .compute_pipeline(&shader)
+            .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
+        for (inputs, want) in cases {
+            let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                ud[u.index as usize] = match (u.root, u.slot) {
+                    (RootType::Constants, 0) => inputs[u.dword as usize],
+                    (RootType::Table, 1) => 0,
+                    other => panic!("unexpected user data {other:?}"),
+                };
+            }
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(ud))],
+                        views: &[View::TextureUav(1, 1)],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+            assert_eq!(out[0][..4], want, "{label}: stores of {inputs:08x?}");
+        }
+        ran += 1;
+    }
+    assert!(ran > 0, "no SM 6.6 device");
+}

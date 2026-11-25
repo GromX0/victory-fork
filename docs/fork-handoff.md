@@ -437,6 +437,20 @@ on the host).
    `v_cvt_f16_f32`, `v_pk_*` and `v_fma_mix*` too); and a console wave64
    `ds_bpermute_b32` run as one 64-lane wave read across the wave's halves,
    AMD only (fixed; `VICTORY_BPERMUTE_HALVES=0` for the old reading).
+   Then (agent/purple, after run diag-look of int/harvest-test 53c47a3a): the
+   frame's R9G9B9E5 is light the title packs into R32_UINT textures with
+   compute (`34fb51b8a0312e82` writes the 2560x1440 ones) and samples through
+   placed R9G9B9E5 views (alias copies; the log names 20-odd); none is a draw
+   target there. Copies, typed stores and read-backs of R9G9B9E5 on the RX 9070
+   keep the bits (`targets_tests`), except that the card refuses a box copied
+   between R9G9B9E5 or R11G11B10 and another format family (all but R32's): its
+   list would not close and the run would stop. Such copies now go through a
+   buffer (`list::copies_through_buffer`). The NaN guard on image stores takes
+   every NaN of a float operation's result; other values (packed light) keep
+   the old rule. Next: `VICTORY_SHADER_SAVE` for `34fb51b8a0312e82` to read how
+   it packs R9G9B9E5 (an exponent taken from an f16 conversion would lose the
+   largest channel near each power of two with the host's rounding toward zero:
+   `VICTORY_F16_NEAREST=1` is the A/B).
 2. Frame rate: the card is ~55% busy; the CPU side (copies 40-55 ms,
    preparing 70-90 ms a frame) is the limit.
 3. Series S device loss: try `VICTORY_FILL_WAIT=1` (fxceless's fills that
