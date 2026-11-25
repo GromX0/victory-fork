@@ -143,7 +143,7 @@ model 6.6 and mesh shaders, Rust, the Visual Studio Build Tools (C++ and a
 Windows SDK), and **about 24 GB of free memory commit** for the game.
 
 ```powershell
-git clone https://github.com/thomb2123/victory-fork
+git clone https://github.com/GromX0/victory-fork
 cd victory-fork
 git switch dev/integrate-clean
 copy victory.example.toml victory.toml        # your paths, outside the repository

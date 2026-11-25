@@ -1,4 +1,4 @@
-# Fork handoff (thomb2123/victory-fork)
+# Fork handoff (GromX0/victory-fork, formerly thomb2123/victory-fork)
 
 Working notes so that the next session does not repeat finished work.
 Update after every meaningful result. Claims are marked **verified** only
@@ -70,7 +70,8 @@ reaches the world at 1-2 s a frame, surfaces unlit.
 
 ## Repositories and branches
 
-- `origin` = thomb2123/victory-fork. `main` and
+- `origin` = GromX0/victory-fork (moved from thomb2123/victory-fork on
+  2026-11-25; the old address redirects). `main` and
   `claude/gta-vi-victory-fork-b5hg86` both at `a803c87` at session start
   (2026-11-25): identical to fxceless/victory-fork minus its two newest
   commits.
