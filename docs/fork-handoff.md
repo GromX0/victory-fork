@@ -39,18 +39,30 @@ Found by the fork watch after the last integration, not yet reviewed:
 
 The title running correctly, stably and responsively on the owner's
 Windows PC: first a steady 30 fps in representative gameplay, then 60
-where possible. Expected hardware (owner's statement, **not yet
-detected**): Ryzen 7 9800X3D, Radeon RX 9070 16 GB, 32 GB RAM, Windows.
+where possible. Hardware **detected 2026-11-25**: AMD Radeon RX 9070
+16 GB (driver 32.0.32029.2010; DXGI's default adapter, as the host
+device's log line shows) beside the CPU's integrated Radeon, Ryzen 7
+9800X3D, 32 GB RAM (44-60 GB commit limit, system-managed page file on
+C:), Windows 11 Pro 26200. Repository, runs and caches on D: (exFAT: git
+needs a `safe.directory` entry there).
 
 Milestones (from execution only):
 
 | | Milestone | State on the owner's PC |
 |-|-----------|--------------------------|
-| A | Builds, passes applicable checks | cross-checked from Linux only (see below); not yet built or tested on Windows |
-| B | Launches, reaches menus | not run |
-| C | World loads, renders, takes input | not run |
+| A | Builds, passes applicable checks | **verified** 2026-11-25: release build; `cargo test --workspace` 580 pass after 8dc5898 and 59c92d4 (first run: 3 victory-gpu failures, one a real allocator bug); GPU shader tests ran on the RX 9070 |
+| B | Launches, reaches menus | **verified**, run `20261125-092142-default-cold`: start screen at ~1.5 min, 30 fps; Enter (A) accepted |
+| C | World loads, renders, takes input | **partly**: same run reached the first cutscene, character lit, some buildings dark or misplaced; best 5.8-6.2 fps (162-172 ms/frame, 48-64 ms on the GPU); input in the world not tried |
 | D | Progresses past the first scene; graphics, controls, audio, checkpoint reload usable | not run |
-| E | Sustained session, stable, paced | not run |
+| E | Sustained session, stable, paced | **no**: run `20261125-093256-default-warm` aborted at 373 s, "memory allocation of 2823609 bytes failed" (0xC0000409) after a pipeline refused with E_OUTOFMEMORY; the title commits ~24 GB and other apps held 28 GB of a 44 GB limit. Redo with memory freed |
+
+Findings of those runs, for "Next": the "warm" run still dropped up to
+6,292 draws a frame for pipelines being made (the saved library was
+327 KB), so pipelines do not survive a launch; five shaders do not
+translate (b22a16a178976e1b 16-bit wave sum, ceb5eb68cd99cb07 descriptor
+address, 2fd01fca16993001 / 6b6db9f1a526daeb / 7d0f14ce44746d7e descriptor
+read as data) and mesh pipeline f5e50eb2108c425b+ce3f0432a08f1d35 is
+refused (E_INVALIDARG). `-Profile amd` runs not done yet.
 
 Others' reports, not reproduced here: fxceless (RTX 4070, i7-14700KF)
 reaches C at 3-5 fps with shadowed areas black; upstream (RX 6700 XT)
