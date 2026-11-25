@@ -36,10 +36,12 @@ reaches the world at 1-2 s a frame, surfaces unlit.
 - `upstream` = Marvisak/VIctory `main` `940d32f` (last checked
   2026-11-25 ~04:00 UTC). The fork's own work is one squashed commit on
   `ffe310e`; upstream has 319 commits (182 non-merge) since.
-- Local `dev/integrate` (worktree `/home/user/wt-integrate`, not pushed):
-  fxceless `310c6eb` + 24 clean upstream cherry-picks + 3 resolved
-  picks + 1 port + 1 lint fix. Head `bb6fdc7`. This is the build to try
-  first on the owner's PC.
+- Local `dev/integrate-clean` (worktree `/home/user/wt-integrate`, not
+  pushed): fxceless `310c6eb` + 24 clean upstream cherry-picks + 3
+  resolved picks + 1 port + 1 lint fix + these notes. This is the build
+  to try first on the owner's PC. (`dev/integrate` is an earlier copy
+  whose last two commits also carried a Linux build folder by mistake;
+  superseded, never pushed, same source tree.)
 
 A full merge of upstream into the fork was tried in memory
 (`git merge-tree`): **45 files, 342 conflict hunks** (lower.rs 60,
@@ -76,9 +78,9 @@ Results, 2026-11-25:
 |----------|--------|---------------------|-----------|----------------|
 | a803c87 (start) | pass | pass | pass | - |
 | fxceless 310c6eb | **fail** (3 lints, fixed in 832d4a0) | not run | - | - |
-| dev/integrate bb6fdc7 | pass | pass | pass | pass |
+| dev/integrate (bb6fdc7; same source tree as dev/integrate-clean) | pass | pass | pass | pass |
 
-Tests run natively on Linux (crates that build there), dev/integrate:
+Tests run natively on Linux (crates that build there), same tree:
 victory-core 11, victory-formats 24 (+4 ignored), victory-pipeline 4,
 victory-game 3, victory-shader 180 (+2 ignored): all pass.
 victory-pe: 4 tests read their own executable as a PE image and fail on
@@ -91,7 +93,7 @@ Linux (ELF): an environment artifact, not a defect. victory-gpu, -hle,
 Windows-only crates' tests. Wine 9.0 was tried and aborts at start in
 this VM (`free(): invalid pointer`); not pursued.
 
-## Changes on dev/integrate (since fxceless 310c6eb)
+## Changes on dev/integrate-clean (since fxceless 310c6eb)
 
 Clean cherry-picks of upstream (authorship kept, `-x` trailers):
 sampler point-mip and CreateSamplerX fixes (e45bacd, 23fc8a5, 7dfa86f,
@@ -150,10 +152,10 @@ their PR and issue discussions have not been read.
 
 Questions the first runs answer, smallest first:
 
-1. Does `dev/integrate` build and pass `cargo test --workspace` on the
+1. Does `dev/integrate-clean` build and pass `cargo test --workspace` on the
    RX 9070? This is the first run of the GPU shader tests, including the
    picked fixes, on RDNA4.
-2. Which build gets further on AMD: `dev/integrate` (fork line, tested on
+2. Which build gets further on AMD: `dev/integrate-clean` (fork line, tested on
    NVIDIA) or `upstream/main` (tested on AMD)? Same scene, same settings,
    separate cache folders.
 3. Furthest milestone (B/C) and the release build's periodic frame line
@@ -161,7 +163,7 @@ Questions the first runs answer, smallest first:
    is warm (second launch), not the first.
 
 ```powershell
-git fetch origin; git switch dev/integrate     # once it is pushed
+git fetch origin; git switch dev/integrate-clean   # once it is pushed
 copy victory.example.toml victory.toml        # game_dir, cache_dir, data_dir outside the repo
 pwsh tools\fork-run.ps1 -GameExe '<game dir>\<title exe>' -Tests -Seconds 600 -Label integrate-cold
 pwsh tools\fork-run.ps1 -GameExe '<game dir>\<title exe>' -NoBuild -Seconds 600 -Label integrate-warm
@@ -174,7 +176,7 @@ It was written without PowerShell to test it on: expect a first fix.
 
 ## Next
 
-1. Push `dev/integrate` (needs the owner's go-ahead), then the first run
+1. Push `dev/integrate-clean` (needs the owner's go-ahead), then the first run
    above.
 2. From that evidence: if the fork line hangs or misrenders on AMD,
    bisect the fork's GPU changes against upstream on the same scene; if
