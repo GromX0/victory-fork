@@ -661,6 +661,11 @@ pub(crate) struct PlacedFootprint {
 }
 
 impl PlacedFootprint {
+    #[cfg(all(windows, test))]
+    pub(crate) const fn new(offset: u64, format: u32, width: u32, height: u32, depth: u32, row_pitch: u32) -> Self {
+        Self { offset, format, width, height, depth, row_pitch }
+    }
+
     /// The bytes it spans in a buffer: every row pitched but the last.
     pub(crate) fn bytes(&self) -> Option<u64> {
         let (element, block) = element(self.format)?;
@@ -669,24 +674,62 @@ impl PlacedFootprint {
         Some(u64::from(self.row_pitch) * lines.saturating_sub(1) + last)
     }
 
-    /// For a read back through a host buffer: this footprint at offset 0
-    /// with its rows pitched as the host wants them (multiples of 256
-    /// bytes), then the bytes that buffer needs, the bytes of a row, the
-    /// rows, and the title's own pitch.
-    pub(crate) fn host_rows(&self) -> Option<(PlacedFootprint, [u64; 4])> {
+    /// The staging footprint and the rows covered by a texture read-back.
+    #[cfg(windows)]
+    pub(crate) fn read_back_layout(&self, extent: Option<[u32; 3]>) -> Option<(Self, ReadBackLayout)> {
+        let [width, height, depth] = extent.unwrap_or([self.width, self.height, self.depth]);
+        if width == 0 || height == 0 || depth == 0
+            || width > self.width || height > self.height || depth > self.depth
+        {
+            return None;
+        }
         let (element, block) = element(self.format)?;
-        let lines = (u64::from(self.height).div_ceil(block) * u64::from(self.depth)).max(1);
-        let row = u64::from(self.width).div_ceil(block) * element;
-        let pitch = row.max(1).next_multiple_of(256);
-        let host = PlacedFootprint {
+        let row = u64::from(width).div_ceil(block) * element;
+        let dst_pitch = u64::from(self.row_pitch);
+        if row > dst_pitch {
+            return None;
+        }
+        let rows_per_slice = u64::from(height).div_ceil(block);
+        let dst_slice_pitch = dst_pitch.checked_mul(u64::from(self.height).div_ceil(block))?;
+        let host_pitch = row.next_multiple_of(256);
+        let host_bytes = host_pitch.checked_mul(rows_per_slice)?.checked_mul(u64::from(depth))?;
+        let dst_bytes = dst_slice_pitch.checked_mul(u64::from(depth) - 1)?
+            .checked_add(dst_pitch.checked_mul(rows_per_slice - 1)?)?
+            .checked_add(row)?;
+        let staging = Self {
             offset: 0,
-            row_pitch: u32::try_from(pitch).ok()?,
+            width,
+            height,
+            depth,
+            row_pitch: u32::try_from(host_pitch).ok()?,
             ..*self
         };
-        Some((host, [pitch * lines, row, lines, u64::from(self.row_pitch)]))
+        Some((staging, ReadBackLayout {
+            row: usize::try_from(row).ok()?,
+            rows_per_slice: usize::try_from(rows_per_slice).ok()?,
+            slices: depth as usize,
+            host_pitch: usize::try_from(host_pitch).ok()?,
+            dst_pitch: self.row_pitch as usize,
+            dst_slice_pitch: usize::try_from(dst_slice_pitch).ok()?,
+            host_bytes,
+            dst_bytes,
+        }))
     }
 }
 const _: () = assert!(size_of::<PlacedFootprint>() == 32);
+
+/// Destination span and row strides for a texture read-back at the footprint origin.
+#[cfg(windows)]
+pub(crate) struct ReadBackLayout {
+    pub(crate) row: usize,
+    pub(crate) rows_per_slice: usize,
+    pub(crate) slices: usize,
+    pub(crate) host_pitch: usize,
+    pub(crate) dst_pitch: usize,
+    pub(crate) dst_slice_pitch: usize,
+    pub(crate) host_bytes: u64,
+    pub(crate) dst_bytes: u64,
+}
 
 const NO_FOOTPRINT: PlacedFootprint = PlacedFootprint {
     offset: u64::MAX,
@@ -1077,11 +1120,13 @@ extern "system" fn heap_query(this: This, iid: *const Iid, out: *mut This) -> HR
 extern "system" fn heap_release(this: This) -> u32 {
     object::release_boxed::<Heap>(this)
 }
-extern "system" fn heap_desc(this: This, out: *mut HeapDesc) {
+/// Returns `out`, as the x64 COM ABI requires for struct returns in `RAX`.
+extern "system" fn heap_desc(this: This, out: *mut HeapDesc) -> *mut HeapDesc {
     if !out.is_null() {
         // SAFETY: `this` is a heap; the title passes room for a description.
         unsafe { out.write((*this.cast::<Heap>()).desc) };
     }
+    out
 }
 
 /// A resource's memory: its own, or a range of a heap it holds a reference
@@ -1986,6 +2031,12 @@ impl HostTexture {
 impl Drop for HostTexture {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering::Relaxed;
+        // A texture with levels on demand: its tiles are in heaps of ours,
+        // not in the texture, so they stay given until nothing names the
+        // texture any more (`crate::tiles::let_go`).
+        if let Some(tiled) = self.tiled.take() {
+            crate::tiles::let_go(self.texture.clone(), tiled);
+        }
         HOST_TEXTURES[0].fetch_sub(1, Relaxed);
         HOST_TEXTURES[1].fetch_sub(self.bytes, Relaxed);
         if self.filled {
@@ -2720,11 +2771,13 @@ extern "system" fn map(this: This, _sub: u32, _read: *const c_void, out: *mut *m
     S_OK
 }
 extern "system" fn unmap(_: This, _sub: u32, _written: *const c_void) {}
-extern "system" fn resource_desc(this: This, out: *mut ResourceDesc) {
+/// Returns `out`, as the x64 COM ABI requires for struct returns in `RAX`.
+extern "system" fn resource_desc(this: This, out: *mut ResourceDesc) -> *mut ResourceDesc {
     if !out.is_null() {
         // SAFETY: checked non-null; the title passes room for a description.
         unsafe { out.write(resource(this).desc) };
     }
+    out
 }
 /// Device method `GetCustomHeapProperties`, returning its struct through a
 /// hidden first argument: what a standard heap type is as a custom heap.
@@ -2906,9 +2959,12 @@ mod tests {
         let memory = unsafe { &(*heap.cast::<Heap>()).memory };
         assert_eq!(memory.ptr.as_ptr() as u64 % KIB_64, 0);
         let mut back = std::mem::MaybeUninit::<HeapDesc>::uninit();
-        slot::<extern "system" fn(This, *mut HeapDesc)>(heap, 0x40)(heap, back.as_mut_ptr());
+        type GetDesc = extern "system" fn(This, *mut HeapDesc) -> *mut HeapDesc;
+        let get_desc = slot::<GetDesc>(heap, 0x40);
+        assert_eq!(get_desc(heap, back.as_mut_ptr()), back.as_mut_ptr());
         // SAFETY: written above.
         assert_eq!(unsafe { back.assume_init() }.size, 1 << 20);
+        assert!(get_desc(heap, std::ptr::null_mut()).is_null());
         assert_eq!(slot::<Release>(heap, 0x10)(heap), 0);
 
         let bad = HeapDesc {
@@ -4015,6 +4071,14 @@ float4 lit() : SV_Target { return 1.0; }
             &mut committed,
         );
         assert_eq!(hr, S_OK);
+        let mut back = std::mem::MaybeUninit::<ResourceDesc>::uninit();
+        type GetDesc = extern "system" fn(This, *mut ResourceDesc) -> *mut ResourceDesc;
+        let get_desc = slot::<GetDesc>(committed, 0x50);
+        assert_eq!(get_desc(committed, back.as_mut_ptr()), back.as_mut_ptr());
+        // SAFETY: written above.
+        let read = unsafe { back.assume_init() };
+        assert_eq!((read.dimension, read.width), (BUFFER, 256));
+        assert!(get_desc(committed, std::ptr::null_mut()).is_null());
         let mut data = std::ptr::null_mut();
         assert_eq!(
             slot::<Map>(committed, 0x40)(committed, 0, null.cast(), &mut data),

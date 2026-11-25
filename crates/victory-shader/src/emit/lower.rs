@@ -23,6 +23,11 @@ use crate::native::{HwStage, NativeProgram, ResourceType, RootType, StageIo, Usa
 use crate::resource::{Address, CODE, MEMORY, Resources, Role, Site, Source};
 use crate::structure::{Atom, Bool, LaneExit, Structured};
 
+/// Packed dot-product lowering (`v_dot*`), a child module so it shares the
+/// emitter's state without growing this file.
+#[path = "dot.rs"]
+mod dot;
+
 /// The ray-tracing node test (`image_bvh_intersect_ray`), a child module so
 /// it shares the emitter's state.
 #[path = "intersect.rs"]
@@ -3173,14 +3178,31 @@ impl<'a> Lower<'a> {
         let &m = self.x.st.masks.get(&lo).ok_or(LANE_MASK)?;
         // A mask that holds lanes outside EXEC where it is written (the complement of one,
         // say) is the ballot of the lanes that are there: all of them, where two exchanging
-        // host waves know every lane runs that block.
-        let made = self.def_block.get(&lo).copied();
-        let whole = self.exchange.is_some() && !self.local && made.is_none_or(|b| self.all_lanes(b));
-        if !self.x.st.active.contains(&lo) && !whole {
-            if self.exchange.is_some() && !self.local {
-                need(made.unwrap_or(0));
+        // host waves know every lane runs that block, or a native wave64 compute shader runs
+        // full waves and every lane reaches that block.
+        if !self.x.st.active.contains(&lo) {
+            let made = self.def_block.get(&lo).copied();
+            let native_wave64 = self.exchange.is_none()
+                && !self.local
+                && self.s.wave_size == Some(64)
+                && self.x.p.wave64
+                && self.s.threads.is_some_and(|t| t.iter().product::<u32>() % 64 == 0);
+            let whole = if self.exchange.is_some() && !self.local {
+                made.is_none_or(|b| self.all_lanes(b))
+            } else if native_wave64 {
+                made.is_none_or(|b| {
+                    all_lane_blocks(self.x.st)
+                        .is_some_and(|all| all.get(b).copied().unwrap_or(false))
+                })
+            } else {
+                false
+            };
+            if !whole {
+                if (self.exchange.is_some() && !self.local) || native_wave64 {
+                    need(made.unwrap_or(0));
+                }
+                return Err(MASK_ELSEWHERE);
             }
-            return Err(MASK_ELSEWHERE);
         }
         let (x, y) = match self.ballots.get(&lo) {
             Some(&xy) => xy,
@@ -7035,6 +7057,9 @@ impl<'a> Lower<'a> {
         }
         if let Some(op) = name.strip_prefix("v_pk_") {
             return self.packed16(inst, op, guard);
+        }
+        if name.starts_with("v_dot") {
+            return self.dot_product(inst, name, guard);
         }
         match name {
             "v_mad_u64_u32" => {

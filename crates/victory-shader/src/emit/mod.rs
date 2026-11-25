@@ -184,8 +184,23 @@ pub fn group_sync() -> u8 {
 /// Part of the translation: the shader cache keys on it (`victory-gpu`'s
 /// does).
 pub fn shader_opt() -> u32 {
-    static PASSES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *PASSES.get_or_init(|| parse_shader_opt(std::env::var("VICTORY_SHADER_OPT").ok().as_deref()))
+    static ASKED: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    let asked = *ASKED.get_or_init(|| {
+        std::env::var("VICTORY_SHADER_OPT").ok().map(|v| parse_shader_opt(Some(&v)))
+    });
+    asked.unwrap_or(bitcode::opt::ALL & !SKIPPED_OPT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Passes the host's driver cannot take, unless `VICTORY_SHADER_OPT` names them.
+static SKIPPED_OPT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The host GPU's PCI vendor; call before the first translation (the shader cache keys on
+/// [`shader_opt`]). AMD's compiler (amdxc64.dll 32.0.32029.2010) crashes on what the reuse
+/// pass leaves in `501f0865fdf45dfd` (CS_RaytracingResolve), and merges values itself.
+pub fn set_host_vendor(vendor: u32) {
+    if vendor == 0x1002 {
+        SKIPPED_OPT.fetch_or(bitcode::opt::REUSE, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Everything a translation depends on besides the container: the
@@ -510,6 +525,75 @@ pub fn emit(
             }
         }
     }
+    // Native wave64 compute (`host_max_wave() != 32`) whose cross-lane code
+    // (`half_sum`, or a lane mask holding lanes outside EXEC) sits where not
+    // every lane runs: retry without early-outs/skips and, if still needed,
+    // with enclosing per-lane branches taken wave-wide (`widen`). Unlike
+    // two-wave32 emulation, every console wave is already one host wave, so
+    // none of these forms adds a group barrier.
+    let original = if stuck
+        && native.stage == HwStage::Cs
+        && native.wave64
+        && lower::host_max_wave() != 32
+        && matches!(&original, Err(ShaderError::Unsupported { what, .. }) if lower::needs_every_lane(what))
+    {
+        let why = std::env::var_os("VICTORY_WAVE_WHY").is_some();
+        let deep_on = std::env::var_os("VICTORY_WAVE_DEEP_SKIPS").is_none_or(|v| v != "0");
+        let wide_on = std::env::var_os("VICTORY_WAVE_WIDE").is_none_or(|v| v != "0");
+        let form = |p: Option<ir::Program>| {
+            p.and_then(|p| {
+                let st = structure::structure(&p).ok()?;
+                let io = io::raise(&p, native).ok()?;
+                let res = resource::track(&p, &native.layout, native.stage, Some(&st)).ok()?;
+                Some((p, st, io, res))
+            })
+        };
+        let mut out = original;
+        let forms = [
+            ("without early-outs", form(ir::without_early_outs(p))),
+            ("without skips", form(ir::without_skips(p, false))),
+            (
+                "without skips, scalars followed",
+                if deep_on { form(ir::without_skips(p, true)) } else { None },
+            ),
+        ];
+        for (name, f) in &forms {
+            if let Some((fp, fst, fio, fres)) = f {
+                lower::take_needs();
+                let again = emit_program(c, native, fp, fst, fio, fres);
+                if why {
+                    match &again {
+                        Ok((_, wave)) => eprintln!("WAVE64-NATIVE-RETRY {name}: wave {wave:?}"),
+                        Err(e) => eprintln!("WAVE64-NATIVE-RETRY {name}: {e}"),
+                    }
+                }
+                if again.is_ok() {
+                    out = again;
+                    break;
+                }
+            }
+        }
+        if out.is_err() && wide_on {
+            let base = forms
+                .iter()
+                .rev()
+                .find_map(|(_, f)| f.as_ref().map(|x| &x.0))
+                .unwrap_or(p);
+            let again = widen(c, native, base, why);
+            if why {
+                match &again {
+                    Ok((_, wave)) => eprintln!("WAVE64-NATIVE-RETRY wave-wide branches: wave {wave:?}"),
+                    Err(e) => eprintln!("WAVE64-NATIVE-RETRY wave-wide branches: {e}"),
+                }
+            }
+            if again.is_ok() {
+                out = again;
+            }
+        }
+        out
+    } else {
+        original
+    };
     // SCC of a mask operation joined with a scalar test behind a per-lane skip (the 32-lane
     // trace programs): right once the wave takes that skip together ([`widen`]; the
     // lowering has named the skipped blocks).
