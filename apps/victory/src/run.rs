@@ -49,6 +49,9 @@ pub fn run(
 
     if execute {
         check_cpu_features()?;
+        // Early, so that a monitor's sound output is back before the
+        // title opens XAudio2 (see `keep_display_on`).
+        victory_hle::modules::lifecycle::keep_display_on();
     }
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();

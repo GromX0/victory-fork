@@ -264,6 +264,30 @@ pub(crate) fn relaunch(args: Vec<std::ffi::OsString>) {
     }
 }
 
+/// For as long as the process runs, the display and the system stay on,
+/// as a console's do while a game runs and as PC games ask for; a display
+/// that is off is turned on. Called once on the thread that runs the title
+/// (it lives as long as the process; `ES_CONTINUOUS` holds until then).
+///
+/// Why it matters beyond the screen: the title plays its sound through
+/// XAudio2 on the PC's default output, and when that output is a
+/// monitor's (DisplayPort or HDMI audio), Windows takes it away while the
+/// display is off. With no output XAudio2 runs nothing, the title's audio
+/// command queue (96 KiB) fills within ~14 s of boot, and its own bounds
+/// check stops it (an `int 3` at title +0x4dcbc9d): every launch after the
+/// displays went off on 2026-11-25 17:47 stopped there, and asking for the
+/// display brought both monitors' outputs back.
+pub fn keep_display_on() {
+    use windows_sys::Win32::System::Power::{
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, SetThreadExecutionState,
+    };
+    // SAFETY: a plain request about this thread's power needs.
+    let was = unsafe { SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED) };
+    if was == 0 {
+        tracing::warn!("the display could not be kept on: a monitor's sound output may go while it is off");
+    }
+}
+
 /// In a relaunched `victory`: waits (30 s at most) for the process it
 /// replaces to be gone, so the two never share the title's files.
 pub fn wait_for_previous() {
