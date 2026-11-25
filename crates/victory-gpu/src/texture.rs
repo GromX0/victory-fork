@@ -137,6 +137,38 @@ fn keep_buffers() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_STAGING_KEEP").is_some_and(|v| v == "1"))
 }
 
+/// How long a texture's staging buffer is kept after its last detile when
+/// the texture is uploaded and unchanged: `VICTORY_STAGING_IDLE=<ms>,<frames>`
+/// (both must pass), default 250 ms and 2 frames.
+fn staging_idle() -> (u64, u64) {
+    static IDLE: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
+    *IDLE.get_or_init(|| parse_staging_idle(std::env::var("VICTORY_STAGING_IDLE").ok().as_deref()))
+}
+
+fn parse_staging_idle(text: Option<&str>) -> (u64, u64) {
+    const DEFAULT: (u64, u64) = (250, 2);
+    let Some((ms, frames)) = text.and_then(|t| t.split_once(',')) else {
+        return DEFAULT;
+    };
+    match (ms.trim().parse(), frames.trim().parse()) {
+        (Ok(ms), Ok(frames)) => (ms, frames),
+        _ => DEFAULT,
+    }
+}
+
+#[cfg(test)]
+mod staging_idle_tests {
+    #[test]
+    fn staging_idle_takes_ms_and_frames_or_the_default() {
+        use super::parse_staging_idle as p;
+        assert_eq!(p(None), (250, 2));
+        assert_eq!(p(Some("2000,8")), (2000, 8));
+        assert_eq!(p(Some(" 0 , 1 ")), (0, 1));
+        assert_eq!(p(Some("fast")), (250, 2));
+        assert_eq!(p(Some("1,x")), (250, 2));
+    }
+}
+
 /// A list's hold on a staging buffer it recorded a copy from: the buffer
 /// is kept until the list is reset (after its submission ran).
 pub(crate) struct CopyHold(Arc<Staging>);
@@ -643,13 +675,28 @@ impl Staging {
     /// often keeps its buffer). Returns its bytes if it went.
     fn let_go_buffer(&self, idle_ms: u64, idle_frames: u64) -> u64 {
         use std::sync::atomic::Ordering::{Acquire, Relaxed};
-        if !self.uploaded.load(Relaxed)
-            || self.dirty.load(Relaxed)
-            || self.copies.load(Acquire) != 0
-            || self.waiting.load(Relaxed) != 0
-            || !crate::host::long_ago(self.detiled_at.load(Relaxed), idle_ms, idle_frames)
-        {
-            return 0;
+        // Why a buffer stays, counted by its bytes (the first reason that
+        // holds), for the line `let_go_idle` logs.
+        let kept = |why: usize| {
+            if self.held.try_lock().is_ok_and(|h| h.is_some()) {
+                KEPT_WHY[why].fetch_add(self.bytes, Relaxed);
+            }
+            0
+        };
+        if !self.uploaded.load(Relaxed) {
+            return kept(0);
+        }
+        if self.dirty.load(Relaxed) {
+            return kept(1);
+        }
+        if self.copies.load(Acquire) != 0 {
+            return kept(2);
+        }
+        if self.waiting.load(Relaxed) != 0 {
+            return kept(3);
+        }
+        if !crate::host::long_ago(self.detiled_at.load(Relaxed), idle_ms, idle_frames) {
+            return kept(4);
         }
         // A detile or an upload that holds it now: asked again at the next sweep.
         let Ok(mut held) = self.held.try_lock() else {
@@ -662,6 +709,11 @@ impl Staging {
         held.take().map_or(0, |h| h.bytes)
     }
 }
+
+/// Bytes of staging buffers a sweep kept, by the first reason: not uploaded
+/// yet, changed since its upload, a list copying from it, a level waiting
+/// for the card's memory, detiled into too recently.
+static KEPT_WHY: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
 /// For the memory line: staging buffers alive, their bytes, and how many
 /// of them their texture still has (the others wait for a list's reset).
@@ -708,10 +760,17 @@ pub(crate) fn let_go_idle(idle_ms: u64) {
     // running.
     let (mut went, mut bytes) = (0u64, 0u64);
     // Textures that stay, uploaded and unchanged: their buffers alone go
-    // (`VICTORY_STAGING_KEEP=1` keeps them). Not detiled into for 2 s at
-    // least, or the commit's own idle time if that is shorter (low commit).
+    // (`VICTORY_STAGING_KEEP=1` keeps them), once not detiled into for
+    // `VICTORY_STAGING_IDLE=<ms>,<frames>` (default 250 ms and 2 frames,
+    // both; or the commit's own idle time if that is shorter). 2 s and 8
+    // frames were too slow for the world's load, which runs below 1 fps:
+    // the buffers of the textures it streams piled up for 10 s and more,
+    // and commit reached the system's ceiling at 170 s (run base-d42). A
+    // texture the title rewrites keeps its buffer: each detile restarts
+    // the count.
     let (mut buffers, mut buffer_bytes) = (0u64, 0u64);
-    let buffer_idle = idle_ms.min(2_000);
+    let (idle_buffer_ms, idle_buffer_frames) = staging_idle();
+    let buffer_idle = idle_ms.min(idle_buffer_ms);
     let free = !keep_buffers();
     map.retain(|_, s| {
         let keep = Arc::strong_count(s) > 1
@@ -722,7 +781,7 @@ pub(crate) fn let_go_idle(idle_ms: u64) {
             went += 1;
             bytes += s.bytes;
         } else if free {
-            let b = s.let_go_buffer(buffer_idle, 8);
+            let b = s.let_go_buffer(buffer_idle, idle_buffer_frames);
             if b != 0 {
                 buffers += 1;
                 buffer_bytes += b;
@@ -733,6 +792,39 @@ pub(crate) fn let_go_idle(idle_ms: u64) {
     if went > 0 {
         prune_address_index();
         crate::host::trail(|| format!("sweep: {went} staging buffers of textures let go ({} KiB), held by no list", bytes >> 10));
+    }
+    // Once every 10 s: where the staging buffers' bytes are, and why the
+    // sweep kept those it kept.
+    {
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let now = crate::host::moment();
+        let last = LAST.load(Relaxed);
+        if last == 0 || crate::host::long_ago(last, 10_000, 0) {
+            LAST.store(now.max(1), Relaxed);
+            let why: Vec<u64> = KEPT_WHY.iter().map(|w| w.swap(0, Relaxed) >> 20).collect();
+            tracing::info!(
+                alive = HELD[0].load(Relaxed),
+                alive_mb = HELD[1].load(Relaxed) >> 20,
+                let_go_mb = BUFFERS_LET_GO[1].load(Relaxed) >> 20,
+                kept_mb_not_uploaded = why[0],
+                kept_mb_changed = why[1],
+                kept_mb_copying = why[2],
+                kept_mb_level_waiting = why[3],
+                kept_mb_recent = why[4],
+                "texture staging buffers (kept MB are summed over the sweeps since the last line)"
+            );
+            let alive: Vec<u64> = crate::host::ALIVE.iter().map(|a| a.load(Relaxed)).collect();
+            tracing::info!(
+                lists = alive[0],
+                scratch_chunks = alive[1],
+                scratch_mb = alive[2] >> 20,
+                spare_chunks = alive[3],
+                spare_mb = alive[4] >> 20,
+                list_uploads = alive[6],
+                list_uploads_mb = alive[7] >> 20,
+                "host lists and their upload memory alive (list uploads: texture data copied from buffers, zeros, scratch too big for a chunk)"
+            );
+        }
     }
     if buffers > 0 {
         BUFFERS_LET_GO[0].fetch_add(buffers, Relaxed);
@@ -1082,14 +1174,14 @@ pub(crate) fn card_writes(list: &HostList, resource: This, texture: &ID3D12Resou
                 host.device
                     .GetCopyableFootprints(&d, level, 1, 0, Some(&mut footprint), None, None, Some(&mut bytes));
             }
-            let Some((buffer, data)) = list.upload(host, bytes) else {
+            let Some(buffer) = zeros(host, bytes) else {
                 // (With the levels that share its tiles, if it is one of
                 // the small ones.)
                 unzeroed |= tiled.with_level(level);
                 continue;
             };
-            // SAFETY: a mapped buffer of `bytes` bytes, just made.
-            unsafe { std::ptr::write_bytes(data, 0, bytes as usize) };
+            // The list holds the shared buffer until it is reset.
+            list.keep(&buffer);
             let to = D3D12_TEXTURE_COPY_LOCATION {
                 // SAFETY: a borrowed pointer the location never releases.
                 pResource: unsafe { std::mem::transmute_copy(texture) },
@@ -1128,6 +1220,34 @@ pub(crate) fn card_writes(list: &HostList, resource: This, texture: &ID3D12Resou
         step.ran.store(true, std::sync::atomic::Ordering::Relaxed);
         step.on_demand.card_wrote(levels, memory);
     });
+}
+
+/// One upload buffer of zeros, at least `bytes` long, shared by every
+/// copy of zeros into a new level ([`card_writes`]): copies only read it,
+/// and nothing ever writes it after it is made. Each such copy used to make
+/// an upload buffer of the level's size, zero it and hold it until its list
+/// was reset: during the world's load those were most of the 13.5 GB of
+/// write-combined upload memory at the commit peak (runs memdump2,
+/// whykept: texture staging buffers were at most 1.8 GB of it). A larger
+/// one replaces it when a level needs more; lists that copied from the old
+/// one keep it alive.
+fn zeros(host: &crate::host::Host, bytes: u64) -> Option<ID3D12Resource> {
+    static ZEROS: Mutex<Option<(ID3D12Resource, u64)>> = Mutex::new(None);
+    let mut z = ZEROS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((buffer, size)) = z.as_ref()
+        && *size >= bytes
+    {
+        return Some(buffer.clone());
+    }
+    // Rounded up, so that a few sizes cover the levels the title makes.
+    let size = bytes.max(1 << 20).next_power_of_two();
+    let (buffer, data) = host.upload_buffer(size)?;
+    // SAFETY: a mapped buffer of `size` bytes, just made (upload memory is
+    // zero when made, but that is not promised for every driver).
+    unsafe { std::ptr::write_bytes(data, 0, size as usize) };
+    crate::host::name(&buffer, || format!("zeros for new levels {size:#x}"));
+    *z = Some((buffer.clone(), size));
+    Some(buffer)
 }
 
 impl Staging {
