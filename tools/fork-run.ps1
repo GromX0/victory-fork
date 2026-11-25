@@ -151,7 +151,11 @@ $facts['ran_seconds'] = [int]((Get-Date) - $started).TotalSeconds
 $facts | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $run 'run.json')
 
 # --- crashes.log from the data folder (default location; VICTORY_DATA_DIR overrides).
-$data = if ($env:VICTORY_DATA_DIR) { $env:VICTORY_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'victory\data' }
+# The folder victory itself reports (`victory config`: environment, then
+# victory.toml, then the default), so a data_dir set in victory.toml is seen.
+$data = Select-String -Path (Join-Path $run 'config.txt') -Pattern '^data_dir\s*:\s*(.+)$' -ErrorAction SilentlyContinue |
+    Select-Object -First 1 | ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() }
+if (-not $data) { $data = if ($env:VICTORY_DATA_DIR) { $env:VICTORY_DATA_DIR } else { Join-Path $env:LOCALAPPDATA 'victory\data' } }
 Get-ChildItem -Recurse -Filter crashes.log -Path $data -ErrorAction SilentlyContinue |
     Where-Object LastWriteTime -gt $started | ForEach-Object { Copy-Item $_.FullName (Join-Path $run "crashes-$($_.Directory.Name).log") }
 
