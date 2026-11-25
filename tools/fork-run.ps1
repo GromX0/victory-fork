@@ -45,7 +45,11 @@ param(
     [switch]$AmdSkips,
     # The diagnostics build (target\diag, --features diagnostics): needed for
     # VICTORY_SHADER_LOOP_LIMIT, captures and scripted keys. Not for timing.
-    [switch]$Diag
+    [switch]$Diag,
+    # The console the title is told it runs on. 'series-s' renders at the
+    # smaller console's resolution: KLBF Lab measured ~7.3 fps there against
+    # ~5 in Series X mode on an RX 9070 XT.
+    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x'
 )
 $ErrorActionPreference = 'Stop'
 $repo = (git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
@@ -89,6 +93,7 @@ $facts = [ordered]@{
     seconds      = $Seconds
     env          = $SetEnv
     profile      = $Profile
+    console      = $Console
     build        = $(if ($Diag) { 'diag' } else { 'release' })
     victory_env  = (Get-ChildItem env: | Where-Object Name -like 'VICTORY_*' | ForEach-Object { "$($_.Name)=$($_.Value)" })
 }
@@ -137,7 +142,8 @@ foreach ($k in $SetEnv.Keys) { Set-Item -Path "env:$k" -Value $SetEnv[$k] }
 if (-not $env:VICTORY_LOG) { $env:VICTORY_LOG = 'info' }
 $log = Join-Path $run 'victory.log'
 $err = Join-Path $run 'victory.err.log'
-$p = Start-Process -FilePath (Join-Path $kept 'victory.exe') -ArgumentList @('run', "`"$GameExe`"", '--execute') `
+$runArgs = @('run', "`"$GameExe`"", '--execute', '--console', $Console)
+$p = Start-Process -FilePath (Join-Path $kept 'victory.exe') -ArgumentList $runArgs `
     -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -NoNewWindow
 # Without the handle taken now, ExitCode reads empty once the process has exited.
 $null = $p.Handle
