@@ -48,7 +48,9 @@ param(
     [switch]$Diag
 )
 $ErrorActionPreference = 'Stop'
-$repo = (git rev-parse --show-toplevel).Trim()
+$repo = (git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
+# cargo works on the current folder: build and test this checkout wherever the script is called from.
+Set-Location -LiteralPath $repo
 $outFull = [System.IO.Path]::GetFullPath($OutDir)
 if ($outFull.StartsWith([System.IO.Path]::GetFullPath($repo), [System.StringComparison]::OrdinalIgnoreCase)) {
     throw "OutDir $outFull is inside the repository; choose a folder outside it (docs/asset-policy.md)"
@@ -99,9 +101,17 @@ if (-not $NoBuild) {
     else { cargo build --release -p victory --locked }
     if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
+# Runs a native command with stdout and stderr in one file. Windows PowerShell
+# 5.1 turns each redirected stderr line of a native command into an error
+# record, which stops the script under $ErrorActionPreference = 'Stop' (cargo
+# writes its progress to stderr), so the redirect is left to cmd.exe.
+function Invoke-Logged([string]$Command, [string]$LogFile) {
+    cmd /c "$Command > `"$LogFile`" 2>&1"
+    return $LASTEXITCODE
+}
 if ($Tests) {
-    cargo test --workspace --locked *> (Join-Path $run 'tests.log')
-    Write-Host "tests exit code $LASTEXITCODE (log: tests.log)"
+    $code = Invoke-Logged 'cargo test --workspace --locked' (Join-Path $run 'tests.log')
+    Write-Host "tests exit code $code (log: tests.log)"
 }
 $exe = Join-Path $repo $(if ($Diag) { 'target\diag\victory.exe' } else { 'target\release\victory.exe' })
 # Keep this exact build next to its results, so a good one survives later experiments.
@@ -110,7 +120,7 @@ New-Item -ItemType Directory -Force -Path $kept | Out-Null
 Copy-Item -Force $exe $kept
 (Get-FileHash -Algorithm SHA256 $exe).Hash | Set-Content (Join-Path $run 'victory.exe.sha256')
 
-& $exe config *> (Join-Path $run 'config.txt')
+$null = Invoke-Logged "`"$exe`" config" (Join-Path $run 'config.txt')
 
 # --- The run.
 # Switches left over in this shell that press keys or save frames would make
@@ -128,6 +138,8 @@ $log = Join-Path $run 'victory.log'
 $err = Join-Path $run 'victory.err.log'
 $p = Start-Process -FilePath (Join-Path $kept 'victory.exe') -ArgumentList @('run', "`"$GameExe`"", '--execute') `
     -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -NoNewWindow
+# Without the handle taken now, ExitCode reads empty once the process has exited.
+$null = $p.Handle
 $started = Get-Date
 if ($Seconds -gt 0) {
     if (-not $p.WaitForExit($Seconds * 1000)) { Stop-Process -Id $p.Id -Force; Write-Host "stopped after $Seconds s" }
