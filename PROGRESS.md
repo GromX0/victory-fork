@@ -52,7 +52,9 @@ gameplay scene, with no hang or device loss over a 10-minute session.
   **Its plain build fails CI's clippy gate** (`placed_filler_twins` never used without the diagnostics feature).
   Our branch `fix-clippy-placed-filler` fixes it.
 - User's PC (stated by the user, 2026-11-25; to be confirmed by the baseline's `hardware.txt`): **AMD Ryzen 7
-  9800X3D** (Zen 5) and **AMD Radeon RX 9070** (RDNA 4). OS, RAM, driver version and the game copy: unknown. Nothing
+  9800X3D** (Zen 5), **AMD Radeon RX 9070** (RDNA 4) and **32 GB RAM**. OS, driver version, page file and the game
+  copy: unknown. Others report ~25 GB process memory in the world (#424) and 24.4 GB resident with the builder on (#543),
+  so 32 GB is enough but close: keep the page file system-managed. Nothing
   has been reproduced there yet.
 - **This is not the fork author's hardware** (Intel + NVIDIA), so their results are a weaker hypothesis for us.
   What follows from the code (inferences, checked against the source, not yet run):
@@ -204,6 +206,12 @@ container reset, seed it from the cursor above. The 3-hourly scheduled task cove
 3. The current blocker. If the user's PC is attached: run the experiment and measure. If not: do only work that unit
    tests can check here (translator, ray-test maths), and mark it unverified on a GPU.
 4. Commit and push our branch and these notes. A pull request to `fxceless` is shown to the user first.
+
+## Plan for the first session at the PC (agreed 2026-11-25)
+
+The user will make a separate folder for the code checkout and tell us where the game is. We work in both: we build
+and run in the checkout, and **only read** the game folder. The game folder stays outside every repository, and
+nothing from it is copied into Git, the cloud session or posts.
 
 ## Waiting on the user (at the PC)
 
