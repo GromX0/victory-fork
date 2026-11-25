@@ -4,6 +4,37 @@ Working notes so that the next session does not repeat finished work.
 Update after every meaningful result. Claims are marked **verified** only
 when the run that shows them is named.
 
+## Start here (a session on the owner's PC)
+
+The owner is at the PC and wants to be hands-off: do the setup, build and
+runs yourself; they will click Windows admin prompts. They allowed
+ordinary development and diagnostic tools (Git, Rust, VS Build Tools and
+Windows SDK, PIX, PresentMon, AMD's Radeon Developer Tool Suite); ask
+before any driver, BIOS or Windows security change. Keep game files
+unchanged and out of Git; logs and caches outside the repository. Commit
+as `thomb2123 <thomb2123@users.noreply.github.com>`, keep other authors'
+names on their commits, push to `dev/integrate-clean` (`main` follows it
+by fast-forward only; never force-push).
+
+1. Detect the real machine (GPU and driver, CPU, RAM, disk, whether
+   Resizable BAR / Smart Access Memory is on) and record it under Goal.
+2. Build release, run `cargo test --workspace` (first time the GPU shader
+   tests run on the RX 9070; failures there are findings, report them).
+3. `pwsh tools\fork-run.ps1 -GameExe <exe> -Seconds 600` twice per setting
+   (cold, then warm) for: default; `-Profile amd`; `-Profile amd -SetEnv
+   @{ VICTORY_RELAY = '2' }`. Record the furthest milestone and the frame
+   lines in the table under Goal.
+4. Fix the earliest blocker the runs show (see "Next").
+
+Found by the fork watch after the last integration, not yet reviewed:
+- Joaco9020/mangrove 5959db7a (`victory warm`: pre-translate every shader
+  and pre-build compute pipelines) and 2995c9d5 (`VICTORY_POOL_NO_ASSERT`,
+  "gets past the 8-minute crash": check what it disables before using it).
+- triippywhale 43b65e23 (twice the dynamic descriptor slots on an
+  uncapped heap: the AMD case).
+- FQY55kai d7413997 / 11cdbec6 (speed switches on by default; shader fixes).
+- tools/fork-watch.sh marks commits as NEW too eagerly; fix it.
+
 ## Goal
 
 The title running correctly, stably and responsively on the owner's
