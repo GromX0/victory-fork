@@ -733,6 +733,24 @@ fn log_adapter(device: &ID3D12Device) {
         }
         Err(error) => tracing::warn!(%error, "the host device's adapter could not be named"),
     }
+    // Whether the processor can write the card's memory directly (GPU
+    // upload heaps: Resizable BAR / Smart Access Memory on, a driver and
+    // runtime that offer them). The console has one memory; with these, a
+    // copy of title memory could live where the card reads it.
+    let mut o16 = D3D12_FEATURE_DATA_D3D12_OPTIONS16::default();
+    // SAFETY: a plain query into a struct of its own size.
+    let asked = unsafe {
+        device.CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS16,
+            (&raw mut o16).cast(),
+            size_of_val(&o16) as u32,
+        )
+    };
+    tracing::info!(
+        gpu_upload_heaps = asked.is_ok() && o16.GPUUploadHeapSupported.as_bool(),
+        asked = asked.is_ok(),
+        "the card's memory the processor can write directly (Resizable BAR / Smart Access Memory)"
+    );
 }
 
 #[cfg(test)]
