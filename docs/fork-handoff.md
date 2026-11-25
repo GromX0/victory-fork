@@ -361,6 +361,61 @@ the FP16 stand-in for R9G9B9E5 carry bright values); the exposure overshoots
 for the first seconds after a load (the title's auto exposure catching up at
 0.3 fps); bounce light indoors is approximate (rays miss).
 
+### 2026-11-25 night (RX 9070 16 GB, Ryzen 7 9800X3D, 32 GB)
+
+| Run | What changed | Result |
+| --- | --- | --- |
+| `faces-textures` | upstream #334 buffer-state tracking (17b3e5e8) + `VICTORY_TEXTURE_STAGE_MB=1024`, `VICTORY_TEXTURE_STAGE_MS=1000` | **faces render** (the woman in the cell has a face), 7.0 fps at ~5,900 draws, 480 s, no error |
+| `nanguard-off` | NaN guard off | purple unchanged, so the guard is not the cause; device lost at 239 s |
+| `pool-inplace` | `VICTORY_INPLACE_POOL=1` (6b29560a) | works, but slower: 4.0-4.9 fps; 438 s, no error; 7.9 GB of commit still held after exit (agents were building at the same time, so the number is not clean) |
+| `seriess-v2` | `-Console series-s` | stuck on a black start screen |
+| `seriess-v3` | `-Console series-s` | out of memory at 168 s (0xC0000409, system commit peaked at 62.2 GB) |
+
+Findings:
+
+- Faces and characters were the implicit buffer promotion on AMD: a buffer
+  written by a shader and read by the next draw in the same list kept stale
+  data. `BufferStates` (port of upstream #334) gives each host copy an
+  explicit read or write state per command; `VICTORY_BUFFER_STATES=0` turns
+  it off.
+- Resizable BAR is on: the adapter reports `GPUUploadHeapSupported`
+  (6143d2bb logs it at start), so title memory could live in GPU upload heaps
+  that the processor writes straight into, instead of host copies.
+- In place probe: `OpenExistingHeapFromFileMapping` takes private and
+  committed (`SEC_COMMIT`) sections and refuses the reserved pool sections;
+  the title has ~10.5 GB of pool views. `VICTORY_INPLACE_POOL=1` commits the
+  pool as ≤1 GiB sections and places buffers in them. It runs, but slower
+  than the copies (4.0-4.9 against 7.0 fps), so it stays off by default; the
+  next try is GPU upload heaps for the hot ranges only.
+- Commit, not RAM, is what runs out: with the game closed the system's
+  commit sat at 38.5 of 47.8 GB, ~17 GB of it held outside any process (by
+  the driver, released only by a restart) and SignalRGB growing by 9-12 GB.
+  `fork-run.ps1` now records the commit before, at peak and after, stops the
+  game when it grows by more than `-CommitGrowLimitGB` (38) or the page
+  file's drive drops below `-PageDriveMinGB` (6), and warns when more than
+  2 GB is still held after exit (c7daebbf).
+- Series S is black because the title draws through FidelityFX FSR 4
+  (`amd_fidelityfx_loader_xbox.dll`) and `DeserializeComputePipelineStateX`
+  is not implemented; this tree has no FidelityFX path. Upstream 0b35b7f
+  runs FidelityFX on the host (`VICTORY_FIDELITYFX_DIR`), which needs AMD's
+  `amd_fidelityfx_upscaler_dx12.dll` from the FidelityFX SDK (not
+  downloaded; needs the owner's approval).
+- Device losses: DRED reports a page fault at a wild GPU address while
+  "textures picked by index made ready"; intermittent (239 s, never in the
+  480 s runs with #334).
+- Purple only on AMD: the brightest colours (ceiling lights, white paper,
+  eyes) lose green. The NaN guard is ruled out.
+- Still refused: the mesh pipeline `f5e50eb2108c425b+ce3f0432a08f1d35`
+  (`E_INVALIDARG`).
+
+Work in progress on branches (worktrees under `D:\dev\wt-*`): `agent/mesh`
+(the refused mesh pipeline), `agent/pipelines` (pipeline library kept
+between launches and a warm-up), `agent/purple` (the purple colours: shader
+analysis and a capture reader), `agent/rt` (`docs/raytracing-plan.md`: rays
+that hit without the title's BVH builder corrupting title memory),
+`agent/harvest` (fixes from other forks), `agent/fsr` (upstream FidelityFX
+on the host).
+
 ## Next
 
 1. Purple in the brightest colours: captures of a frame with a ceiling light
