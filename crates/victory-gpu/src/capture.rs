@@ -445,10 +445,18 @@ fn dump_one(
             };
             tracing::info!(?resource, depths = ?most(depths), top_bytes = ?most(tops), "24-bit depth plane values (value, texels)");
         }
-        let mut values = String::new();
-        if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, rows, &mut values) {
+        let own = f.Format.0 as u32;
+        // R32_UINT also as R9G9B9E5 (`-f42as67`): the title packs light into such textures
+        // and reads them through R9G9B9E5 views; as numbers they show nothing.
+        let readings: &[(u32, &str)] = if own == 42 { &[(42, ""), (67, "as67")] } else { &[(own, "")] };
+        for &(format, suffix) in readings {
+            let mut values = String::new();
+            let Some(rgba) = to_rgba(format, f.Width as usize, f.Height as usize, pitch, rows, &mut values) else {
+                tracing::info!(format = own, ?resource, "target not dumped: format");
+                continue;
+            };
             let name = format!(
-                "frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}",
+                "frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}{suffix}",
                 d.Width, d.Height, d.Format.0
             );
             save_as(&name, f.Width, f.Height, f.Width as usize * 4, false, &rgba);
@@ -463,8 +471,6 @@ fn dump_one(
                     let _ = writeln!(file, "{name} {values}");
                 }
             }
-        } else {
-            tracing::info!(format = f.Format.0, ?resource, "target not dumped: format");
         }
         buffer.Unmap(0, None);
     }

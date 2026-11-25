@@ -2388,3 +2388,140 @@ fn the_nan_guard_on_image_stores_takes_every_nan_a_float_operation_makes() {
     }
     assert!(ran > 0, "no SM 6.6 device");
 }
+
+/// Runs `shader` (built by [`build_image_store_cs`]) with each case's four root constants,
+/// its UAV `view`, on the hardware device and WARP: each case's first texel's dwords.
+fn run_image_store(shader: &HostShader, view: fn() -> View<'static>, cases: &[[u32; 4]]) -> Vec<(&'static str, Vec<Vec<u32>>)> {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = Vec::new();
+    for (label, warp) in [("hardware", false), ("warp", true)] {
+        let Ok(host) = Host::new(warp) else { continue };
+        let (root, pso) = host
+            .compute_pipeline(shader)
+            .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
+        let mut outs = Vec::new();
+        for inputs in cases {
+            let mut ud = vec![0u32; shader.user_data_dwords().max(1) as usize];
+            for u in &shader.user_data {
+                ud[u.index as usize] = match (u.root, u.slot) {
+                    (RootType::Constants, 0) => inputs[u.dword as usize],
+                    (RootType::Table, 1) => 0,
+                    other => panic!("unexpected user data {other:?}"),
+                };
+            }
+            let out = host
+                .dispatch(
+                    &root,
+                    &pso,
+                    &Dispatch {
+                        roots: vec![(0, Root::Constants(ud))],
+                        views: &[view()],
+                        samplers: &[],
+                        groups: [1, 1, 1],
+                    },
+                )
+                .unwrap_or_else(|e| panic!("{label}: dispatch failed: {e}"));
+            outs.push(out[0].clone());
+        }
+        all.push((label, outs));
+    }
+    assert!(!all.is_empty(), "no SM 6.6 device");
+    all
+}
+
+/// The title packs light as R9G9B9E5 words with integer operations and stores them
+/// through `image_store` into R32_UINT textures (the lighting compute pass of the cell and
+/// the prison yard writes twenty-odd such textures). Many such words read as f32 denormals
+/// (shared exponent 0 or 16 with a small blue mantissa: the largest channel in [1, 2)),
+/// NaNs or -0: the card stores every one bit for bit, as the console's image store does,
+/// apart from the NaN guard's two exact patterns (0x7FC00000 and the infinities).
+#[test]
+fn packed_words_stored_to_r32_uint_keep_their_bits() {
+    let shader = build_image_store_cs(&[vop2(0x1C, 6, 0x80, 1)]); // v_or_b32 v6, 0, v1
+    let words = [
+        0x8000_0001u32, // a negative denormal: exponent 16, all mantissas but red's 0
+        0x8001_2345,    // exponent 16, blue 0, green 0x91, red 0x145
+        0x0000_0123,    // a positive denormal
+        0x8000_0000,    // -0: exponent 16, black
+        0x7F80_0001,    // a signalling NaN's bits: exponent 15, blue 0x1E0, red 1
+        0xFFC1_2345,    // a quiet NaN's bits, negative
+        0x7FC0_0001,
+        0x8400_8080,    // an ordinary word (1.0, 0.25, 0.5 at exponent 16)
+    ];
+    let cases: Vec<[u32; 4]> = words.iter().map(|&w| [w, 0, 0, 0]).collect();
+    let r32 = || View::FormatTextureUav(1, 1, windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_UINT, windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_FLAG_NONE);
+    for (label, outs) in run_image_store(&shader, r32, &cases) {
+        for (out, &w) in outs.iter().zip(&words) {
+            assert_eq!(out[0], w, "{label}: {w:#010x} stored as {:#010x}", out[0]);
+        }
+    }
+}
+
+/// The title's R9G9B9E5 packer, as GFX10 does it: each channel clamped to [0, 65408]
+/// (`v_med3_f32`), the largest (at least 2^-16) rounded to nine bits by adding 0x07804000
+/// to its bits, its exponent field a power of two S; each channel's nine bits the low bits
+/// of S + channel (an f32 sum, rounded to nearest even), the shared exponent S's plus 16.
+/// The packed word for `rgb`, as the console's float adds give it.
+fn console_rgb9e5(rgb: [f32; 3]) -> u32 {
+    let [r, g, b] = rgb.map(|x| x.clamp(0.0, 65408.0));
+    let most = 2f32.powi(-16).max(r).max(g).max(b);
+    let s = most.to_bits().wrapping_add(0x0780_4000) & 0x7F80_0000;
+    let at = |x: f32| (f32::from_bits(s) + x).to_bits();
+    let e = (s << 4).wrapping_add(0x1000_0000);
+    (at(b) << 18 | e) | at(g) << 9 | at(r) & 0x1FF
+}
+
+/// That packer translated and run on the card, for the values where a shared exponent can
+/// lose its largest channel (the largest just under, at and over a power of two, the tie
+/// that rounds up to the next, each channel the largest in turn: the flower beds' rainbow
+/// speckle would be that): the console's words bit for bit, and no channel lost.
+#[test]
+fn the_titles_rgb9e5_packer_matches_the_console_bit_for_bit() {
+    let lit = |w: u32| w;
+    let mut body = Vec::new();
+    for (dst, src) in [(5u8, 1u16), (6, 2), (7, 3)] {
+        // v_med3_f32 vD, vS, 0, 65408.0
+        body.extend_from_slice(&vop3(0x157, dst, vgpr(src as u8), 0x80, 255));
+        body.push(lit(65408f32.to_bits()));
+    }
+    // v_max3_f32 v8, 2^-16, v5, v6; v_max_f32 v8, v8, v7
+    body.extend_from_slice(&vop3(0x154, 8, 255, vgpr(5), vgpr(6)));
+    body.push(2f32.powi(-16).to_bits());
+    body.push(vop2(0x10, 8, vgpr(8), 7));
+    // v_add_nc_u32 v8, 0x07804000, v8; v_and_b32 v8, 0x7f800000, v8
+    body.extend([vop2(0x25, 8, 255, 8), 0x0780_4000, vop2(0x1B, 8, 255, 8), 0x7F80_0000]);
+    // v_add_f32 vC, v8, vC (C = 5, 6, 7)
+    body.extend([vop2(0x03, 5, vgpr(8), 5), vop2(0x03, 6, vgpr(8), 6), vop2(0x03, 7, vgpr(8), 7)]);
+    // v_lshl_add_u32 v9, v8, 4, 0x10000000
+    body.extend_from_slice(&vop3(0x346, 9, vgpr(8), 0x84, 255));
+    body.push(0x1000_0000);
+    // v_lshlrev_b32 v6, 9, v6; v_and_b32 v5, 0x1ff, v5
+    body.extend([vop2(0x1A, 6, 0x89, 6), vop2(0x1B, 5, 255, 5), 0x1FF]);
+    // v_lshl_or_b32 v7, v7, 18, v9; v_or3_b32 v6, v7, v6, v5 (into the store's first channel)
+    body.extend_from_slice(&vop3(0x36F, 7, vgpr(7), 0x92, vgpr(9)));
+    body.extend_from_slice(&vop3(0x372, 6, vgpr(7), vgpr(6), vgpr(5)));
+    let shader = build_image_store_cs(&body);
+    let mut colours = Vec::new();
+    for top in [1.998f32, 1.998_046_9, 1.999, 1.999_999_9, 2.0, 0.999_999_9, 255.99, 65407.99, 65408.0, 1e9, 3.0 * 2f32.powi(-17)] {
+        colours.push([top, top, top]);
+        colours.push([top, 0.5 * top, 0.25 * top]);
+        colours.push([0.25 * top, top, 0.5 * top]);
+        colours.push([0.5 * top, 0.25 * top, top]);
+        colours.push([0.9 * top, top, 0.0]);
+    }
+    let cases: Vec<[u32; 4]> = colours.iter().map(|c| [c[0].to_bits(), c[1].to_bits(), c[2].to_bits(), 0]).collect();
+    let r32 = || View::FormatTextureUav(1, 1, windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_UINT, windows::Win32::Graphics::Direct3D12::D3D12_RESOURCE_FLAG_NONE);
+    for (label, outs) in run_image_store(&shader, r32, &cases) {
+        for (out, c) in outs.iter().zip(&colours) {
+            let want = console_rgb9e5(*c);
+            assert_eq!(out[0], want, "{label}: {c:?} packed as {:#010x}, the console's {want:#010x}", out[0]);
+            // the packer never loses a channel: each within half a step of its clamped value
+            let step = 2f64.powi((want >> 27) as i32 - 24);
+            for (k, at) in [0, 9, 18].into_iter().enumerate() {
+                let got = f64::from(want >> at & 0x1FF) * step;
+                let x = f64::from(c[k].clamp(0.0, 65408.0));
+                assert!((got - x).abs() <= step * 0.5 + 1e-12, "{c:?}: channel {k} {got} for {x}");
+            }
+        }
+    }
+}
