@@ -11,5 +11,8 @@ foreach ($v in "VICTORY_KEYS", "VICTORY_CAPTURE", "VICTORY_CAPTURE_FRAMES", "VIC
 New-Item -ItemType Directory -Force $Cache, $Data | Out-Null
 $env:VICTORY_CACHE_DIR = $Cache
 $env:VICTORY_DATA_DIR = $Data
-& $Exe run $Game --execute 2>&1 | Out-File "$env:TEMP\ztrx.log" -Encoding utf8
-Write-Host "Exited with $LASTEXITCODE; log: $env:TEMP\ztrx.log"
+# Logged through cmd, not a PowerShell pipe: ezbyDev/victory-amd found that
+# piping the title through PowerShell stalls it.
+$Log = "$env:TEMP\ztrx.log"
+cmd /c "`"$Exe`" run `"$Game`" --execute > `"$Log`" 2>&1"
+Write-Host "Exited with $LASTEXITCODE; log: $Log"

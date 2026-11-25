@@ -18,7 +18,7 @@
 
 .EXAMPLE
   # Same build again, no rebuild, with extra switches:
-  pwsh tools\fork-run.ps1 -GameExe 'D:\games\title\title.exe' -NoBuild -Env @{ VICTORY_RELAY = '0' }
+  pwsh tools\fork-run.ps1 -GameExe 'D:\games\title\title.exe' -NoBuild -SetEnv @{ VICTORY_RELAY = '0' }
 #>
 param(
     [Parameter(Mandatory = $true)][string]$GameExe,
@@ -29,9 +29,23 @@ param(
     # Also run `cargo test --workspace` (the GPU shader tests need this machine).
     [switch]$Tests,
     # Extra environment variables for this run only, e.g. @{ VICTORY_LATE_WAIT = '3' }.
-    [hashtable]$Env = @{},
+    [hashtable]$SetEnv = @{},
     # Short name for this run, used in the folder name.
-    [string]$Label = 'run'
+    [string]$Label = 'run',
+    # 'amd': the stability settings ezbyDev/victory-amd reports for an RX 9060 XT
+    # (RDNA4), limited to switches that mean the same in this branch (checked in
+    # the code): relay off (on by default here since fxceless c96b4f2, and said to
+    # remove the device on AMD), submissions sent ahead (LATE_WAIT=3), clean-up
+    # passes 4, 16 and 32 off (SHADER_OPT=11, victory-amd's tested value; 59 would
+    # turn off pass 4 alone), pipeline workers at normal priority.
+    [ValidateSet('default', 'amd')][string]$Profile = 'default',
+    # With -Profile amd: also skip the five compute programs victory-amd reports
+    # crashing, page-faulting or hanging AMD's shader compiler. Removes their
+    # draws and dispatches: use only once a run has shown that failure.
+    [switch]$AmdSkips,
+    # The diagnostics build (target\diag, --features diagnostics): needed for
+    # VICTORY_SHADER_LOOP_LIMIT, captures and scripted keys. Not for timing.
+    [switch]$Diag
 )
 $ErrorActionPreference = 'Stop'
 $repo = (git rev-parse --show-toplevel).Trim()
@@ -40,6 +54,12 @@ if ($outFull.StartsWith([System.IO.Path]::GetFullPath($repo), [System.StringComp
     throw "OutDir $outFull is inside the repository; choose a folder outside it (docs/asset-policy.md)"
 }
 if (-not (Test-Path -LiteralPath $GameExe)) { throw "no file at $GameExe" }
+if ($Profile -eq 'amd') {
+    $amd = @{ VICTORY_RELAY = '0'; VICTORY_LATE_WAIT = '3'; VICTORY_SHADER_OPT = '11'; VICTORY_PIPELINE_PRIORITY = 'normal' }
+    if ($Diag) { $amd['VICTORY_SHADER_LOOP_LIMIT'] = '1024' }
+    if ($AmdSkips) { $amd['VICTORY_SKIP_PIPELINES'] = 'c1eee35dbc50a9ef,f16876929fa64f9f,eeed82b877b44b5f,02384a60fda6f2d0,39f0e9aeb156a61c' }
+    foreach ($k in $amd.Keys) { if (-not $SetEnv.ContainsKey($k)) { $SetEnv[$k] = $amd[$k] } }
+}
 
 $commit = (git -C $repo rev-parse HEAD).Trim()
 $short = $commit.Substring(0, 10)
@@ -64,7 +84,9 @@ $facts = [ordered]@{
     disks        = $disk
     game_exe     = $GameExe
     seconds      = $Seconds
-    env          = $Env
+    env          = $SetEnv
+    profile      = $Profile
+    build        = $(if ($Diag) { 'diag' } else { 'release' })
     victory_env  = (Get-ChildItem env: | Where-Object Name -like 'VICTORY_*' | ForEach-Object { "$($_.Name)=$($_.Value)" })
 }
 $facts | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $run 'run.json')
@@ -73,16 +95,17 @@ Write-Host ("GPU: " + (($gpu | ForEach-Object { "$($_.Name) driver $($_.DriverVe
 
 # --- Build (release: the only profile performance is reported from).
 if (-not $NoBuild) {
-    cargo build --release -p victory --locked
-    if ($LASTEXITCODE -ne 0) { throw "release build failed" }
+    if ($Diag) { cargo build --profile diag -p victory --features diagnostics --locked }
+    else { cargo build --release -p victory --locked }
+    if ($LASTEXITCODE -ne 0) { throw "build failed" }
 }
 if ($Tests) {
     cargo test --workspace --locked *> (Join-Path $run 'tests.log')
     Write-Host "tests exit code $LASTEXITCODE (log: tests.log)"
 }
-$exe = Join-Path $repo 'target\release\victory.exe'
+$exe = Join-Path $repo $(if ($Diag) { 'target\diag\victory.exe' } else { 'target\release\victory.exe' })
 # Keep this exact build next to its results, so a good one survives later experiments.
-$kept = Join-Path $outFull "builds\$short"
+$kept = Join-Path $outFull ("builds\$short" + $(if ($Diag) { '-diag' } else { '' }))
 New-Item -ItemType Directory -Force -Path $kept | Out-Null
 Copy-Item -Force $exe $kept
 (Get-FileHash -Algorithm SHA256 $exe).Hash | Set-Content (Join-Path $run 'victory.exe.sha256')
@@ -92,14 +115,14 @@ Copy-Item -Force $exe $kept
 # --- The run.
 # Switches left over in this shell that press keys or save frames would make
 # the run unlike normal play: clear them unless this run asks for them with
-# -Env (the same list as scripts\play.ps1, from Zettrox/ztrx).
+# -SetEnv (the same list as scripts\play.ps1, from Zettrox/ztrx).
 $cleared = @()
 foreach ($v in 'VICTORY_KEYS', 'VICTORY_CAPTURE', 'VICTORY_CAPTURE_FRAMES', 'VICTORY_DUMP_TARGETS') {
-    if (-not $Env.ContainsKey($v) -and (Test-Path "env:$v")) { Remove-Item "env:$v"; $cleared += $v }
+    if (-not $SetEnv.ContainsKey($v) -and (Test-Path "env:$v")) { Remove-Item "env:$v"; $cleared += $v }
 }
 if ($cleared) { Write-Host "cleared for this run: $($cleared -join ', ')" }
 $facts['cleared_env'] = $cleared
-foreach ($k in $Env.Keys) { Set-Item -Path "env:$k" -Value $Env[$k] }
+foreach ($k in $SetEnv.Keys) { Set-Item -Path "env:$k" -Value $SetEnv[$k] }
 if (-not $env:VICTORY_LOG) { $env:VICTORY_LOG = 'info' }
 $log = Join-Path $run 'victory.log'
 $err = Join-Path $run 'victory.err.log'

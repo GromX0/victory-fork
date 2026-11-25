@@ -176,8 +176,20 @@ pwsh tools\fork-run.ps1 -GameExe '<game dir>\<title exe>' -NoBuild -Seconds 600 
 For plain play without measurement: `powershell -ExecutionPolicy Bypass -File
 scripts\play.ps1 -Game '<game dir>\<title exe>'` (Zettrox's launcher).
 
+AMD settings to A/B (claims, none shown on an RX 9070 yet): `-Profile amd`
+sets relay off, `LATE_WAIT=3`, `SHADER_OPT=11` and normal-priority pipeline
+workers (ezbyDev/victory-amd, RX 9060 XT RDNA4: the relay removed the
+device there). The RDNA3 forks (victory-chapter-ii on an RX 7900 XTX,
+4.1-4.8 fps) ran with the relay on without device loss, so run both:
+`-Profile amd` and `-Profile amd -SetEnv @{ VICTORY_RELAY = '2' }`.
+`-AmdSkips` adds victory-amd's five skipped compute programs (removes
+their work; only after a run shows the compiler crash or hang).
+`-Diag` is needed for `VICTORY_SHADER_LOOP_LIMIT`. The shader cache key
+hashes the executable, so every rebuild starts cold: compare warm runs
+of one build.
+
 `tools/fork-run.ps1` clears leftover scripted-press and capture switches
-(as `play.ps1` does) unless `-Env` asks for them, records commit, GPU and driver, CPU, OS, disk and
+(as `play.ps1` does) unless `-SetEnv` asks for them, records commit, GPU and driver, CPU, OS, disk and
 `VICTORY_*` variables, keeps a copy of the executable under
 `%LOCALAPPDATA%\victory\runs\builds\<commit>`, and writes the logs there.
 It was written without PowerShell to test it on: expect a first fix.
