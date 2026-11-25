@@ -3476,6 +3476,17 @@ impl<'a> Lower<'a> {
         self.s.m.select(c, up, hi, lo)
     }
 
+    /// `f` as the f16 result of a 16-bit float operation: the host's conversion (on the RX
+    /// 9070 and WARP toward zero, 65504 for any finite value past it, where the console's
+    /// gives infinity from 65520 on: `valu_tests`), or with [`f16_nearest_on`] the console's.
+    fn half_result(&mut self, f: V) -> V {
+        if f16_nearest_on() {
+            return self.f16_nearest(f);
+        }
+        let i32t = self.s.t.i32;
+        self.s.op(self.cur, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[f])
+    }
+
     /// `(a >> off[4:0]) & ((1 << width) - 1)`, sign-extended from the field's
     /// top bit when `signed`; widths from 32 on take every bit. A signed
     /// field that runs past bit 31 extends from bit 31, as the hardware
@@ -4596,8 +4607,22 @@ impl<'a> Lower<'a> {
             let at = self.s.m.bin(c, Bin::Add, at, o);
             let two = self.s.m.i32(2);
             let src = self.s.m.bin(c, Bin::LShr, at, two);
-            let last = self.s.m.i32(self.wave() - 1);
-            let src = self.s.m.bin(c, Bin::And, src, last);
+            let k31 = self.s.m.i32(31);
+            let mut src = self.s.m.bin(c, Bin::And, src, k31);
+            // GFX10 permutes each 32-lane half of a wave64 on its own (ACO builds full-wave
+            // permutes from two): lane addr / 4 mod 32 of this lane's half. A 64-lane host wave
+            // (AMD) read across the halves. `VICTORY_BPERMUTE_HALVES=0`: as before.
+            static HALVES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if self.wave() == 64 {
+                let lane = self.lane_index();
+                let k = self.s.m.i32(32);
+                let mut half = self.s.m.bin(c, Bin::And, lane, k);
+                if !*HALVES.get_or_init(|| std::env::var_os("VICTORY_BPERMUTE_HALVES").is_none_or(|v| v != "0")) {
+                    let at = self.s.m.bin(c, Bin::LShr, at, two);
+                    half = self.s.m.bin(c, Bin::And, at, k);
+                }
+                src = self.s.m.bin(c, Bin::Or, src, half);
+            }
             let x = match guard {
                 Some(g) => {
                     let z = self.s.m.i32(0);
@@ -7619,9 +7644,7 @@ impl<'a> Lower<'a> {
                     Some(Ok(o)) => o,
                     _ => self.s.m.i32(0),
                 };
-                let h = self
-                    .s
-                    .op(c, "legacyF32ToF16", Attr::ReadNone, self.s.t.i32, 130, &[r]);
+                let h = self.half_result(r);
                 let (keep, h) = if name == "v_fma_mixhi_f16" {
                     let k16 = self.s.m.i32(16);
                     (0xFFFF, self.s.m.bin(c, Bin::Shl, h, k16))
@@ -7644,11 +7667,10 @@ impl<'a> Lower<'a> {
                 int(self, r)
             }
             "v_cvt_f16_f32" if v.opsel == 0 => {
-                // Rounded to nearest even (the MODE default) into the low half.
+                // Into the low half, rounded as the MODE default says (to nearest even:
+                // [`Self::half_result`]).
                 let a = f(self, 0)?;
-                let r = self
-                    .s
-                    .op(c, "legacyF32ToF16", Attr::ReadNone, self.s.t.i32, 130, &[a]);
+                let r = self.half_result(a);
                 let Some(Operand::Vector { reg, .. }) = v.dst else {
                     return Err("a 16-bit result outside a VGPR");
                 };
@@ -8425,14 +8447,11 @@ impl<'a> Lower<'a> {
                 f = l.unary(7, f);
             }
             // The console rounds to nearest; the host's conversion may round toward zero
-            // (NVIDIA's does), one step of the last place lower where the two differ.
+            // (NVIDIA's and the RX 9070's do), one step of the last place lower where the two
+            // differ, and 65504 for an overflow.
             // shortcut: the host's conversion unless `VICTORY_F16_NEAREST=1`
             // ([`f16_nearest_on`]), which costs a dozen instructions per result.
-            let h = if f16_nearest_on() {
-                l.f16_nearest(f)
-            } else {
-                l.s.op(l.cur, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[f])
-            };
+            let h = l.half_result(f);
             l.write_half(inst, h, guard)
         };
         if name == "v_cvt_f16_f32" {
@@ -8730,7 +8749,7 @@ impl<'a> Lower<'a> {
             return Err("modifiers on a packed integer operation");
         }
         let c = self.cur;
-        let (i32t, f32t) = (self.s.t.i32, self.s.t.f32);
+        let f32t = self.s.t.f32;
         let mut halves = Vec::new();
         for high in [false, true] {
             let mut xs = Vec::new();
@@ -8762,8 +8781,7 @@ impl<'a> Lower<'a> {
                 if v.clamp {
                     f = self.unary(7, f);
                 }
-                self.s
-                    .op(c, "legacyF32ToF16", Attr::ReadNone, i32t, 130, &[f])
+                self.half_result(f)
             } else {
                 let k16 = self.s.m.i32(16);
                 let sext = |l: &mut Self, x: V| {

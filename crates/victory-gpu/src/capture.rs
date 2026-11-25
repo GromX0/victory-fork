@@ -445,12 +445,24 @@ fn dump_one(
             };
             tracing::info!(?resource, depths = ?most(depths), top_bytes = ?most(tops), "24-bit depth plane values (value, texels)");
         }
-        if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, rows) {
+        let mut values = String::new();
+        if let Some(rgba) = to_rgba(f.Format.0 as u32, f.Width as usize, f.Height as usize, pitch, rows, &mut values) {
             let name = format!(
                 "frame-{frame}-{i:02}-{resource:?}-{}x{}-f{}",
                 d.Width, d.Height, d.Format.0
             );
             save_as(&name, f.Width, f.Height, f.Width as usize * 4, false, &rgba);
+            // What the picture cannot show: a NaN channel is black there, as is a negative
+            // one (`tools/purple-pass.ps1` reads these lines).
+            if !values.is_empty()
+                && let Some(folder) = folder()
+            {
+                use std::io::Write;
+                let path = folder.join(format!("frame-{frame}-values.txt"));
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = writeln!(file, "{name} {values}");
+                }
+            }
         } else {
             tracing::info!(format = f.Format.0, ?resource, "target not dumped: format");
         }
@@ -523,6 +535,7 @@ fn half(h: u16) -> f32 {
     let (sign, exp, man) = ((h >> 15) as u32, ((h >> 10) & 0x1f) as i32, (h & 0x3ff) as f32);
     let v = match exp {
         0 => man * 2f32.powi(-24),
+        31 if man != 0.0 => f32::NAN,
         31 => f32::INFINITY,
         e => (1.0 + man / 1024.0) * 2f32.powi(e - 15),
     };
@@ -535,6 +548,7 @@ fn small_float(bits: u32, man: u32) -> f32 {
     let (exp, m) = ((bits >> man) & 0x1f, (bits & ((1 << man) - 1)) as f32);
     match exp {
         0 => m / (1 << man) as f32 * 2f32.powi(-14),
+        31 if m != 0.0 => f32::NAN,
         31 => f32::INFINITY,
         e => (1.0 + m / (1 << man) as f32) * 2f32.powi(e as i32 - 15),
     }
@@ -544,7 +558,7 @@ fn small_float(bits: u32, man: u32) -> f32 {
 /// as channel values scaled so the largest finite one is white (single
 /// channels: lowest black, highest white, as grey). `None` for formats not
 /// handled.
-fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8]) -> Option<Vec<u8>> {
+fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8], notes: &mut String) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(w * h * 4);
     let px = |x: usize, y: usize, n: usize| &rows[y * pitch + x * n..][..n];
     let u16_at = |b: &[u8], i: usize| u16::from_le_bytes([b[2 * i], b[2 * i + 1]]);
@@ -578,6 +592,13 @@ fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8]) -> Option
         26 => (4, Box::new(move |b| {
             let v = u32_at(b, 0);
             [small_float(v & 0x7ff, 6), small_float(v >> 11 & 0x7ff, 6), small_float(v >> 22, 5)]
+        })),
+        // R9G9B9E5: the title's targets of it are that format on a host that renders to it
+        // (AMD), the 16-bit float stand-in elsewhere.
+        67 => (4, Box::new(move |b| {
+            let v = u32_at(b, 0);
+            let scale = 2f32.powi((v >> 27) as i32 - 24);
+            [0, 9, 18].map(|k| (v >> k & 0x1ff) as f32 * scale)
         })),
         9..=10 => (8, Box::new(move |b| [half(u16_at(b, 0)), half(u16_at(b, 1)), half(u16_at(b, 2))])),
         11..=14 => (8, Box::new(move |b| [0, 1, 2].map(|i| f32::from(u16_at(b, i))))),
@@ -614,6 +635,25 @@ fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8]) -> Option
     let above = values.iter().filter(|v| v.iter().any(|c| c.is_finite() && *c > low)).count();
     let nonzero_percent = above as f32 * 100.0 / values.len().max(1) as f32;
     tracing::info!(format, low, high, nonzero_percent, "target values");
+    // Colour channels apart: their largest finite values and how many texels are NaN,
+    // infinite or negative in each (black in the picture, as a lost channel is).
+    if !grey {
+        let mut special = [[0usize; 3]; 3];
+        let mut most = [0f32; 3];
+        for v in &values {
+            for (k, &c) in v.iter().enumerate() {
+                let kind = if c.is_nan() { 0 } else if c.is_infinite() { 1 } else if c < 0.0 { 2 } else { 3 };
+                if kind < 3 {
+                    special[kind][k] += 1;
+                }
+                if c.is_finite() {
+                    most[k] = most[k].max(c);
+                }
+            }
+        }
+        let [nan, inf, negative] = special;
+        *notes = format!("high {high} max_rgb {most:?} nan_rgb {nan:?} inf_rgb {inf:?} negative_rgb {negative:?} texels {}", values.len());
+    }
     // Small float colour targets (the 1x1 luminance and exposure targets):
     // every texel's four channels as numbers. The picture has no alpha and
     // eight bits a channel.
@@ -687,7 +727,7 @@ fn to_rgba(format: u32, w: usize, h: usize, pitch: usize, rows: &[u8]) -> Option
     }
     // Float colours (scene light) go through a cube root: scaled linearly,
     // a night scene under one lamp of 50 units came out all black.
-    let curved = matches!(format, 1..=2 | 9..=10 | 26);
+    let curved = matches!(format, 1..=2 | 9..=10 | 26 | 67);
     for v in values {
         let c = v.map(|c| {
             let t = ((c - low) / range).clamp(0.0, 1.0);
@@ -837,11 +877,30 @@ mod tests {
     fn unorm16_and_xr_bias_targets_decode_as_their_formats() {
         // Red 0x8000 (a half-float -0), green 0x4000, blue 0.
         let unorm16 = [0x00, 0x80, 0x00, 0x40, 0, 0, 0xff, 0xff];
-        assert_eq!(super::to_rgba(11, 1, 1, 8, &unorm16), Some(vec![255, 127, 0, 255]));
+        assert_eq!(super::to_rgba(11, 1, 1, 8, &unorm16, &mut String::new()), Some(vec![255, 127, 0, 255]));
         // Red 0x3ff, green 0x1ff, blue 0, alpha 3.
         let xr = (0x3ffu32 | 0x1ff << 10 | 3 << 30).to_le_bytes();
-        assert_eq!(super::to_rgba(89, 1, 1, 4, &xr), Some(vec![255, 127, 0, 255]));
+        assert_eq!(super::to_rgba(89, 1, 1, 4, &xr, &mut String::new()), Some(vec![255, 127, 0, 255]));
         // B8G8R8A8 still swaps to RGBA.
-        assert_eq!(super::to_rgba(87, 1, 1, 4, &[1, 2, 3, 4]), Some(vec![3, 2, 1, 255]));
+        assert_eq!(super::to_rgba(87, 1, 1, 4, &[1, 2, 3, 4], &mut String::new()), Some(vec![3, 2, 1, 255]));
+    }
+
+    /// R9G9B9E5 (the RX 9070 renders the title's targets of it in that format) decodes by
+    /// its shared exponent, and the notes count NaN, infinite and negative channels, which
+    /// the picture shows black.
+    #[test]
+    fn shared_exponent_targets_decode_and_specials_are_counted() {
+        // 1.0, 0.5, 0.25 (exponent 16: mantissas over 256), then 0, 0, 0.
+        let mut rows = (256u32 | 128 << 9 | 64 << 18 | 16 << 27).to_le_bytes().to_vec();
+        rows.extend([0; 4]);
+        let mut notes = String::new();
+        let rgba = super::to_rgba(67, 2, 1, 8, &rows, &mut notes).unwrap();
+        assert_eq!(rgba[..4], [255, 202, 160, 255], "cube roots of 1, 1/2, 1/4");
+        assert!(notes.contains("max_rgb [1.0, 0.5, 0.25]"), "{notes}");
+        // Half floats: green NaN, blue infinite, red negative.
+        let texel = [0x00, 0xbc, 0x00, 0x7e, 0x00, 0x7c, 0x00, 0x3c];
+        let mut notes = String::new();
+        super::to_rgba(10, 1, 1, 8, &texel, &mut notes).unwrap();
+        assert!(notes.contains("nan_rgb [0, 1, 0] inf_rgb [0, 0, 1] negative_rgb [1, 0, 0]"), "{notes}");
     }
 }

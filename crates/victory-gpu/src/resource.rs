@@ -244,8 +244,11 @@ pub(crate) fn pc_format(format: u32) -> u32 {
 /// (NVIDIA) refused the whole texture, so every pass that wrote it drew
 /// nothing. There 8-bit RGBA stands in: the same channels in the same
 /// order, every 4-bit level exact and every 5-bit level within 1/510.
-/// The title also renders to R9G9B9E5 (67), which no PC GPU does: 16-bit
+/// The title also renders to R9G9B9E5 (67), which NVIDIA does not: 16-bit
 /// float RGBA stands in, with at least R9G9B9E5's precision and range.
+/// The RX 9070 renders to, blends and writes all three, so it has none of
+/// these stand-ins (checked on the card, `victory-shader` `targets_tests`).
+/// `VICTORY_STAND_INS=1`: the stand-ins all the same, as NVIDIA has them.
 /// The title's pipelines and views of such targets name the stand-in too
 /// ([`view_format`], the host view checks).
 /// shortcut: copies between such a target and a texture the title fills
@@ -279,7 +282,11 @@ pub(crate) fn target_format(format: u32) -> u32 {
                 };
                 let both = D3D12_FORMAT_SUPPORT1_RENDER_TARGET.0
                     | D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW.0;
-                let refused = asked.is_err() || support.Support1.0 & both != both;
+                let forced = std::env::var_os("VICTORY_STAND_INS").is_some_and(|v| v == "1");
+                let refused = forced || asked.is_err() || support.Support1.0 & both != both;
+                if !refused {
+                    tracing::info!(format = f, "the host renders to this format: no stand-in");
+                }
                 if refused {
                     tracing::info!(format = f, stand_in = to, "the host does not render to this format: a stand-in is used");
                 }

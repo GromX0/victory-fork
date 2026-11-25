@@ -334,6 +334,20 @@ impl Host {
         gs: Option<&[u8]>,
         ps: &[u8],
     ) -> Result<ID3D12PipelineState, String> {
+        self.pipeline_into(root, vs, gs, ps, None)
+    }
+
+    /// As [`Host::pipeline_with_gs`]; with `target`, colour target 0 is in
+    /// that format, its colour added to the target's when the flag is set
+    /// (one-one additive blending), as [`Host::draw_into`] draws.
+    pub fn pipeline_into(
+        &self,
+        root: &ID3D12RootSignature,
+        vs: &[u8],
+        gs: Option<&[u8]>,
+        ps: &[u8],
+        target: Option<(DXGI_FORMAT, bool)>,
+    ) -> Result<ID3D12PipelineState, String> {
         let inputs = sig(vs, FourCC::ISG1)?;
         let names: Vec<CString> = inputs
             .iter()
@@ -394,6 +408,18 @@ impl Host {
             let n = o.row.unwrap_or(0) as usize;
             desc.RTVFormats[n] = target_format(o);
             desc.NumRenderTargets = desc.NumRenderTargets.max(n as u32 + 1);
+        }
+        if let Some((format, add)) = target {
+            desc.RTVFormats[0] = format;
+            desc.NumRenderTargets = desc.NumRenderTargets.max(1);
+            if add {
+                let rt = &mut desc.BlendState.RenderTarget[0];
+                rt.BlendEnable = true.into();
+                (rt.SrcBlend, rt.DestBlend, rt.BlendOp) =
+                    (D3D12_BLEND_ONE, D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD);
+                (rt.SrcBlendAlpha, rt.DestBlendAlpha, rt.BlendOpAlpha) =
+                    (D3D12_BLEND_ONE, D3D12_BLEND_ONE, D3D12_BLEND_OP_ADD);
+            }
         }
         if outputs.iter().any(|o| matches!(o.kind, 17..=19)) {
             desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
@@ -657,6 +683,25 @@ impl Host {
         pso: &ID3D12PipelineState,
         d: &Draw,
     ) -> Result<Vec<[f32; 4]>, String> {
+        let bytes = self.draw_into(root, pso, d, DXGI_FORMAT_R32G32B32A32_FLOAT, 16, [0.0; 4])?;
+        Ok(bytes
+            .chunks_exact(16)
+            .map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[4 * c..4 * c + 4].try_into().unwrap())))
+            .collect())
+    }
+
+    /// [`Host::draw`] into a target of `format` (texels of `texel` bytes)
+    /// cleared to `clear` first: its texels' bytes, row after row (a
+    /// pipeline from [`Host::pipeline_into`] with that format).
+    pub fn draw_into(
+        &self,
+        root: &ID3D12RootSignature,
+        pso: &ID3D12PipelineState,
+        d: &Draw,
+        format: DXGI_FORMAT,
+        texel: usize,
+        clear: [f32; 4],
+    ) -> Result<Vec<u8>, String> {
         let dev = &self.device;
         let (w, h) = d.size;
         // SAFETY: D3D12 calls with descriptions that outlive them; resources
@@ -723,11 +768,14 @@ impl Host {
             };
             let target = make(
                 D3D12_HEAP_TYPE_DEFAULT,
-                &tex_desc(w, h, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET),
+                &D3D12_RESOURCE_DESC {
+                    Format: format,
+                    ..tex_desc(w, h, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+                },
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
                 Some(&D3D12_CLEAR_VALUE {
-                    Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
-                    Anonymous: D3D12_CLEAR_VALUE_0 { Color: [0.0; 4] },
+                    Format: format,
+                    Anonymous: D3D12_CLEAR_VALUE_0 { Color: clear },
                 }),
             )?;
             let rtv_heap: ID3D12DescriptorHeap = dev
@@ -739,6 +787,7 @@ impl Host {
                 .map_err(err)?;
             let rtv = rtv_heap.GetCPUDescriptorHandleForHeapStart();
             dev.CreateRenderTargetView(&target, None, rtv);
+            list.ClearRenderTargetView(rtv, &clear, None);
             let views: ID3D12DescriptorHeap = dev
                 .CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
                     Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
@@ -904,7 +953,7 @@ impl Host {
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
                 D3D12_RESOURCE_STATE_COPY_SOURCE,
             )]);
-            let pitch = (w as usize * 16).next_multiple_of(256);
+            let pitch = (w as usize * texel).next_multiple_of(256);
             let readback = make(
                 D3D12_HEAP_TYPE_READBACK,
                 &buf_desc((pitch * h as usize) as u64),
@@ -918,7 +967,7 @@ impl Host {
                     PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
                         Offset: 0,
                         Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                            Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+                            Format: format,
                             Width: w,
                             Height: h,
                             Depth: 1,
@@ -953,12 +1002,10 @@ impl Host {
             }
             let mut p = std::ptr::null_mut();
             readback.Map(0, None, Some(&mut p)).map_err(err)?;
-            let mut out = Vec::with_capacity((w * h) as usize);
+            let mut out = Vec::with_capacity(w as usize * h as usize * texel);
             for y in 0..h as usize {
-                let row = std::slice::from_raw_parts(
-                    p.cast::<u8>().add(y * pitch).cast::<[f32; 4]>(),
-                    w as usize,
-                );
+                let row =
+                    std::slice::from_raw_parts(p.cast::<u8>().add(y * pitch), w as usize * texel);
                 out.extend_from_slice(row);
             }
             readback.Unmap(0, None);

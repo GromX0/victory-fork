@@ -368,7 +368,10 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 | `VICTORY_KEYS=30:Enter,35:X` | presses keys at those seconds, focus or not |
 | `VICTORY_CRASH_SAVE=<rva>:<len>,...` | saves title memory to the cache folder on a crash |
 | `VICTORY_CAPTURE=<dir>` | saves presented frames (powers of two, or `VICTORY_CAPTURE_FRAMES=<list>`) |
-| `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames |
+| `VICTORY_DUMP_TARGETS=1` | with the two above, saves every render target of those frames, and per frame `frame-<n>-values.txt` (each target's largest value and NaN, infinite and negative texels per channel) |
+| `VICTORY_F16_NEAREST=1` | every 16-bit float result rounded as the console rounds it (to nearest, infinity from 65520 on) instead of by the host's conversion (toward zero, 65504 for any overflow on the RX 9070 and WARP) |
+| `VICTORY_STAND_INS=1` | R9G9B9E5, B5G5R5A1 and B4G4R4A4 targets in the stand-in formats (RGBA16F, RGBA8) NVIDIA needs, also on a host that renders to them (the RX 9070 does) |
+| `VICTORY_BPERMUTE_HALVES=0` | a console wave64 `ds_bpermute_b32` on a 64-lane host reads across the wave's halves, as before (GFX10 permutes each half on its own) |
 | `VICTORY_D3D12_DEBUG=1` | host debug layer |
 | `VICTORY_D3D12_GBV=1` | with the above, GPU-based validation (bad descriptor use reported, not faulted; slow) |
 | `VICTORY_D3D12_DRED=1` | on a GPU failure, the allocation hit and the commands in flight |
@@ -382,6 +385,20 @@ cargo build --profile diag -p victory --features diagnostics   # target\diag\vic
 
 Every build appends crashes and host GPU failures to `crashes.log` in the
 title's data folder.
+
+**Where a colour goes purple.** `tools\purple-pass.ps1` reads such a capture
+folder and names the first target, in the frame's order, where purple or
+magenta (red and blue high, green low) appears where the presented frame is
+purple, with the draws, dispatches and copies that write it and their shader
+hashes; and the first target holding NaN or infinite green:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\purple-pass.ps1 -Folder D:\victory-scratch\captures\purple
+powershell -ExecutionPolicy Bypass -File tools\purple-pass.ps1 -Folder <dir> -Frame <n> -GreenRatio 0.7 -All
+powershell -ExecutionPolicy Bypass -File tools\purple-pass.ps1 -SelfTest   # on a synthetic folder
+```
+
+`Get-Help tools\purple-pass.ps1 -Full` lists its thresholds.
 
 ## License
 

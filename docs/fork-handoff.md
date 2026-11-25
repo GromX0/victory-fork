@@ -365,7 +365,16 @@ for the first seconds after a load (the title's auto exposure catching up at
 
 1. Purple in the brightest colours: captures of a frame with a ceiling light
    in a diagnostics build (`VICTORY_CAPTURE`, `VICTORY_DUMP_TARGETS=1`) and
-   the pass where green drops out.
+   the pass where green drops out: `tools\purple-pass.ps1 -Folder <capture>`
+   names it (README, Debugging). Checked on the RX 9070 (agent/purple, GPU
+   tests): R9G9B9E5 is a real target format there (render, blend, typed UAV;
+   NVIDIA gets the RGBA16F stand-in) and keeps every channel of bright colours
+   (`targets_tests`); the host's f16 conversion rounds toward zero with 65504
+   for any overflow, where the console gives infinity from 65520 on, the same
+   in both halves of packed results (`VICTORY_F16_NEAREST=1` now covers
+   `v_cvt_f16_f32`, `v_pk_*` and `v_fma_mix*` too); and a console wave64
+   `ds_bpermute_b32` run as one 64-lane wave read across the wave's halves,
+   AMD only (fixed; `VICTORY_BPERMUTE_HALVES=0` for the old reading).
 2. Frame rate: the card is ~55% busy; the CPU side (copies 40-55 ms,
    preparing 70-90 ms a frame) is the limit.
 3. Series S device loss: try `VICTORY_FILL_WAIT=1` (fxceless's fills that
