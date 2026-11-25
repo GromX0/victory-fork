@@ -176,6 +176,14 @@ This replaces guesswork about the user's card, but it is still other people's re
       suggestion) bounds the copy-back. A finer-grained texture invalidation would address watched false
       positives. **Paused until measured**: designed, not started.
 
+Upstream #1972 (find and skip pipelines the driver's compiler crashes on) **doesn't merge into the fork**: it is
+based on upstream VIctory and conflicts in ~45 files. A port is only worth it if the two programs that still crash
+with `SHADER_OPT=59` stop our run.
+
+First-run order on the PC (on `integration`): warm the shader cache with **the same switches as the run**, since
+`SHADER_OPT` is part of the cache key: `$env:VICTORY_SHADER_OPT='59'; target\release\victory.exe translate
+--cache <game dir>`. Then the baseline run.
+
 PC run plan for the shadows (after the plain baseline; all with `VICTORY_SHADER_OPT=59`, on `integration`):
 `VICTORY_BVH_BUILDER=1 VICTORY_BVH_QUARANTINE=1` (reproduce #543 and get our own numbers), then the same plus
 `VICTORY_INPLACE=1`.
@@ -212,6 +220,9 @@ container reset, seed it from the cursor above. The 3-hourly scheduled task cove
 The user will make a separate folder for the code checkout and tell us where the game is. We work in both: we build
 and run in the checkout, and **only read** the game folder. The game folder stays outside every repository, and
 nothing from it is copied into Git, the cloud session or posts.
+
+Posting: when the PC is connected, try posting from there with the user's own GitHub login (`gh auth login`
+done by the user once). Re-read each thread first and drop anything already answered. Drafts: `posts/`.
 
 ## Waiting on the user (at the PC)
 
@@ -254,7 +265,7 @@ process memory, and NVIDIA GPU load (from `nvidia-smi`, if present).
 |---|---|---|---|
 | `fix-clippy-placed-filler` | `c96b4f2` (fork main) | `48e3435` `placed_filler_twins` compiled only with the diagnostics feature, like its one caller | fixes fork main's red clippy gate; both gates ✅. **Candidate for a PR to `fxceless`** (needs the user's OK) |
 | `builder-diagnostics` | `fix-clippy-placed-filler` | `15db4e0` builder stages without a host pipeline named in the log (diagnostics builds); `725851a` the per-frame log line no longer carries runs of 18 spaces | both clippy gates ✅; Windows/Wine 477 passed, the same 28 environmental failures; Linux 217/0. **Not run on a GPU** |
-| `integration` | `builder-diagnostics` | merges of fork PRs #426, #437, #438, #440–#446 (see batch 2), **#452** (buffer `getDimensions` heap handles non-uniform: the AMD `amdxc64.dll` crash, suspected RDNA 4) **#156** (`slot_address` lowering: trace programs that read their structure's address from a heap view at a computed index; no wave-width gate) and **#558** (barrier-free all-lane forms retried on native wave64 hosts; tested by its author on an RX 9070) | merged without conflicts; both clippy gates ✅; Windows/Wine 497 passed, the same 28 environmental failures; Linux 226/0. **Not run on a GPU.** For A/B against `builder-diagnostics` |
+| `integration` | `builder-diagnostics` | merges of fork PRs #426, #437, #438, #440–#446 (see batch 2), **#452** (buffer `getDimensions` heap handles non-uniform: the AMD `amdxc64.dll` crash, suspected RDNA 4) **#156** (`slot_address` lowering: trace programs that read their structure's address from a heap view at a computed index; no wave-width gate) **#558** (barrier-free all-lane forms retried on native wave64 hosts; tested by its author on an RX 9070) and **#544** (shader cache keyed by the translator's sources and switches, so it survives rebuilds; `victory translate --cache <game dir>` warms it, about 7 min for 25,648 shaders on an RTX 5070 Ti) | merged without conflicts; both clippy gates ✅; Windows/Wine 497 passed, the same 28 environmental failures; Linux 226/0. **Not run on a GPU.** For A/B against `builder-diagnostics` |
 
 ### Session 2 — 2026-11-25 (cloud; no game, no GPU)
 
