@@ -227,6 +227,21 @@ prerequisites (none lights anything yet).
 | 2026-11-25 | 17 forks in tools/fork-watch.txt | see tools/fork-watch.sh | reviewed; results in "From other forks" |
 | 2026-11-25 | Zettrox/ztrx main | 90b529f | no code of its own: fxceless's history to 2119b0e plus a README and `scripts/play.ps1` (taken, 02afc8d). Claim: on an RTX 3050 the prologue plays from the cell to the boat chase at 1-3 fps, 1 h 30 min without a crash, at 2119b0e's code. So 2119b0e is the known-stable fallback to bisect against if a newer build crashes |
 
+Second check, 2026-11-25 ~10:30 UTC, from the owner's PC (`tools/fork-watch.sh`
+output and the GitHub fork listings are in `D:\victory-runs`, outside the
+repository):
+
+| Source | Revision | Note |
+|--------|----------|------|
+| Marvisak/VIctory main | 940d32f | nothing new |
+| fxceless/victory-fork main | f85101b | 4 commits (8dd30ab, a26859f, 9376fd6, f85101b): **merged**, see "Merged on dev/merge-fx-klbf" |
+| PastiiJay/klbf-lab-beta `klbf-amd` | 74315e76 (Lab 35) | RX 9070 XT, driver 32.0.32029.2010 (the owner's): Series X ~4.8-5.2 fps (as ours), Series S + AMD FSR ~7.3 fps, 74 min; `39f0e9aeb156a61c` never leaves the AMD compiler and grows memory ~240 MB/s (fits our 24 GB commit and run 2's out-of-memory stop). Its own AMD commits **picked**; its Lab 28/31/33 squashes (myokex walls, upstream #334 and #1271 ports, `translate --cache --pipelines` pre-build) not yet: 70 conflict hunks as one, mostly the same fixes taken twice |
+| justr4mzi/VIctory | 424d9f88 | RX 6700 XT on fxceless 9376fd6: AMD pipeline skips (myokex, ZSlayer), reuse pass off on AMD (ztrx#61, amdxc64 crash), a remap under an uploaded texture uploads it again (#574) |
+| triippywhale/victory-fork | (116 since the first check) | shader fixes: early depth for pixel programs, array LOD without slice, whole-wave `Sym::Own` lanes; textures refused for memory retried |
+| Skillter/victory-fork-plus | | "stop rewriting the pipeline library for a few hundred kilobytes", older library generations dropped: may be why our second launches rebuilt thousands of pipelines |
+| Joaco9020/mangrove | | `victory warm` (all shaders and compute pipelines ahead), `VICTORY_POOL_NO_ASSERT` (8-minute crash: check what it disables) |
+| Xeltax/VIcky, dkdknight, Trexies, TaynanGT, FQY55kai, JordanFromIT | | research and feature branches; not reviewed yet |
+
 Notable upstream work not yet in the fork: `translate --cache` shader
 warm-up and `--pipelines` pre-build from the shader pack (9c58a1c,
 c47b529: affects first-run stutter); page-marked copy-backs (cd94d35,
@@ -282,12 +297,52 @@ of one build.
 `%LOCALAPPDATA%\victory\runs\builds\<commit>`, and writes the logs there.
 It was written without PowerShell to test it on: expect a first fix.
 
+## Merged on dev/merge-fx-klbf (2026-11-25, on the owner's PC)
+
+- `7321a1d5` merges fxceless f85101b. Hand resolutions are in its message;
+  the one with a design choice: fxceless's `sync_heaps` replaces our
+  `resync_title_writes`, but still settles flights in the air before it
+  changes a slot (now through a callback, inside `Host::submit`'s lock).
+- KLBF's own AMD commits, authors kept, `-x` trailers: 3f84c4ef (wave32
+  pixel and vertex programs per 32-lane half on 64-lane hosts:
+  `VICTORY_PS_HALVES=0` off), 32f35992 (the pixel wave size is in the
+  translation fingerprint), 77688fae and 69249586 (per-half reductions;
+  denormal flush only on request, `VICTORY_DENORM`), 18d0518b (NaN guard
+  on colour exports and typed stores, `VICTORY_NAN_GUARD=0` off; applied in
+  `emit/lower/export.rs`), e07a9c4a (Lab 35: remapped texture ranges kept
+  through loading). Skipped 5f8cc12a: our ka1qux queue switches
+  (`VICTORY_TEXTURE_STAGE_MB/MS`, with catch-up) already do it.
+- `emit/lower.rs` hit the asset policy's 512 KiB per-file limit with both
+  lines' shader work: `export` and `interp` moved, unchanged, to
+  `emit/lower/`.
+- Checks on the RX 9070: release build, workspace clippy `-D warnings`,
+  policy; `cargo test --workspace` 624 pass. One fails:
+  `warp_budget_saturates_without_wraparound_and_preserves_draw_fields`, an
+  order dependence of fxceless's own test (fails alone, passes in the full
+  suite, on fxceless f85101b too).
+- `tools/fork-run.ps1 -Console series-s` for KLBF's faster mode.
+
+Runs of this branch (5fc4460452), `VICTORY_SKIP_PIPELINES=39f0e9aeb156a61c`,
+default profile, first launches (translator changed: cache cold):
+
+| Run | Console | Result | World at | Steady (median, last 3 min) |
+|-----|---------|--------|----------|------------------------------|
+| `20261125-104343-merged-seriess` | Series S | **device removed at 171 s** (0x887A0006, no breadcrumbs), black window before it; compute pipelines of the title's FSR 4 passes were being made (3.4 s), and `fill_ahead` had just caught a fill that read bytes a flight then changed | - | - |
+| `20261125-104735-merged-seriesx` | Series X | 420 s, no error, no device loss | 72 s (178 before) | **6.3 fps, 158 ms/frame** (4.9 fps, 202 ms before): preparing 59, GPU 76, copying back 79 ms; 27.2 GB committed (24 before) |
+
+Seen in the Series X run (owner's screen): characters lit and textured
+indoors, but glowing eyes, an over-exposed image and a magenta patch.
+
 ## Next
 
-1. Push `dev/integrate-clean` (needs the owner's go-ahead), then the first run
-   above.
-2. From that evidence: if the fork line hangs or misrenders on AMD,
-   bisect the fork's GPU changes against upstream on the same scene; if
-   it renders, profile the frame line's dominant cost.
-3. Bring `translate --cache --pipelines` (warm-up) into the fork line, or
-   move the fork's work onto upstream, decided by step 2's result.
+1. Series S device loss: try `VICTORY_FILL_WAIT=1` (fxceless's fills that
+   no longer wait for flights, new and NVIDIA-only so far), then the FSR 4
+   pipelines (the title's `FFX_FSR4_*` passes; KLBF runs Series S with FSR
+   on an RX 9070 XT without device loss, on its own stack).
+2. Pipelines that survive a launch (Skillter's pipeline-library fixes,
+   upstream `translate --cache --pipelines`, mangrove's `victory warm`).
+3. KLBF's Lab 31/33 work as separate ports: myokex's wall fixes, upstream
+   #334 (buffer-state tracking: characters and faces), #1271 (`glc` loads
+   coherent on RDNA).
+4. Then the frame line's dominant cost: copying to and from the card, not
+   the GPU.

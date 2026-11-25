@@ -16,3 +16,8 @@ TaynanGT/victory-windows        VIctory fork
 JordanFromIT/CGBJ-VIctory       VIctory on Linux (Proton)
 Slaktarn700/xs-proton           VIctory on Linux (Proton)
 Zettrox/ztrx                    fxceless line; launcher taken
+PastiiJay/klbf-lab-beta          KLBF Lab: AMD test builds (klbf-amd), RX 9070 XT
+justr4mzi/VIctory               fxceless 9376fd6 + AMD fixes, RX 6700 XT
+Xeltax/VIcky                    research: why the world renders black
+Trexies/victory-fork            fxceless line
+dkdknight/victory-fork          feature branches (levels on demand, watch batch)
