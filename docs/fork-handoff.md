@@ -423,6 +423,51 @@ that hit without the title's BVH builder corrupting title memory),
 `agent/harvest` (fixes from other forks), `agent/fsr` (upstream FidelityFX
 on the host).
 
+### 2026-11-25 evening: foundation check and a boot assertion
+
+Foundation comparison (same PC class for KLBF: RX 9070 XT, 9800X3D, 32 GB,
+Adrenalin 32.0.32029.2010; its numbers are self-reported):
+
+| Build | Mode | Reported / measured here | Stability | Progress |
+| --- | --- | --- | --- | --- |
+| KLBF Lab (`PastiiJay/klbf-lab`, main/beta) | Series S 720p + host FSR to 1080p | reported: 7.3 fps cell, 5.7 prologue, 6.3-8.4 world | reported 74-77 min | reported: prologue and "Gone Fishing" done, free roam, manual save |
+| KLBF Lab | Series X | reported ~5 fps (200 ms) | reported 41 min | |
+| ours, int/harvest-test | Series X | measured 7.6-8.0 fps in the cell (merged-keys) | 1-4 min (device loss, commit ceiling) | cell only |
+| upstream Marvisak/VIctory 13f91ca | Series X | reported ~1 fps, RX 6700 XT, "graphics fully displayed" | several minutes | prologue |
+
+KLBF's remaining defects match ours (purple tint on papers, web
+triangles, magenta vegetation at night, walls missing 1 run in 6); its
+lead is stability, story progress, Series S HUD, host FSR and water
+physics. Our lead is Series X speed (async submit, queue 2, rays miss,
+indirect window, texture refresh without waiting, levels on demand,
+staging buffers let go, null slot for buffers picked at texture slots).
+
+KLBF beta (c71c7d6b, Lab 39) was built in `D:\dev\wt-klbf` (own cache and
+data under `D:\victory-data\klbf`), pipelines pre-built per its guide
+(4th attempt, 842 s; the first three crashed in the AMD compiler).
+Every launch since 17:57 UTC, of every build (KLBF beta, KLBF main
+8f4291a7 built, ours 01f194bf, and ours 53c47a3a that booted at 17:21),
+in both console modes, with our data, fresh data, the AMD DX12 shader
+cache set aside, WSL shut down, a 292-character PATH and a 38-variable
+environment, stops 14-16 s into boot on the title's own `int 3` at image
++0x4dcbc9d: a buffer write's bounds check (`[rcx+10h]` capacity minus
+`[rcx+18h]` position below the 0x6c0 bytes asked; the string writer at
++0x4e52a40, called from the main loop at +0x5ab13e8). Not code: the
+same build booted at 17:21. Not the game files (none changed), the
+network or input devices (identical), disk space (99 GB free) or the
+graphics driver (no reset in the event log). Untested: the PC's uptime
+(the title stamps with it: 41.67 M ms at the failure, ~11.6 h; every
+boot below ~11 h worked) and anything else a restart resets. Next: a
+restart of Windows, then one boot of 01f194bf to confirm, then the KLBF
+runs and ours under the same conditions.
+
+Captured frame 1637 (diag-look, 53c47a3a, 37 frames into the world,
+the opening cutscene's prison yard): sunlight, shadows, depth of field
+and buildings plausible; characters drawn as crude low-detail shapes
+(still streaming, unverified: the device was lost 13 frames later);
+flower beds as rainbow speckle (the magenta vegetation defect). No Xbox
+reference frame of that shot is available.
+
 ## Next
 
 1. Purple in the brightest colours: captures of a frame with a ceiling light
