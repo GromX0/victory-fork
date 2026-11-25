@@ -135,13 +135,21 @@ pub(crate) fn place_part(device: &ID3D12Device, start: u64, len: u64) -> Result<
 /// buffers or a title buffer, if [`level`] asks for it and the memory can
 /// be opened; `None` leaves the caller to make a copy, as before.
 pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
-    if level() < if window { 1 } else { 2 } {
+    let wanted = level() >= if window { 1 } else { 2 };
+    if !wanted && !pool() {
         return None;
     }
-    // View memory: known from the runtime without asking Windows.
-    if cover(start as usize, len as usize) != Cover::None {
-        STATS[4].fetch_add(1, Ordering::Relaxed);
-        return None;
+    // View memory: known from the runtime without asking Windows. One run
+    // of a committed pool section goes in place in that section's heap
+    // (`VICTORY_INPLACE_POOL=1`); anything else of the pool stays a copy.
+    match cover(start as usize, len as usize) {
+        Cover::None if wanted => {}
+        Cover::Run(section, offset) if pool() => return place_in_pool(section, offset, start, len, window),
+        Cover::None => return None,
+        _ => {
+            STATS[4].fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
     }
     if STATS[1].load(Ordering::Relaxed) + STATS[3].load(Ordering::Relaxed) + len > most() {
         STATS[6].fetch_add(1, Ordering::Relaxed);
@@ -166,6 +174,71 @@ pub(crate) fn place_for(start: u64, len: u64, window: bool) -> Option<Placed> {
             None
         }
     }
+}
+
+/// `VICTORY_INPLACE_POOL=1`: title buffers and windows in the page pool are
+/// placed in the pool's own committed sections, opened as host heaps (the
+/// runtime makes the pool committed with the same switch). Not combined
+/// with submissions sent ahead (`VICTORY_LATE_WAIT`), as stage 2 is not.
+pub(crate) fn pool() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_INPLACE_POOL").is_some_and(|v| v == "1"))
+}
+
+/// The committed pool sections opened as host heaps, by section handle:
+/// each is opened once and kept while the section is known. Opening one
+/// locks nothing (the probe: 256 MiB in 0.2 ms, no working set).
+static POOL_HEAPS: Mutex<Option<std::collections::HashMap<usize, ID3D12Heap>>> = Mutex::new(None);
+
+/// `[start, start + len)`, one run of committed section `section` from
+/// byte `offset` on, as a buffer placed in the section's heap.
+fn place_in_pool(section: usize, offset: u64, start: u64, len: u64, window: bool) -> Option<Placed> {
+    let committed = views().sections.iter().any(|s| s.0 == section && s.2);
+    if !committed {
+        STATS[4].fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    let host = crate::host::host()?;
+    let heap = {
+        let mut heaps = POOL_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
+        let heaps = heaps.get_or_insert_with(Default::default);
+        match heaps.get(&section) {
+            Some(h) => h.clone(),
+            None => match open(&host.device, From::Section(section)) {
+                Ok(h) => {
+                    if heaps.is_empty() {
+                        tracing::info!("the page pool in place: its sections are opened as the card's memory (VICTORY_INPLACE_POOL=1)");
+                    }
+                    heaps.insert(section, h.clone());
+                    h
+                }
+                Err(e) => {
+                    if STATS[5].fetch_add(1, Ordering::Relaxed) < 8 {
+                        tracing::warn!(section = format_args!("{section:#x}"), error = %e, "a pool section not opened in place: copies instead");
+                    }
+                    return None;
+                }
+            },
+        }
+    };
+    // A placed buffer starts on a 64 KiB boundary of the heap.
+    let at = offset & !(K64 as u64 - 1);
+    let bytes = (offset + len.max(1)).next_multiple_of(K64 as u64) - at;
+    let buffer = match place(&host.device, &heap, at, bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            if STATS[5].fetch_add(1, Ordering::Relaxed) < 8 {
+                tracing::warn!(start = format_args!("{start:#x}"), len, error = %e, "a pool buffer not placed: a copy instead");
+            }
+            return None;
+        }
+    };
+    // SAFETY: a live buffer.
+    let gpu = unsafe { buffer.GetGPUVirtualAddress() } + (offset - at);
+    let s = if window { 0 } else { 2 };
+    STATS[s].fetch_add(1, Ordering::Relaxed);
+    STATS[s + 1].fetch_add(len, Ordering::Relaxed);
+    Some(Placed { buffer, heap, gpu, bias: offset - at })
 }
 
 /// What [`place_for`] gave is gone.
@@ -289,6 +362,12 @@ pub fn title_memory_section(section: usize, bytes: u64, committed: bool) {
     let mut v = views();
     v.sections.retain(|s| s.0 != section);
     v.sections.push((section, bytes, committed));
+    drop(v);
+    // A handle used again names a new section: the heap opened on the old
+    // one (if any) is not this one's.
+    if let Some(heaps) = POOL_HEAPS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        heaps.remove(&section);
+    }
 }
 
 /// The runtime mapped `[at, at + len)` as a view of `section` from
@@ -1063,7 +1142,7 @@ fn real_part(spans: &[(u64, u64, bool)]) -> Vec<String> {
 /// census (on a thread of its own: it asks Windows about every copy) 30
 /// and 150 seconds later.
 pub(crate) fn tick() {
-    if level() > 0 {
+    if level() > 0 || pool() {
         say();
     }
     if probe_level() == 0 {

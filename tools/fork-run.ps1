@@ -59,10 +59,12 @@ param(
     [switch]$Targets,
     # The run is stopped when the system's commit grows by more than this
     # many GB (a normal run takes ~25), when fewer than -CommitFreeMinGB are
-    # left, or when the drive of a page file has less than -PageDriveMinGB
-    # free (Windows grows the page file there until the disk is full).
+    # left (0: not checked: Windows grows the page file only once commit is
+    # near its limit, so free commit runs short in every normal load), or
+    # when the drive of a page file has less than -PageDriveMinGB free
+    # (Windows grows the page file there until the disk is full).
     [int]$CommitGrowLimitGB = 38,
-    [int]$CommitFreeMinGB = 2,
+    [int]$CommitFreeMinGB = 0,
     [int]$PageDriveMinGB = 6
 )
 $ErrorActionPreference = 'Stop'
