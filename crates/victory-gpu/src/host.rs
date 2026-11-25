@@ -555,6 +555,15 @@ pub(crate) fn host() -> Option<&'static Host> {
     .as_ref()
 }
 
+/// Ticks a second of the host queue's timestamps (1 without a host).
+pub(crate) fn timestamp_frequency() -> u64 {
+    static FREQUENCY: OnceLock<u64> = OnceLock::new();
+    *FREQUENCY.get_or_init(|| {
+        // SAFETY: a plain query on our queue.
+        host().and_then(|h| unsafe { h.queue.GetTimestampFrequency() }.ok()).unwrap_or(1).max(1)
+    })
+}
+
 fn create() -> windows::core::Result<Host> {
     // SAFETY: plain D3D12 object creation with valid descriptions.
     unsafe {
@@ -876,6 +885,9 @@ pub(crate) struct HostList {
     window_check: OnceLock<Option<crate::indirect::WindowCheck>>,
     /// Counts the list in [`ALIVE`] while it lives.
     _alive: Counted,
+    /// With `VICTORY_BVH_CHECK`: timestamps around its ray-tracing
+    /// dispatches ([`crate::bvhcheck`]).
+    ray_stamps: Mutex<crate::bvhcheck::Stamps>,
     /// The texts of the markers `note_op` set, in order (for device-removed
     /// data without marker texts), with the host GPU range a copy reads.
     #[cfg(feature = "diagnostics")]
@@ -4101,6 +4113,7 @@ impl Host {
                 indirect_args: Mutex::default(),
                 window_check: OnceLock::new(),
                 _alive: Counted::new(),
+                ray_stamps: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
                 notes: Mutex::default(),
                 #[cfg(feature = "diagnostics")]
@@ -6196,7 +6209,13 @@ impl HostList {
         times
     }
 
+    /// Its ray-tracing timestamps ([`crate::bvhcheck`]).
+    pub(crate) fn ray_stamps(&self) -> std::sync::MutexGuard<'_, crate::bvhcheck::Stamps> {
+        self.ray_stamps.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub(crate) fn close(&self) {
+        crate::bvhcheck::resolve(self);
         self.twins_to_depth();
         let scratch = self.indirect_args.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if let Some((scratch, _)) = scratch {
@@ -6239,6 +6258,8 @@ impl HostList {
     pub(crate) fn reset(&self) {
         #[cfg(feature = "diagnostics")]
         let started = std::time::Instant::now();
+        // Its work has run: what it timed is read.
+        crate::bvhcheck::harvest(self);
         self._alive.used();
         *self.deferred() = Deferred::default();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clear();
