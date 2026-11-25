@@ -131,12 +131,56 @@ Picks not taken (conflict, and judged not worth a blind resolution now):
 1e923ad (already in the fork), e29391f, 691236d, 4ab20fc, 4e60ea3,
 7f00a62, f47ebd8, 12eba49.
 
+## From other forks (2026-11-25, reviewed commit by commit)
+
+Taken, authors kept (`-x` trailers name the source commit). All
+compile-checked and clippy-clean for Windows; **none run on a GPU yet**.
+
+| Source (tested on) | Commits | What |
+|---|---|---|
+| ezbyDev/victory-amd (RX 9060 XT, RDNA4) | b13d0a6d, 8e8c69a6, e2706a4e | pipeline library: one save at a time (an overlap left a corrupt library and minutes of rebuilding), a save thread and saves on crash/exit paths, honest save result |
+| same | 35d7748e (adapted) | `VICTORY_SKIP_PIPELINES` in release builds and before early compiles; pipeline workers/priority switches |
+| ka1qux and its sources (RX 7800 XT, RDNA3) | 68190e62, 144fb081, 8492bb9e, c88c3755, dc502e1f, f47507f4, 714494dc, 99c85747, 15cc76c3, bd797b41 | early-texture heap check; textures uploaded before the decoration bake (black skin/clothes); DirectStorage page lists filled late (models/textures left unwritten); AutoSubmitDisabled; AMD compiler crash guard for buffer sizes; BC7 dictionary entry 0; textures changed outside the guard; interpolation first halves; bounded texture re-looks (7.5 GB of re-uploads claimed) |
+| triippywhale line (RX 7900 XT) | 329cf50e | the fork's own clean-up passes reused annotateHandle across blocks: AMD compiler crash |
+| Slaktarn700/xs-proton (RX 9070 XT, Linux) | 0f799933, a7773fff | heap slots the title rewrites in its memory mirrored before each submission, settled first under late waits: device loss 5-90 s into the world (umr wave dumps) |
+| TaynanGT / upstream PRs | e3e7ab3b, b1d3e1c1, 4bc295ef, 90423b1d | staging buffer overwritten while the card copies from it under the relay (on by default here); card hash compare 32 lanes a piece; no full-wait barrier between indirect draws |
+| Scarlight (RX 9070 XT, Linux) | bc5d6ab6 | indirect clamp read past a tight argument buffer |
+| others | d802b4c1, 097b67b3, 6989081f, e2fa4fcd, f2fbbb29, 0b3223af | R9G9B9E5 targets as FP16 (device loss); no RTV for unrenderable formats; v_div_fixup zero/inf; APU heap use-after-free; 16-bit mix low half (deferred material dropped); a late frame flips at once |
+
+Own follow-ups: lint fixes for the picks (95d01592), the accounting and
+diagnostics lines adapted to ka1qux's texture-queue fields.
+
+Not taken, and why:
+- Pipeline skips of rendering work by default (ka1qux 5f98a38c, myokex
+  4436f8f1: 348 ray-traced hit programs), Mauricio's RT_STUB / POPS_SKIP /
+  INTERP_ZERO, JordanFromIT's RT/GI stand-ins: they remove or fake
+  rendering work. Opt-in candidates only, after measurement.
+- e8cad1e1 (heap capped at 1M): would null slot ~1,061,522, which the
+  title reads; the branch's 2^21 clamp is right.
+- `VICTORY_INDIRECT_CLAMP=0` (5805143d): removes the garbage guard.
+  Dispatches over 65,535 groups (ka1qux 2c150419) still to be ported
+  without it: the 115,200-group final gather is truncated today.
+- victory-amd f2969f6f (hung its card), c4ca121e (WIP, always on),
+  4bece454 (always-on lock change: review first), e1ad89d9 (wave64 retry
+  on 64-lane hosts: changes every wave64 program, needs narrowing).
+- chapter-ii's LogicOp clearing (wrong) and low-address allocator
+  (always on), VICTORY_INPLACE_POOL (commit leak).
+- myokex's texture span rewrite: competes with fxceless 310c6eb, already in.
+
+Next candidates (conflict, need a hand port): faccfbc7 (64-bit compares
+wrong on the RX 9070's scalar unit), eb5061cc/66a81a58 (integer-target
+blending refused by the host), fe3a0bcf (sRGB/linear views), 0e49a91c
+(46 dropped world programs), 2c150419 (dispatch parts), Scarlight's
+streamed-mip set, Taynan's CPU set, ebc2c918 and the ray-tracing
+prerequisites (none lights anything yet).
+
 ## Upstream and fork watch
 
 | Checked | Source | Revision | Note |
 |---------|--------|----------|------|
 | 2026-11-25 | Marvisak/VIctory main | 940d32f | 182 non-merge commits since ffe310e; README now: world drawn, unlit, 1-2 s/frame on RX 6700 XT; "some compute programs need 64-lane waves" (the RX 9070 has them, the RTX 4070 does not) |
 | 2026-11-25 | fxceless/victory-fork main | 310c6eb | depth bounds (#82), defaults ~230 ms/frame on RTX 4070 (claim) |
+| 2026-11-25 | 17 forks in tools/fork-watch.txt | see tools/fork-watch.sh | reviewed; results in "From other forks" |
 | 2026-11-25 | Zettrox/ztrx main | 90b529f | no code of its own: fxceless's history to 2119b0e plus a README and `scripts/play.ps1` (taken, 02afc8d). Claim: on an RTX 3050 the prologue plays from the cell to the boat chase at 1-3 fps, 1 h 30 min without a crash, at 2119b0e's code. So 2119b0e is the known-stable fallback to bisect against if a newer build crashes |
 
 Notable upstream work not yet in the fork: `translate --cache` shader
