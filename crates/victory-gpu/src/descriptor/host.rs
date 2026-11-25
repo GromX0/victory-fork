@@ -1974,10 +1974,13 @@ impl HostHeap {
 
     /// For a slot on a page of the title's heap that changed with no call
     /// (`super::sync_heaps`: the title copies records into its heap as
-    /// bytes): whether `record` is not the record this last saw there, in
-    /// which case it is now the one seen and the caller makes the slot
-    /// again with [`HostHeap::mirror`] (after settling what may still read
-    /// the slot on the card).
+    /// bytes): if `record` is not the record this last saw there, it is now
+    /// the one seen, and its first three words are returned for the caller
+    /// to make the slot from with [`HostHeap::mirror_record`] (after
+    /// settling what may still read the slot on the card). The slot is made
+    /// from these bytes, not from a second read of title memory: a slot
+    /// made from newer bytes than the ones fingerprinted would stay on them
+    /// when the title puts the fingerprinted record back.
     ///
     /// The page says only that something on it was written, and `mirror`
     /// by itself would take every buffer or placed-texture record on it for
@@ -1988,9 +1991,9 @@ impl HostHeap {
     /// `record`: the record's bytes as the caller read them (through the
     /// kernel, which fails on a page the title unmapped meanwhile where a
     /// read in place would fault: the title unmaps heap pages too).
-    pub(crate) fn copied_changed(&self, index: u32, record: &[u8]) -> bool {
+    pub(crate) fn copied_changed(&self, index: u32, record: &[u8]) -> Option<[u32; 3]> {
         if index >= self.count {
-            return false;
+            return None;
         }
         // A slot draws read through a table lately is left to its draws,
         // as the passes over slots picked by index leave it
@@ -2004,9 +2007,9 @@ impl HostHeap {
         // are mirrored too, as in run 200.
         if !sync_tables() && self.tabled_lately(index, crate::frame::current()) {
             COPIED_TABLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return false;
+            return None;
         }
-        let n = record.len();
+        let header = record.first_chunk::<12>()?;
         // Never 0, which is "never looked at". (A multiply-and-fold over
         // the record's words: BLAKE3 here was most of the 35 to 42 ms a
         // frame this pass took over some 250,000 to 300,000 records, run
@@ -2017,16 +2020,15 @@ impl HostHeap {
             if copied.is_empty() {
                 copied.resize(self.count as usize, 0);
             }
-            let Some(last) = copied.get_mut(index as usize) else {
-                return false;
-            };
+            let last = copied.get_mut(index as usize)?;
             // A slot never looked at that holds nothing: as it was.
-            if *last == print || (*last == 0 && record[..n].iter().all(|&b| b == 0)) {
-                return false;
+            if *last == print || (*last == 0 && record.iter().all(|&b| b == 0)) {
+                return None;
             }
             *last = print;
         }
-        true
+        let word = |at: usize| u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]]);
+        Some([word(0), word(4), word(8)])
     }
 
     /// Makes host slot `index` from the record the title has at `handle`
@@ -2049,7 +2051,28 @@ impl HostHeap {
             return None;
         }
         // SAFETY: the handle is a descriptor slot in title memory.
-        let [tag, i, generation] = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        let record = unsafe { (handle as *const [u32; 3]).read_unaligned() };
+        self.mirror_record(index, handle, for_draw, record)
+    }
+
+    /// What `super::sync_heaps` does with a record it read from a page:
+    /// [`HostHeap::copied_changed`], then the slot made from those bytes.
+    #[cfg(test)]
+    fn mirror_copied(&self, index: u32, handle: u64, record: &[u8]) -> bool {
+        self.copied_changed(index, record)
+            .map(|words| self.mirror_record(index, handle, false, words))
+            .is_some()
+    }
+
+    /// [`HostHeap::mirror`] of the record whose first three words are given
+    /// (as read from `handle` already).
+    pub(crate) fn mirror_record(
+        &self,
+        index: u32,
+        handle: u64,
+        for_draw: bool,
+        [tag, i, generation]: [u32; 3],
+    ) -> Option<View> {
         // Generations start at 1, so a made slot's key is never 0.
         let key = u64::from(generation) << 32 | u64::from(i);
         let mut made = self.made.lock().unwrap_or_else(|e| e.into_inner());
@@ -3224,6 +3247,43 @@ fn null_view(at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_sampler_uses_the_record_that_was_fingerprinted() {
+        let heap = HostHeap::new(true, 8).expect("D3D12 test sampler heap");
+        let mut a = [0u32; 4];
+        let mut b = [0u32; 4];
+        let mut live = [0u32; 4];
+        let clamp = [21, 3, 3, 3, 0, 1, 0, 0, 0, 0, 0, 0x7f7f_ffff, 0];
+        let mut wrap = clamp;
+        wrap[1] = 1;
+        super::super::create_sampler(std::ptr::null(), &clamp, a.as_mut_ptr() as u64);
+        super::super::create_sampler(std::ptr::null(), &wrap, b.as_mut_ptr() as u64);
+        let key = |r: [u32; 4]| u64::from(r[2]) << 32 | u64::from(r[1]);
+        let bytes = |r: [u32; 4]| {
+            let mut out = [0u8; 16];
+            for (dst, word) in out.chunks_exact_mut(4).zip(r) {
+                dst.copy_from_slice(&word.to_le_bytes());
+            }
+            out
+        };
+        assert_ne!(key(a), key(b));
+        let handle = live.as_mut_ptr() as u64;
+        let installed = || heap.made.lock().unwrap()[1];
+        let copy = |record: &[u8]| heap.mirror_copied(1, handle, record);
+        // The sampler record interning is identical to the title's API
+        // writes. Both byte records and the later guest location are valid.
+        live.copy_from_slice(&b);
+        assert!(copy(&bytes(a)));
+        let first = installed();
+        live.copy_from_slice(&a);
+        assert!(!copy(&bytes(a)));
+        assert_eq!((first, installed()), (key(a), key(a)));
+        live.copy_from_slice(&b);
+        assert!(copy(&bytes(b)));
+        assert_eq!(installed(), key(b));
+        assert!(!heap.made(2), "unrelated slot was modified");
+    }
 
     /// A null texture UAV keeps the title's dimension (3D for the world's
     /// wind field), and is 2D when the title names none.

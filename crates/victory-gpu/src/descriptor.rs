@@ -199,7 +199,7 @@ pub(crate) fn sync_heaps(settle: impl FnOnce()) {
     let mut page_bytes: Vec<u8> = Vec::new();
     // Slots to make again: (heap, index, record handle). Found first, made
     // after the settle.
-    let mut todo: Vec<(usize, u32, u64)> = Vec::new();
+    let mut todo: Vec<(usize, u32, u64, [u32; 3])> = Vec::new();
     let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
     for &(start, end, at) in heaps.iter() {
         // SAFETY: registered heaps are live (removed when dropped).
@@ -254,8 +254,8 @@ pub(crate) fn sync_heaps(settle: impl FnOnce()) {
                         looked += 1;
                         // Only a record that is not the one last seen there
                         // (`HostHeap::copied_changed`).
-                        if host.copied_changed(index as u32, record) {
-                            todo.push((at, index as u32, handle));
+                        if let Some(words) = host.copied_changed(index as u32, record) {
+                            todo.push((at, index as u32, handle, words));
                         }
                     }
                 }
@@ -267,7 +267,7 @@ pub(crate) fn sync_heaps(settle: impl FnOnce()) {
     if !todo.is_empty() {
         settle();
         let heaps = SHADER_HEAPS.lock().unwrap_or_else(|e| e.into_inner());
-        for (at, index, handle) in todo {
+        for (at, index, handle, words) in todo {
             // A heap let go in between is skipped (its slots go with it).
             if !heaps.iter().any(|&(_, _, h)| h == at) {
                 continue;
@@ -275,7 +275,9 @@ pub(crate) fn sync_heaps(settle: impl FnOnce()) {
             // SAFETY: registered heaps are live (removed when dropped).
             let heap = unsafe { &*(at as *const Heap) };
             if let Some(Some(host)) = heap.host.get() {
-                host.mirror(index, handle, false);
+                // From the bytes `copied_changed` fingerprinted, not a
+                // second read of the slot.
+                host.mirror_record(index, handle, false, words);
                 mirrored += 1;
             }
         }
