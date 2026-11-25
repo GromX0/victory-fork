@@ -1565,7 +1565,15 @@ mod tests {
             unsafe { std::ptr::copy_nonoverlapping(scratch_a.as_ptr(), slot7 as *mut u8, 16) };
             sync_heaps(|| {});
             assert_eq!(host.made_key(7), key_a);
-            assert!(host.texture_slot_gone(7));
+            // The pass over textures asks with the write it saw (717e28de).
+            host.queue_texture(7, true, false, 12);
+            let (_, write) = host
+                .texture_slots_due(u64::MAX, 8)
+                .0
+                .into_iter()
+                .find(|&(i, _)| i == 7)
+                .unwrap();
+            assert!(host.texture_slot_gone(7, write));
             assert!(!host.made(7));
             unsafe { std::ptr::copy_nonoverlapping(scratch_a.as_ptr(), slot7 as *mut u8, 16) };
             sync_heaps(|| {});

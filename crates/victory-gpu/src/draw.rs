@@ -827,9 +827,15 @@ impl State {
         dword: u32,
         memory: Option<&crate::memory::Ready>,
     ) -> u32 {
-        use victory_shader::emit::{USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
+        use victory_shader::emit::{USER_GROUP_BASE, USER_MEMORY_BASE, USER_VIEW_ADDRESS, USER_VIEW_BIAS};
         if kind == USER_MEMORY_BASE {
             return memory.map_or(0, |m| m.base);
+        }
+        if kind == USER_GROUP_BASE {
+            // The first group of the dispatch in x: 0 but for the second
+            // execution of an indirect record split at 65,535 groups, whose
+            // caller sets it itself ([`group_base_word`]).
+            return 0;
         }
         if kind == USER_VIEW_BIAS {
             // The view begins on 16 bytes of the copy the address finds
@@ -1478,10 +1484,10 @@ impl State {
             changed
         };
         *passes += 1;
-        // Whether the device was there before the pass: a view that removes
-        // it is named below.
-        static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        let mut alive = !GONE.load(Ordering::Relaxed) && crate::descriptor::host::device_removed().is_none();
+        if let Some(why) = crate::descriptor::host::device_removed() {
+            drop(kept);
+            crate::host::fail(format_args!("host device lost before preparing buffer views: {why}"));
+        }
         HEAP_PASS_PARTS[1].fetch_add(slots.len() as u64, Ordering::Relaxed);
         for (n, &index) in slots.iter().enumerate() {
             ranges.remove(&index);
@@ -1492,19 +1498,18 @@ impl State {
                 continue;
             };
             // Every 64 views while the device lives (a cheap query).
-            if alive
-                && n % 64 == 63
+            if n % 64 == 63
                 && let Some(why) = crate::descriptor::host::device_removed()
             {
-                alive = false;
-                GONE.store(true, Ordering::Relaxed);
                 let last: Vec<String> = slots[n - 63..=n]
                     .iter()
                     .filter_map(|&i| crate::descriptor::view(heap.handle(i)?).map(|v| format!("{i}: {v:?}")))
                     .map(|s| s.chars().take(200).collect())
                     .collect();
-                tracing::error!(why, slot = index, "the host device went while buffer views of the heap were made; one of: {last:#?}");
-                crate::host::log_removal_context();
+                drop(kept);
+                crate::host::fail(format_args!(
+                    "host device lost while preparing buffer views at slot {index}: {why}; recent views: {last:#?}"
+                ));
             }
             // The copy the slot shows (`buffer_copy`), not the one the
             // view's range alone would find.
@@ -2042,16 +2047,12 @@ impl State {
             if let Some(view) = &view {
                 readable(list, sampled.kind, view);
             }
-            // A texture view the host refuses removes the device: name it.
-            static GONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !GONE.load(Ordering::Relaxed)
-                && let Some(why) = crate::descriptor::host::device_removed()
-            {
-                GONE.store(true, Ordering::Relaxed);
+            // Preserve the last view and stop once the host confirms device loss.
+            if let Some(why) = crate::descriptor::host::device_removed() {
                 let text: String = format!("{view:?}").chars().take(300).collect();
-                tracing::error!(why, slot = index, "the host device went while textures picked by index were made ready; last: {text}");
-                crate::host::log_removal_context();
-                return;
+                crate::host::fail(format_args!(
+                    "host device lost while preparing textures picked by index at slot {index}: {why}; last view: {text}"
+                ));
             }
             let (bytes, whole) = crate::texture::staged(resource).unwrap_or((0, true));
             // Not all of it there: looked at again next frame, and from
@@ -3090,6 +3091,12 @@ impl State {
             .filter(|w| same(w) && offset >= w.base)
             .filter(|w| (offset - w.base) % u64::from(w.step) == 0 && (offset - w.base) / u64::from(w.step) < u64::from(w.records))
             .map(|w| (w.scratch.clone(), offset - w.base, w.step));
+        // A program that reads its group id in x: where it takes the first
+        // group of the dispatch (root parameter, dword), and where the
+        // second records begin once they are made. (Dispatches are never
+        // clamped in windows, so the window paths below never see one.)
+        let group_base = if kind == DISPATCH { group_base_word(p) } else { None };
+        let mut second: Option<((u32, u32), u64)> = None;
         let (bounded, at) = match hit {
             Some((scratch, at, step)) => {
                 // Diagnostics of windows: the record clamped again and
@@ -3142,6 +3149,11 @@ impl State {
                 // whose unfilled slots must not spend the list's budget.
                 let bounded = if windowed && records > 1 {
                     crate::indirect::bound_ahead(list, (&args.buffer, offset), (kind, step, records))
+                } else if let Some(base) = group_base {
+                    // The groups past 65,535 in x run as second records,
+                    // `records` records on in the scratch buffer.
+                    second = Some((base, u64::from(step) * u64::from(records)));
+                    crate::indirect::bound_split(list, (&args.buffer, offset), count_arg, (kind, step, records))
                 } else {
                     crate::indirect::bound(list, (&args.buffer, offset), count_arg, (kind, step, records))
                 };
@@ -3198,6 +3210,25 @@ impl State {
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
         };
+        // The groups past 65,535 in x: the second records, with the first
+        // group in x at 65,535 (a dispatch runs at most 65,535 groups in
+        // each dimension). Records that asked for fewer run no groups here.
+        if let Some(((param, dword), offset)) = second {
+            // SAFETY: as above; the compute root signature bound has the
+            // user-data parameter `param` with dword `dword`.
+            unsafe {
+                list.list.SetComputeRoot32BitConstant(param, 65535, dword);
+                list.list.ExecuteIndirect(
+                    &signature,
+                    max,
+                    &bounded,
+                    at + offset,
+                    counter.as_ref().map(|(s, _)| &s.buffer),
+                    counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
+                );
+                list.list.SetComputeRoot32BitConstant(param, 0, dword);
+            }
+        }
         if kind == MESH {
             self.mesh_scissor(list, false);
         }
@@ -3211,6 +3242,28 @@ impl State {
         }
         true
     }
+}
+
+/// Where the compute program of `p` takes the first thread group of its
+/// dispatch in x (`victory_shader::emit::USER_GROUP_BASE`): its user-data
+/// root parameter and dword. `None` if it does not read the group id in x,
+/// or with `VICTORY_DISPATCH_SPLIT=0`.
+/// shortcut: only programs that read the group id in x run their groups
+/// past 65,535 (a second execution for every indirect dispatch of the
+/// others would double the indirect compute commands of a frame); the
+/// others' are still cut, which matters for one that takes its work from a
+/// counter. The only program seen asking for more in the prologue reads it.
+fn group_base_word(p: &crate::pipeline::host::HostPipeline) -> Option<(u32, u32)> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_DISPATCH_SPLIT").is_none_or(|v| v != "0")) {
+        return None;
+    }
+    p.stages.iter().find_map(|stage| {
+        let (param, _) = stage.user_data?;
+        let base = RootType::Other(victory_shader::emit::USER_GROUP_BASE);
+        let u = stage.translated().host.user_data.iter().find(|u| u.root == base)?;
+        Some((param, u.index))
+    })
 }
 
 /// The host command signature for one argument of `kind` with records
