@@ -1587,3 +1587,62 @@ void look() {
         assert_eq!(tiled.given_bytes(), 0);
     }
 }
+
+
+#[cfg(test)]
+mod va_probe {
+    use windows::Win32::Graphics::Direct3D12::*;
+    use windows::Win32::Graphics::Dxgi::Common::*;
+
+    #[test]
+    #[ignore]
+    fn print_descriptor_words() {
+        let host = crate::host::host().expect("host");
+        let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_DEFAULT, ..Default::default() };
+        unsafe {
+            let chd = D3D12_DESCRIPTOR_HEAP_DESC { Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, NumDescriptors: 4, Flags: D3D12_DESCRIPTOR_HEAP_FLAG_NONE, NodeMask: 0 };
+            let ch: ID3D12DescriptorHeap = host.device.CreateDescriptorHeap(&chd).unwrap();
+            let c0 = ch.GetCPUDescriptorHandleForHeapStart();
+            let words = || std::slice::from_raw_parts(c0.ptr as *const u32, 8).to_vec();
+            let formats = [
+                ("BC7", DXGI_FORMAT_BC7_UNORM), ("BC7 srgb", DXGI_FORMAT_BC7_UNORM_SRGB), ("BC1", DXGI_FORMAT_BC1_UNORM),
+                ("BC3", DXGI_FORMAT_BC3_UNORM), ("BC4", DXGI_FORMAT_BC4_UNORM), ("BC5", DXGI_FORMAT_BC5_UNORM),
+                ("BC6H", DXGI_FORMAT_BC6H_UF16), ("RGBA8", DXGI_FORMAT_R8G8B8A8_UNORM), ("RGBA8 srgb", DXGI_FORMAT_R8G8B8A8_UNORM_SRGB),
+                ("BGRA8", DXGI_FORMAT_B8G8R8A8_UNORM), ("RGBA16F", DXGI_FORMAT_R16G16B16A16_FLOAT), ("R8", DXGI_FORMAT_R8_UNORM),
+                ("RG8", DXGI_FORMAT_R8G8_UNORM), ("R16F", DXGI_FORMAT_R16_FLOAT), ("R32F", DXGI_FORMAT_R32_FLOAT),
+                ("R11G11B10", DXGI_FORMAT_R11G11B10_FLOAT), ("R10G10B10A2", DXGI_FORMAT_R10G10B10A2_UNORM), ("R32U", DXGI_FORMAT_R32_UINT),
+            ];
+            for (name, format) in formats {
+                for (w, mips) in [(1024u64, 11u16), (256, 1)] {
+                    let tex = D3D12_RESOURCE_DESC {
+                        Dimension: D3D12_RESOURCE_DIMENSION_TEXTURE2D, Width: w, Height: w as u32, DepthOrArraySize: 1, MipLevels: mips,
+                        Format: format, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, ..Default::default()
+                    };
+                    let mut t: Option<ID3D12Resource> = None;
+                    if host.device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &tex, D3D12_RESOURCE_STATE_COMMON, None, &mut t).is_err() { continue; }
+                    let t = t.unwrap();
+                    for (label, most, lod) in [("view", 0u32, 0.0f32), ("from mip 2", 2, 0.0), ("lod clamp 3", 0, 3.0)] {
+                        if most >= u32::from(mips) || (lod > 0.0 && mips == 1) { continue; }
+                        let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
+                            Format: format, ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D, Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Texture2D: D3D12_TEX2D_SRV { MostDetailedMip: most, MipLevels: u32::MAX, PlaneSlice: 0, ResourceMinLODClamp: lod } },
+                        };
+                        host.device.CreateShaderResourceView(&t, Some(&desc), c0);
+                        let wd = words();
+                        let as_buffer = u64::from(wd[0]) | (u64::from(wd[1] & 0xffff) << 32);
+                        eprintln!("{name:10} {w}x{w} mips {mips:2} {label:12}: words {:08x?}  T# base {:#x}  read as V# base {as_buffer:#x}", &wd[..4], (u64::from(wd[0]) << 8) | (u64::from(wd[1] & 0xff) << 40));
+                    }
+                }
+            }
+            // A buffer view for reference.
+            let bd = D3D12_RESOURCE_DESC { Dimension: D3D12_RESOURCE_DIMENSION_BUFFER, Width: 1 << 20, Height: 1, DepthOrArraySize: 1, MipLevels: 1, SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 }, Layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR, ..Default::default() };
+            let mut b: Option<ID3D12Resource> = None;
+            host.device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COMMON, None, &mut b).unwrap();
+            let b = b.unwrap();
+            let desc = D3D12_SHADER_RESOURCE_VIEW_DESC { Format: DXGI_FORMAT_R32_TYPELESS, ViewDimension: D3D12_SRV_DIMENSION_BUFFER, Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+                Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 { Buffer: D3D12_BUFFER_SRV { FirstElement: 16, NumElements: 1000, StructureByteStride: 0, Flags: D3D12_BUFFER_SRV_FLAG_RAW } } };
+            host.device.CreateShaderResourceView(&b, Some(&desc), c0);
+            eprintln!("raw buffer at {:#x} +64: words {:08x?}", b.GetGPUVirtualAddress(), &words()[..4]);
+        }
+    }
+}

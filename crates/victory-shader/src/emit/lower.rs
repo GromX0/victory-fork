@@ -5714,15 +5714,20 @@ impl<'a> Lower<'a> {
         // batch records, mesh headers and instance transforms this way, so
         // it passed no meshlet and every indirect mesh draw ran empty.
         // The host's table of strides by heap slot tells a buffer view
-        // (not 0) from anything else, which is still read as a constant
-        // buffer; only the load that fits the slot runs.
+        // (a stride) from another buffer descriptor (`SLOT_UNSTRIDED`: a
+        // constant buffer, read as one) and from anything else (0); only
+        // the load that fits the slot runs, and neither for anything else:
+        // read as a constant buffer's, a texture's descriptor is a wild
+        // address (`shader::SLOT_STRIDES`), which removed the device.
         let picked = match kind {
             None => self.slot_stride(src)?,
             Some(_) => None,
         };
         if let Some(stride) = picked {
             let zero = self.s.m.i32(0);
-            let is_buffer = self.s.m.cmp(self.cur, pred::NE, stride, zero);
+            let bits = self.s.m.i32(!super::shader::SLOT_UNSTRIDED);
+            let bytes = self.s.m.bin(self.cur, Bin::And, stride, bits);
+            let is_buffer = self.s.m.cmp(self.cur, pred::NE, bytes, zero);
             let at = self.begin_guarded(Some(is_buffer));
             let h = self.handle(site, src, false, (11, 0))?;
             let mut raw = Vec::new();
@@ -5745,8 +5750,9 @@ impl<'a> Lower<'a> {
                 raw.push((x, zero));
             }
             let raw = self.end_guarded(at, &raw);
-            let other = self.s.m.cmp(self.cur, pred::EQ, stride, zero);
-            let at = self.begin_guarded(Some(other));
+            let unstrided = self.s.m.i32(super::shader::SLOT_UNSTRIDED);
+            let constant = self.s.m.cmp(self.cur, pred::EQ, stride, unstrided);
+            let at = self.begin_guarded(Some(constant));
             let h = self.handle(site, src, false, (13, 0x1_0000))?;
             let mut both = Vec::new();
             for (k, &r) in raw.iter().enumerate() {
@@ -6520,11 +6526,29 @@ impl<'a> Lower<'a> {
     ) -> Result<V, Why> {
         match src {
             Source::Loaded { load, first } => {
-                let key = (self.cur, *load, *first, sampler, props);
+                // A buffer picked from the heap at a slot the host's table
+                // (read for this access in this block, `slot_stride`) says
+                // holds no buffer: the null slot's, which reads zeros and
+                // drops writes. Through the slot's own descriptor a
+                // texture's is a wild address (`shader::SLOT_STRIDES`).
+                // (Kept apart from the plain handle of the same descriptor.)
+                let null = super::shader::view_heap_limit();
+                let table = (matches!(props.0 & 0xff, 10..=13) && !sampler && null != 0)
+                    .then(|| self.strides.get(&(self.cur, *load, *first)).copied())
+                    .flatten();
+                let apart = if table.is_some() { 1 << 31 } else { 0 };
+                let key = (self.cur, *load, *first, sampler, (props.0 | apart, props.1));
                 if let Some(&h) = self.handles.get(&key) {
                     return Ok(h);
                 }
-                let index = self.heap_index(*load, *first, sampler)?;
+                let mut index = self.heap_index(*load, *first, sampler)?;
+                if let Some(stride) = table {
+                    let c = self.cur;
+                    let zero = self.s.m.i32(0);
+                    let none = self.s.m.cmp(c, pred::EQ, stride, zero);
+                    let null = self.s.m.i32(null);
+                    index = self.s.m.select(c, none, null, index);
+                }
                 // A waterfall loop's load at the first lane's offset reads
                 // each lane's own entry (see `resource::Waterfall`).
                 let per_lane = self.x.res.waterfall.loads.contains(load);
@@ -10481,13 +10505,16 @@ impl<'a> Lower<'a> {
         // computes: no used-resource entry gives its stride, the host's
         // table by heap slot does; the access becomes a raw one at the
         // element's byte. (Also tells the host this shader reads such
-        // buffers.)
+        // buffers.) A slot the table says holds no buffer is read (and
+        // written) through the null slot instead (`handle`).
         let mut index = index;
         if let Some(stride) = self.slot_stride(src)?
             && let Some(element) = index
             && !typed
             && used.is_none()
         {
+            let bits = self.s.m.i32(!super::shader::SLOT_UNSTRIDED);
+            let stride = self.s.m.bin(c, Bin::And, stride, bits);
             let at = self.s.m.bin(c, Bin::Mul, element, stride);
             off = self.s.m.bin(c, Bin::Add, at, off);
             index = None;

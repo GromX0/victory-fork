@@ -579,15 +579,18 @@ fn create() -> windows::core::Result<Host> {
                 tracing::info!("GPU-based validation on");
             }
         }
-        // Diagnostics: device-removed data (the command that faulted, the
-        // faulting address), read when the device is removed.
-        if dred_on() {
+        // Device-removed data (the lists' progress, the faulting address),
+        // read when the device is removed: in every build (`dred_crumbs`).
+        if dred_crumbs() {
             let mut dred: Option<ID3D12DeviceRemovedExtendedDataSettings> = None;
-            if D3D12GetDebugInterface(&mut dred).is_ok()
-                && let Some(dred) = dred
-            {
-                dred.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-                dred.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            match D3D12GetDebugInterface(&mut dred) {
+                Ok(()) => {
+                    if let Some(dred) = dred {
+                        dred.SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                        dred.SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "no device-removed data"),
             }
         }
         let mut device: Option<ID3D12Device> = None;
@@ -1420,12 +1423,26 @@ fn record_twin_copy(
     }
 }
 
-/// Whether device-removed data is on (`VICTORY_D3D12_DRED`, diagnostics
-/// builds).
+/// Whether the runtime keeps device-removed data: each list's progress
+/// (auto-breadcrumbs) and the address of a GPU page fault with the
+/// allocations around it. On in every build: a release build's device
+/// losses said only "no breadcrumbs (0x887A0004)", DXGI_ERROR_UNSUPPORTED,
+/// what the runtime answers when nothing turned it on (it was a switch of
+/// diagnostics builds alone), so no lost device of a plain run named its
+/// commands or its address. The runtime writes a breadcrumb per command on
+/// the card; `VICTORY_D3D12_DRED=0` turns it off.
+pub(crate) fn dred_crumbs() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_D3D12_DRED").is_none_or(|v| v != "0"))
+}
+
+/// Whether the layer adds its own to the device-removed data: names of the
+/// host objects and a marker for each command it records
+/// (`VICTORY_D3D12_DRED=1`, diagnostics builds; costly).
 pub(crate) fn dred_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| {
-        cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_DRED").is_some()
+        cfg!(feature = "diagnostics") && std::env::var_os("VICTORY_D3D12_DRED").is_some_and(|v| v != "0")
     })
 }
 
@@ -5901,6 +5918,7 @@ impl Host {
                 }
                 text.push_str(&crate::shadow::near(va));
                 text.push_str(&crate::descriptor::host::near_heaps(va));
+                text.push_str(&crate::descriptor::host::slots_at(va));
             }
             // The plain output: the extended one (with marker texts) came
             // back without stopped lists on this host.

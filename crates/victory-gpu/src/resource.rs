@@ -1734,6 +1734,58 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
     }
 }
 
+/// Host copies made level by level (`crate::tiles`) whose title texture is
+/// gone while another holder of the host texture remains (a descriptor
+/// slot the title has not written since: [`let_go`]).
+#[cfg(windows)]
+static LINGERING: std::sync::Mutex<Vec<std::sync::Arc<HostTexture>>> = std::sync::Mutex::new(Vec::new());
+
+/// The host copy of a title texture the title released: dropped once every
+/// submission running now has finished (`crate::host::retire`). One made
+/// level by level waits first until nothing but itself holds its host
+/// texture: its memory is the tiles its levels were given, which go back
+/// to the pool (to the next texture, or the pool's heap back to the card)
+/// when the host copy is dropped, not when the texture is. A descriptor
+/// slot keeps only the texture (`HostHeap::kept`), and a shader that picks
+/// such a slot by index read tiles another texture had been given since,
+/// or tiles of a heap the card had been given back (a GPU page fault);
+/// a committed texture's memory stays with the texture.
+#[cfg(windows)]
+fn let_go(host: std::sync::Arc<HostTexture>) {
+    if host.tiled.is_some() && crate::host::references(&host.texture) > 1 {
+        LINGERING.lock().unwrap_or_else(|e| e.into_inner()).push(host);
+        return;
+    }
+    crate::host::retire(host);
+}
+
+/// With the sweep: the lingering host copies ([`LINGERING`]) that only the
+/// list holds now go as any released one does.
+#[cfg(windows)]
+fn let_go_lingering() {
+    let ready: Vec<std::sync::Arc<HostTexture>> = {
+        let mut lingering = LINGERING.lock().unwrap_or_else(|e| e.into_inner());
+        if lingering.is_empty() {
+            return;
+        }
+        let (ready, wait) = std::mem::take(&mut *lingering)
+            .into_iter()
+            .partition(|h| lingering_done(std::sync::Arc::strong_count(h), crate::host::references(&h.texture)));
+        *lingering = wait;
+        ready
+    };
+    for host in ready {
+        crate::host::retire(host);
+    }
+}
+
+/// Whether a lingering host copy may go: no other holder of it (a list)
+/// and none of its texture (a slot) but itself.
+#[cfg(windows)]
+fn lingering_done(copies: usize, texture_references: u32) -> bool {
+    copies == 1 && texture_references <= 1
+}
+
 /// Lets go of the host copies of textures the title fills that nothing
 /// names any more: placed textures were never released (one host texture
 /// per address and description ever viewed: 18,639 of them, 2.5 GB, after
@@ -1761,6 +1813,7 @@ pub(crate) fn card_accounting(room: bool, due: [u64; 5], never: Vec<(u64, u64)>,
 pub(crate) fn let_go_idle() {
     use std::sync::atomic::Ordering::Relaxed;
     const IDLE_FRAMES: u64 = 4;
+    let_go_lingering();
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var_os("VICTORY_TEXTURE_SWEEP").is_none_or(|v| v != "0")) {
         return;
@@ -2361,9 +2414,10 @@ impl Drop for Resource {
             }
         }
         // A running submission may still read the host copy (and a depth
-        // texture's colour twin).
+        // texture's colour twin), and a slot the title left as it was the
+        // tiles of one made level by level (`let_go`).
         if let Some((host, twin)) = made {
-            crate::host::retire(host);
+            let_go(host);
             if let Some(twin) = twin {
                 crate::host::retire(twin);
             }
