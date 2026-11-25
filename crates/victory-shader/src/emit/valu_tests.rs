@@ -2046,3 +2046,196 @@ fn packed_dot_products_and_clamps_execute_cleanly() {
         },
     );
 }
+
+/// VOP3 `op vdst, src0, src1, src2` with op_sel (bit 3: the high half of the destination).
+const fn vop3_opsel(op: u16, vdst: u8, src0: u16, src1: u16, src2: u16, opsel: u8) -> [u32; 2] {
+    let w = vop3(op, vdst, src0, src1, src2);
+    [w[0] | (opsel as u32 & 0xF) << 11, w[1]]
+}
+
+/// VOP3P `op vdst, src0, src1, src2` with op_sel and op_sel_hi (no neg, no clamp).
+const fn vop3p_sel(op: u8, vdst: u8, src0: u16, src1: u16, src2: u16, opsel: u8, opsel_hi: u8) -> [u32; 2] {
+    [
+        0xCC00_0000
+            | (op as u32 & 0x7F) << 16
+            | (opsel_hi as u32 >> 2 & 1) << 14
+            | (opsel as u32 & 7) << 11
+            | vdst as u32,
+        (opsel_hi as u32 & 3) << 27
+            | (src2 as u32 & 0x1FF) << 18
+            | (src1 as u32 & 0x1FF) << 9
+            | (src0 as u32 & 0x1FF),
+    ]
+}
+
+/// The f16 bits of `x` (exact in f64), rounded to nearest even with infinity from 65520 on
+/// (the console's default float mode), or toward zero (65504 for any finite value past it).
+/// NaN gives 0x7E00 (only its being a NaN is compared).
+fn f16_of(x: f64, nearest: bool) -> u16 {
+    if x.is_nan() {
+        return 0x7E00;
+    }
+    let sign = if x.is_sign_negative() { 0x8000 } else { 0 };
+    let a = x.abs();
+    if a.is_infinite() {
+        return sign | 0x7C00;
+    }
+    let normal = a >= 2f64.powi(-14);
+    let e = if normal { ((a.to_bits() >> 52) as i32) - 1023 } else { -14 };
+    let m = a / 2f64.powi(e - 10);
+    let q = if nearest { m.round_ties_even() } else { m.trunc() } as i64;
+    let bits = if normal { i64::from(e + 15) * 1024 + q - 1024 } else { q };
+    let bits = if bits >= 0x7C00 {
+        if nearest { 0x7C00 } else { 0x7BFF }
+    } else {
+        bits as u16
+    };
+    sign | bits
+}
+
+/// What a 16-bit float result holds (`got`) for the exact value `x`: with
+/// `VICTORY_F16_NEAREST` (`nearest`) what the console's float mode gives (to nearest even,
+/// infinity from 65520 on), without it that or the host's own conversion (on the RX 9070 and
+/// WARP toward zero, 65504 for any finite overflow).
+fn check_half(what: &str, x: f64, got: u16, nearest: bool) {
+    let (console, host) = (f16_of(x, true), f16_of(x, false));
+    let is = |w: u16| if is_f16_nan(w) { is_f16_nan(got) } else { got == w };
+    if nearest {
+        assert!(is(console), "{what} of {x:e} = {got:#06x}, the console's {console:#06x}");
+    } else {
+        assert!(
+            is(console) || is(host),
+            "{what} of {x:e} = {got:#06x}: neither the console's {console:#06x} nor toward zero {host:#06x}"
+        );
+    }
+}
+
+/// Every way a 16-bit float result is written, for bright (large) values, overflows, ties
+/// and denormals, against [`check_half`]. Both halves of a packed result follow the same
+/// rule: the high half, where green sits when the console's compiler packs red and green,
+/// is not handled apart.
+#[test]
+fn f16_results_of_bright_values_round_as_the_console_when_asked_to() {
+    let f = |x: f32| x.to_bits();
+    let singles = [
+        1.0f32,
+        0.1,
+        1.0 + 1.0 / 2048.0, // a tie, to even: 1.0
+        1.0 + 3.0 / 2048.0, // a tie, to even: one place up
+        65503.0,
+        65504.0,
+        65519.0,
+        65520.0, // the console's first infinity
+        70000.0,
+        1e10,
+        -70000.0,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        3.0 * 2f32.powi(-26), // a denormal half, to nearest: the smallest
+        -0.0,
+    ];
+    // (low a, b, c, high a, b, c) as halves
+    let pairs: &[[u16; 6]] = &[
+        [0x4000, 0x4000, 0, 0x7800, 0x4000, 0],           // 2 * 2, 32768 * 2
+        [0x3E00, 0x3C01, 0, 0x3E00, 0x3C01, 0],           // 1.5 * (1 + 2^-10): a tie
+        [0x5BFF, 0x5BFF, 0, 0x5BFF, 0x5BFF, 0],           // 255.875^2 = 65472.0156
+        [0x3C00, 0x7BFF, 0x5000, 0x7BFF, 0x3C00, 0x5000], // 65504 + 32
+        [0x7A00, 0x3C00, 0x7A00, 0x7A00, 0x3C00, 0x7A00], // 49152 + 49152
+        [0x5C00, 0x5C00, 0x3C00, 0x5C00, 0x5C00, 0x3C00], // 256 * 256 + 1
+        [0x7800, 0x4000, 0xF800, 0x7800, 0x4000, 0xF800], // 32768 * 2 - 32768
+    ];
+    let half_inputs: Vec<[u32; 4]> = pairs
+        .iter()
+        .map(|p| {
+            let w = |lo: u16, hi: u16| u32::from(lo) | u32::from(hi) << 16;
+            [w(p[0], p[3]), w(p[1], p[4]), w(p[2], p[5]), 0]
+        })
+        .collect();
+    // the exact result of half `high` of case `p`
+    type Exact = fn(&[u16; 6], bool) -> f64;
+    let x = |p: &[u16; 6], high: bool, i: usize| f64::from(f16_to_f32(p[usize::from(high) * 3 + i]));
+    let product: Exact = |p, high| {
+        let x = |i| f64::from(f16_to_f32(p[usize::from(high) * 3 + i]));
+        x(0) * x(1)
+    };
+    let sum: Exact = |p, high| {
+        let x = |i| f64::from(f16_to_f32(p[usize::from(high) * 3 + i]));
+        x(1) + x(2)
+    };
+    let fma: Exact = |p, high| {
+        let x = |i| f64::from(f16_to_f32(p[usize::from(high) * 3 + i]));
+        x(0) * x(1) + x(2)
+    };
+    for nearest in [false, true] {
+        let was = super::lower::TEST_F16_NEAREST.replace(Some(nearest));
+        // one f32 source in v1 (v2 = 1, v3 = 0): (name, shader, result in the high half,
+        // v1 * 1 + 0 rather than v1: -0 gives +0)
+        let converts = [
+            ("v_cvt_f16_f32", build_valu_cs(&vop3(0x18A, 0, vgpr(1), 0, 0)), false, false),
+            ("v_cvt_f16_f32 op_sel:[0,1]", build_valu_cs(&vop3_opsel(0x18A, 0, vgpr(1), 0, 0, 8)), true, false),
+            ("v_fma_mixlo_f16", build_valu_cs(&vop3p_sel(0x21, 0, vgpr(1), vgpr(2), vgpr(3), 0, 0)), false, true),
+            ("v_fma_mixhi_f16", build_valu_cs(&vop3p_sel(0x22, 0, vgpr(1), vgpr(2), vgpr(3), 0, 0)), true, true),
+        ];
+        let packed: [(&str, HostShader, Exact); 3] = [
+            ("v_pk_mul_f16", build_valu_cs(&vop3p_sel(0x10, 0, vgpr(1), vgpr(2), 0, 0, 3)), product),
+            ("v_pk_add_f16", build_valu_cs(&vop3p_sel(0x0F, 0, vgpr(2), vgpr(3), 0, 0, 3)), sum),
+            ("v_pk_fma_f16", build_valu_cs(&vop3p_sel(0x0E, 0, vgpr(1), vgpr(2), vgpr(3), 0, 7)), fma),
+        ];
+        let mul = build_valu_cs(&vop3(0x135, 0, vgpr(1), vgpr(2), 0)); // v_mul_f16, low halves
+        super::lower::TEST_F16_NEAREST.set(was);
+        let inputs: Vec<[u32; 4]> = singles.iter().map(|&s| [f(s), f(1.0), f(0.0), 0]).collect();
+        for (what, shader, high, fused) in &converts {
+            run_cases(shader, &inputs, |backend, i, _, got| {
+                let got = if *high { (got >> 16) as u16 } else { got as u16 };
+                let s = f64::from(singles[i]);
+                let exact = if *fused { s * 1.0 + 0.0 } else { s };
+                check_half(&format!("{backend}: {what}"), exact, got, nearest);
+            });
+        }
+        for (what, shader, exact) in &packed {
+            run_cases(shader, &half_inputs, |backend, i, _, got| {
+                for high in [false, true] {
+                    let half = if high { (got >> 16) as u16 } else { got as u16 };
+                    let what = format!("{backend}: {what} (high {high})");
+                    check_half(&what, exact(&pairs[i], high), half, nearest);
+                }
+            });
+        }
+        run_cases(&mul, &half_inputs, |backend, i, _, got| {
+            let exact = x(&pairs[i], false, 0) * x(&pairs[i], false, 1);
+            check_half(&format!("{backend}: v_mul_f16"), exact, got as u16, nearest);
+        });
+    }
+}
+
+/// `v_cvt_pkrtz_f16_f32` rounds toward zero in both halves whatever the host's own
+/// conversion does: 65504 for a finite overflow, infinities and NaNs kept.
+#[test]
+fn v_cvt_pkrtz_f16_f32_rounds_both_halves_toward_zero() {
+    let shader = build_valu_cs(&vop3(0x12F, 0, vgpr(1), vgpr(2), 0));
+    let values = [
+        1.0f32,
+        1.0 + 3.0 / 2048.0,
+        65503.0,
+        65520.0,
+        70000.0,
+        -1e10,
+        f32::INFINITY,
+        f32::NAN,
+        3.0 * 2f32.powi(-26),
+    ];
+    let inputs: Vec<[u32; 4]> = values
+        .iter()
+        .zip(values.iter().rev())
+        .map(|(a, b)| [a.to_bits(), b.to_bits(), 0, 0])
+        .collect();
+    run_cases(&shader, &inputs, |backend, _, inp, got| {
+        for (k, half) in [(0, got as u16), (1, (got >> 16) as u16)] {
+            let x = f64::from(f32::from_bits(inp[k]));
+            let want = f16_of(x, false);
+            let ok = if is_f16_nan(want) { is_f16_nan(half) } else { half == want };
+            assert!(ok, "{backend}: pkrtz half {k} of {x:e} = {half:#06x}, want {want:#06x}");
+        }
+    });
+}

@@ -702,3 +702,42 @@ fn native_wave64_mask_outside_exec_inside_branch_translates_and_runs_exact() {
     }
     eprintln!("ran on the hardware device: native wave64 mask outside EXEC matches console popcount");
 }
+
+/// A console wave64 program's `ds_bpermute_b32` reads within the lane's own 32-lane half:
+/// GFX10 permutes each half of a wave64 on its own (the address picks lane `addr / 4 mod 32`
+/// of the half; Mesa's ACO builds a full-wave permute from two of them and a swap of the
+/// halves, "GFX10 wave64 mode: emulate full-wave bpermute"). A host of 64-lane waves (AMD)
+/// runs such a program as one host wave, whose `WaveReadLaneAt` reads across the halves.
+/// Every thread asks for lane s0; lane s1 stores what it read.
+#[test]
+fn a_wave64_backward_permute_reads_within_its_half() {
+    let words = [
+        0x7E08_0200, // v_mov_b32 v4, s0
+        0x3402_0882, // v_lshlrev_b32 v1, 2, v4
+        0x7E04_0300, // v_mov_b32 v2, v0
+        0xDACC_0000,
+        0x0300_0201, // ds_bpermute_b32 v3, v1, v2
+        0xBF8C_C07F, // s_waitcnt lgkmcnt(0)
+        0xD760_000C,
+        0x0000_0303, // v_readlane_b32 s12, v3, s1
+        0x7E00_020C, // v_mov_b32 v0, s12
+        0x38 << 26 | 0x1C << 18,
+        0x80 << 24 | 2 << 16, // buffer_store_dword v0, off, s[8:11], 0
+    ];
+    let native = native(&words);
+    let p = ir::build(&native.code, native.wave64, native.vgprs).expect("ir::build");
+    assert!(p.blocks.iter().flat_map(|b| &b.insts).any(|i| i.name() == "ds_bpermute_b32"));
+    let shader = lowered_on(&native, &p, &HashSet::new(), 64).expect("lower");
+    if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
+        let mut copy = shader.dxil.clone();
+        v.validate(&mut copy).expect("DXIL validation failed");
+    }
+    let _one = super::valu_tests::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    // (lane asked for, lane that stores) -> the console lane read: (reader & 32) | (asked & 31)
+    for (asked, reader) in [(3u32, 5u32), (3, 40), (40, 5), (40, 40), (63, 0), (0, 63), (31, 32)] {
+        let Some(got) = on_the_card(&shader, [asked, reader]) else { return };
+        let want = (reader & 32) | (asked & 31);
+        assert_eq!(got, want, "lane {reader} asking for lane {asked}");
+    }
+    eprintln!("ran on the hardware device: each half permuted on its own");
+}
