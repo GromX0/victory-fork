@@ -5857,13 +5857,18 @@ impl Meter {
                 crate::descriptor::host::KEPT_VIEWS.load(Ordering::Relaxed)
             );
             {
-                let [queued, due, away, partly, oldest] =
-                    [0, 1, 2, 3, 4].map(|i| crate::draw::HEAP_TEXTURES_QUEUE[i].load(Ordering::Relaxed));
+                let [queued, due, away, partly, oldest, never, relooking, reupload, relooks_due] =
+                    [0, 1, 2, 3, 4, 5, 6, 7, 8].map(|i| crate::draw::HEAP_TEXTURES_QUEUE[i].load(Ordering::Relaxed));
+                let [relooks, found, reuploaded] =
+                    [0, 1, 2].map(|i| crate::draw::HEAP_TEXTURES_RECHECKED[i].load(Ordering::Relaxed));
                 let [same, parts, tails] =
                     [0, 1, 2].map(|i| crate::draw::HEAP_TEXTURES_PARTLY[i].load(Ordering::Relaxed));
                 tracing::info!(
-                    "textures picked by index, the queue: {queued} slots, {due} of them due (the oldest written {oldest} frames ago), \
-                     {away} waiting for their memory, {partly} uploaded in part; since the start: {} slots found uploaded already by \
+                    "textures picked by index, the queue: {queued} slots, {due} of them due for an upload (the oldest written {oldest} frames ago), \
+                     {never} never uploaded, {away} waiting for their memory, {partly} uploaded in part, {reupload} found changed after \
+                     their upload and waiting for a new one, {relooking} uploaded whole and waiting for a look at their memory \
+                     ({relooks_due} due); since the start: {relooks} such looks, {found} found a change, {reuploaded} uploaded again \
+                     for it, {} slots found uploaded already by \
                      the draws that read them through tables, {} writes of tables' slots (due some frames later), {} slots taken out \
                      as read through a table, {parts} uploads of textures not all mapped ({tails} of them without their first page), \
                      {same} looks that found no more mapped; {} slots made stale by a newer view of other memory there, \
@@ -5911,11 +5916,20 @@ impl Meter {
                  dropped {dropped:.0} without a host pipeline ({making} being made) and \
                  {indirect:.0} indirect; heap buffers {picked:.1} passes {picked_ms:.1} ms;                  texture slots written so far: {placed} placed, {objects} of objects; \
                  textures picked by index: {picked_textures} uploaded so far ({picked_mb} MB), \
-                 {picked_waiting} waiting, {picked_away} passed over unmapped; depth textures with                  unordered access: {du0} made, bound as depth {du1}x, cleared as depth {du2}x,                  unordered views refused {du3}x; buffer views left null as the host would refuse them: {refused}",
+                 {picked_waiting} waiting for an upload ({picked_never} never uploaded, {picked_reupload} found changed after \
+                 their upload), {picked_away} passed over unmapped; re-looks: {picked_relooking} uploaded whole and waiting \
+                 for a look at their memory, {picked_relooks} looks so far, {picked_found} found a change, {picked_reuploaded} \
+                 uploaded again for it; depth textures with                  unordered access: {du0} made, bound as depth {du1}x, cleared as depth {du2}x,                  unordered views refused {du3}x; buffer views left null as the host would refuse them: {refused}",
                 picked_textures = crate::draw::HEAP_TEXTURES.load(Ordering::Relaxed),
                 picked_mb = crate::draw::HEAP_TEXTURE_BYTES.load(Ordering::Relaxed) >> 20,
                 picked_waiting = crate::draw::HEAP_TEXTURES_WAITING.load(Ordering::Relaxed),
                 picked_away = crate::draw::HEAP_TEXTURES_AWAY.load(Ordering::Relaxed),
+                picked_never = crate::draw::HEAP_TEXTURES_QUEUE[5].load(Ordering::Relaxed),
+                picked_reupload = crate::draw::HEAP_TEXTURES_QUEUE[7].load(Ordering::Relaxed),
+                picked_relooking = crate::draw::HEAP_TEXTURES_QUEUE[6].load(Ordering::Relaxed),
+                picked_relooks = crate::draw::HEAP_TEXTURES_RECHECKED[0].load(Ordering::Relaxed),
+                picked_found = crate::draw::HEAP_TEXTURES_RECHECKED[1].load(Ordering::Relaxed),
+                picked_reuploaded = crate::draw::HEAP_TEXTURES_RECHECKED[2].load(Ordering::Relaxed),
                 du0 = crate::resource::DEPTH_UNORDERED[0].load(Ordering::Relaxed),
                 du1 = crate::resource::DEPTH_UNORDERED[1].load(Ordering::Relaxed),
                 du2 = crate::resource::DEPTH_UNORDERED[2].load(Ordering::Relaxed),

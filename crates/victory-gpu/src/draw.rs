@@ -373,13 +373,19 @@ pub(crate) static HEAP_TEXTURES_WAITING: AtomicU64 = AtomicU64::new(0);
 /// (`crate::resource::room`), for the memory line.
 pub(crate) static HEAP_TEXTURES_FULL: AtomicU64 = AtomicU64::new(0);
 
-/// Frames after a whole upload of a texture picked by index at which its
-/// memory is looked at again, each counted from the look before.
-const RECHECK_FRAMES: [u64; 5] = [4, 12, 40, 120, 400];
+/// Since the start, for textures picked by index that were uploaded whole
+/// and are looked at again ([`relook_textures`]): looks made, looks that
+/// found the memory changed (each puts the slot back for an upload), and
+/// uploads made for such a find.
+pub(crate) static HEAP_TEXTURES_RECHECKED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
-/// Looks at uploaded textures picked by index that found the memory as it
-/// was, and that found it changed (uploaded again), since the start.
-pub(crate) static HEAP_TEXTURES_RECHECKED: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+/// The most looks at uploaded textures a frame makes, and the longest it
+/// spends on them: a fingerprint reads up to 48 KiB, and the slots uploaded
+/// in one burst come due again together. What is left waits for the next
+/// frame; the uploads the looks ask for come after every slot never
+/// uploaded and within the pass's own budget.
+const RELOOK_MOST: usize = 256;
+const RELOOK_SPAN: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// Uploads of textures already on the card made while it had no room for
 /// new ones, since the start.
@@ -399,6 +405,43 @@ fn heap_recheck() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_RECHECK").is_none_or(|v| v != "0"))
 }
+
+/// The looks at textures picked by index that were uploaded whole, once a
+/// frame ([`HostHeap::texture_slots_relook`], after 4, 12, 40, 120 and 400
+/// frames): the title writes a texture's view, and may fill the texture's
+/// memory itself only afterwards, with no descriptor write and nothing from
+/// the runtime to tell of it. The host copy then kept what the memory held
+/// at the upload for the rest of the run. A look reads 48 KiB and takes no
+/// part in the pass's budget; a slot it finds changed waits for the pass
+/// behind every slot never uploaded, and its next looks are further apart
+/// the more often it changed.
+fn relook_textures(host: &crate::descriptor::host::HostHeap, frame: u64) {
+    static LAST: AtomicU64 = AtomicU64::new(u64::MAX);
+    if LAST.swap(frame, Ordering::Relaxed) == frame {
+        return;
+    }
+    let (looks, _) = host.texture_slots_relook(
+        frame,
+        RELOOK_MOST,
+        RELOOK_SPAN,
+        crate::texture::fingerprint,
+        |slot, look| {
+            let n = HEAP_TEXTURES_RECHECKED[1].fetch_add(1, Ordering::Relaxed);
+            if n < 200 || n.is_multiple_of(1000) {
+                tracing::warn!(
+                    slot,
+                    address = format_args!("{:#x}", look.at.0),
+                    bytes = look.at.1,
+                    frames_after_upload = frame.saturating_sub(look.uploaded),
+                    looks = look.looks,
+                    found = n + 1,
+                    "a texture picked by index changed after its upload with nothing to tell of it: to be uploaded again"
+                );
+            }
+        },
+    );
+    HEAP_TEXTURES_RECHECKED[0].fetch_add(looks, Ordering::Relaxed);
+}
 /// Times a placed texture's slot was passed over because its memory is not
 /// mapped.
 pub(crate) static HEAP_TEXTURES_AWAY: AtomicU64 = AtomicU64::new(0);
@@ -406,9 +449,12 @@ pub(crate) static HEAP_TEXTURES_AWAY: AtomicU64 = AtomicU64::new(0);
 /// the draws that read it through a table (it has a staging buffer).
 pub(crate) static HEAP_TEXTURES_TABLED: AtomicU64 = AtomicU64::new(0);
 /// The queue of textures picked by index at the last pass
-/// (`TextureQueue::census`): slots in it, due, waiting for their memory,
-/// uploaded in part, and the frames the oldest due one has waited.
-pub(crate) static HEAP_TEXTURES_QUEUE: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+/// (`TextureQueue::census`): slots in it, due for an upload, waiting for
+/// their memory, uploaded in part, the frames the oldest due one has
+/// waited, slots never uploaded, slots uploaded whole that wait for a look
+/// at their memory, slots a look found changed that wait for their upload,
+/// and looks due.
+pub(crate) static HEAP_TEXTURES_QUEUE: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 /// Since the start: looks at a slot uploaded in part that found no more of
 /// its memory mapped; uploads of textures not all mapped; and of those,
 /// the ones whose first page was not there (asked by the first page alone,
@@ -1764,8 +1810,13 @@ impl State {
         // Slots whose texture's memory the runtime mapped, unmapped or
         // wrote since the last pass are due again.
         host.texture_slots_remapped(frame);
+        if heap_recheck() {
+            relook_textures(host, frame);
+        }
         let (due, census) = host.texture_slots_due(frame, 4096);
-        HEAP_TEXTURES_WAITING.store(census[0], Ordering::Relaxed);
+        // Waiting for an upload: not the slots uploaded whole that wait for
+        // their next look at the memory.
+        HEAP_TEXTURES_WAITING.store(census[0] - census[6], Ordering::Relaxed);
         for (count, now) in HEAP_TEXTURES_QUEUE.iter().zip(census) {
             count.store(now, Ordering::Relaxed);
         }
@@ -1833,38 +1884,6 @@ impl State {
             // every 120 frames, changed or not; and asked by its first
             // page alone, one whose first page is the one missing counted
             // as not there.)
-            // A slot uploaded whole is looked at again a few times
-            // (`RECHECK_FRAMES`): the title writes a texture's view, and
-            // may fill the texture's memory itself only afterwards, with
-            // no descriptor write and nothing from the runtime to tell of
-            // it. The host copy then kept what the memory held at the
-            // first look for the rest of the run. The look reads 48 KiB;
-            // only a changed texture is uploaded again.
-            // `VICTORY_HEAP_RECHECK=0`: uploaded once, as before.
-            if let Some((at, len, print, looks, uploaded)) = host.texture_slot_checked(index) {
-                if crate::texture::fingerprint(at, len) == print {
-                    HEAP_TEXTURES_RECHECKED[0].fetch_add(1, Ordering::Relaxed);
-                    match RECHECK_FRAMES.get(usize::from(looks) + 1) {
-                        Some(wait) => {
-                            host.texture_slot_recheck(index, write, frame + wait, (at, len), print, looks + 1, uploaded)
-                        }
-                        None => host.texture_slot_done(index, write, None),
-                    }
-                    continue;
-                }
-                let n = HEAP_TEXTURES_RECHECKED[1].fetch_add(1, Ordering::Relaxed);
-                if n < 200 || n.is_multiple_of(1000) {
-                    tracing::warn!(
-                        slot = index,
-                        address = format_args!("{at:#x}"),
-                        bytes = len,
-                        frames_after_upload = frame.saturating_sub(uploaded),
-                        looks,
-                        changed = n + 1,
-                        "a texture picked by index changed after its upload with nothing to tell of it: uploaded again"
-                    );
-                }
-            }
             let mut partly = None;
             if let Some(View::Placed(false, resource, desc)) = heap.handle(index).and_then(crate::descriptor::view) {
                 let address = u64::from(desc[10]) | u64::from(desc[11]) << 32;
@@ -2001,10 +2020,12 @@ impl State {
             HEAP_TEXTURE_BYTES.fetch_add(bytes, Ordering::Relaxed);
             HEAP_TEXTURES.fetch_add(1, Ordering::Relaxed);
             match memory {
-                // Whole and uploaded: looked at again (see above).
+                // Whole and uploaded: looked at again ([`relook_textures`]).
                 Some((at, len)) => {
                     let print = crate::texture::fingerprint(at, len);
-                    host.texture_slot_recheck(index, write, frame + RECHECK_FRAMES[0], (at, len), print, 0, frame);
+                    if host.texture_slot_uploaded_whole(index, write, frame, (at, len), print) {
+                        HEAP_TEXTURES_RECHECKED[2].fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 None => host.texture_slot_done(index, write, again),
             }

@@ -359,11 +359,85 @@ struct Waiting {
     /// Bytes of its memory that were mapped when it was last uploaded
     /// without all of it there; 0: not uploaded yet.
     mapped: u64,
-    /// For a slot uploaded whole and looked at again
-    /// ([`TextureQueue::recheck`]): where its memory is (address, bytes),
-    /// the fingerprint it had at the upload, how many looks found it
-    /// unchanged, and the frame of the upload. A fingerprint of 0: none.
-    checked: (u64, u64, u64, u8, u64),
+    /// Looks at the slot's memory that found it changed since the slot was
+    /// written: uploads it needed again ([`relook_wait`]).
+    changes: u8,
+    /// A slot uploaded whole waits for looks at its memory, not for an
+    /// upload: `due` is the frame of the next look
+    /// ([`TextureQueue::relooks_due`]), and the pass never sees it.
+    relook: Option<Relook>,
+    /// A look found the memory changed: the slot waits for its upload
+    /// again, behind every slot never uploaded ([`TextureQueue::due`]).
+    stale: bool,
+}
+
+impl Waiting {
+    /// A slot written (or whose memory changed) in `frame`, due from `due`.
+    fn new(due: u64, written: u64, write: u64) -> Waiting {
+        Waiting { due, written, write, looks: 0, mapped: 0, changes: 0, relook: None, stale: false }
+    }
+}
+
+/// What a look at a slot uploaded whole compares with: where its memory is
+/// (address, bytes), its fingerprint at the upload (never 0), the looks in
+/// a row that found it as it was, and the frame of the upload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Relook {
+    pub(crate) at: (u64, u64),
+    pub(crate) print: u64,
+    pub(crate) looks: u8,
+    pub(crate) uploaded: u64,
+}
+
+/// Frames from a whole upload of a texture picked by index to the first
+/// look at its memory, and from each look to the next that finds it as it
+/// was: the title may fill a texture's memory after it wrote the view, with
+/// no descriptor write and nothing from the runtime to tell of it.
+const RELOOK_FRAMES: [u64; 5] = [4, 12, 40, 120, 400];
+
+/// Frames until look number `looks` (0: the first after an upload) at a
+/// texture the title's memory of which a look found changed `changes`
+/// times since the slot was written: the waits of [`RELOOK_FRAMES`], each
+/// doubled by every change, at most the longest of them. A texture the
+/// title keeps writing is so uploaded again every few hundred frames, not
+/// every few. `None` after the last look of a texture that holds still.
+pub(crate) fn relook_wait(looks: u8, changes: u8) -> Option<u64> {
+    let base = *RELOOK_FRAMES.get(usize::from(looks))?;
+    let longest = RELOOK_FRAMES[RELOOK_FRAMES.len() - 1];
+    Some((base << changes.min(7)).min(longest))
+}
+
+/// One frame's looks at the textures uploaded whole whose next look is due
+/// at `frame` (the ones that have waited longest first): at most `most`
+/// looks and `span` of time, the rest wait for the next frame. `print`
+/// is the fingerprint of the memory `(address, bytes)` now; it runs
+/// without the queue's lock, which the title's descriptor writes take.
+/// `changed` is told of each slot whose memory differs from the upload's.
+/// Returns the looks made and those that found a change.
+fn relook(
+    queue: &Mutex<TextureQueue>,
+    frame: u64,
+    most: usize,
+    span: std::time::Duration,
+    print: impl Fn(u64, u64) -> u64,
+    mut changed: impl FnMut(u32, &Relook),
+) -> (u64, u64) {
+    let due = queue.lock().unwrap_or_else(|e| e.into_inner()).relooks_due(frame, most);
+    let began = std::time::Instant::now();
+    let (mut looks, mut found) = (0, 0);
+    for (index, write, look) in due {
+        if began.elapsed() > span {
+            break;
+        }
+        let differs = print(look.at.0, look.at.1) != look.print;
+        looks += 1;
+        if differs {
+            found += 1;
+            changed(index, &look);
+        }
+        queue.lock().unwrap_or_else(|e| e.into_inner()).relooked(index, write, frame, differs);
+    }
+    (looks, found)
 }
 
 /// The queue of title slots whose texture view waits to be brought up to
@@ -386,7 +460,7 @@ impl TextureQueue {
         }
         self.writes += 1;
         let write = self.writes;
-        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0) });
+        self.slots.insert(index, Waiting::new(due, frame, write));
     }
 
     fn remove(&mut self, index: u32) {
@@ -402,11 +476,21 @@ impl TextureQueue {
     ///   turns: slot order served the low slots of a backlog of
     ///   25,000-40,000 while the textures of the shot on screen waited
     ///   (run 52: 98% of the drawn pixels had no colour texture in the
-    ///   first 3D frames).
+    ///   first 3D frames);
+    /// - last the textures a look found changed after their upload
+    ///   ([`TextureQueue::relooked`]), the one that has waited longest
+    ///   first: every slot never uploaded goes ahead of them, a slot
+    ///   uploaded whole is not in this list at all until a look finds it
+    ///   changed (the looks themselves are [`TextureQueue::relooks_due`]).
     fn due(&self, frame: u64, max: usize) -> Vec<(u32, u64)> {
         let mut again: Vec<(u64, u32, u64)> = Vec::new();
         let mut fresh: Vec<(u64, u32, u64)> = Vec::new();
-        for (&index, w) in self.slots.iter().filter(|(_, w)| w.due <= frame) {
+        let mut stale: Vec<(u64, u32, u64)> = Vec::new();
+        for (&index, w) in self.slots.iter().filter(|(_, w)| w.due <= frame && w.relook.is_none()) {
+            if w.stale {
+                stale.push((w.due, index, w.write));
+                continue;
+            }
             let class = if w.looks > 0 || w.mapped > 0 { &mut again } else { &mut fresh };
             class.push((w.written, index, w.write));
         }
@@ -414,6 +498,9 @@ impl TextureQueue {
         let newest_first = |a: &(u64, u32, u64), b: &(u64, u32, u64)| b.2.cmp(&a.2);
         again.sort_unstable_by(newest_first);
         fresh.sort_unstable_by(newest_first);
+        // The first found changed first (the frame of the look, then the
+        // slot's write).
+        stale.sort_unstable_by_key(|&(found, _, write)| (found, write));
         let mut order: Vec<(u32, u64)> = again.iter().map(|&(_, index, write)| (index, write)).collect();
         let (mut new, mut old) = (0, fresh.len());
         while new < old && order.len() < max {
@@ -424,6 +511,7 @@ impl TextureQueue {
                 order.push((fresh[old].1, fresh[old].2));
             }
         }
+        order.extend(stale.iter().map(|&(_, index, write)| (index, write)));
         order.truncate(max);
         order
     }
@@ -446,6 +534,8 @@ impl TextureQueue {
         if let Some(w) = self.same(index, write) {
             w.due = frame + (1u64 << w.looks.min(16)).min(most.max(1));
             w.looks = w.looks.saturating_add(1);
+            // What a look at its memory compared with is out of date.
+            (w.relook, w.stale) = (None, false);
         }
     }
 
@@ -454,25 +544,75 @@ impl TextureQueue {
     fn partly(&mut self, index: u32, write: u64, due: u64, mapped: u64) {
         if let Some(w) = self.same(index, write) {
             (w.due, w.looks, w.mapped) = (due, 0, mapped.max(1));
+            (w.relook, w.stale) = (None, false);
         }
     }
 
-    /// Slot `index` was uploaded whole from memory `at` (address, bytes)
-    /// with fingerprint `print`: looked at again from frame `due`, for a
-    /// title that fills a texture's memory after it wrote the view (the
-    /// `looks`-th such look; `uploaded` is the upload's frame).
-    #[allow(clippy::too_many_arguments)]
-    fn recheck(&mut self, index: u32, write: u64, due: u64, at: (u64, u64), print: u64, looks: u8, uploaded: u64) {
-        if let Some(w) = self.same(index, write) {
-            (w.due, w.looks, w.mapped) = (due, 1, 0);
-            w.checked = (at.0, at.1, print, looks, uploaded);
+    /// Slot `index` was uploaded whole in `frame` from memory `at`
+    /// (address, bytes), which had fingerprint `print`: the pass is done
+    /// with it, and looks at its memory follow ([`relook_wait`]) for a
+    /// title that fills a texture's memory after it wrote the view. True
+    /// if this upload was one a look had asked for.
+    fn uploaded_whole(&mut self, index: u32, write: u64, frame: u64, at: (u64, u64), print: u64) -> bool {
+        let Some(w) = self.same(index, write) else {
+            return false;
+        };
+        let again = w.stale;
+        match relook_wait(0, w.changes) {
+            Some(wait) => {
+                (w.due, w.looks, w.mapped, w.stale) = (frame + wait, 0, 0, false);
+                w.relook = Some(Relook { at, print, looks: 0, uploaded: frame });
+            }
+            None => {
+                self.slots.remove(&index);
+            }
         }
+        again
     }
 
-    /// What [`TextureQueue::recheck`] noted of slot `index`, if it is
-    /// waiting for such a look.
-    fn checked(&self, index: u32) -> Option<(u64, u64, u64, u8, u64)> {
-        self.slots.get(&index).map(|w| w.checked).filter(|c| c.2 != 0)
+    /// The slots uploaded whole whose next look is due at `frame`, at most
+    /// `max`, the one that has waited longest first.
+    fn relooks_due(&self, frame: u64, max: usize) -> Vec<(u32, u64, Relook)> {
+        let mut due: Vec<(u64, u32, u64, Relook)> = self
+            .slots
+            .iter()
+            .filter_map(|(&index, w)| w.relook.filter(|_| w.due <= frame).map(|r| (w.due, index, w.write, r)))
+            .collect();
+        if due.len() > max {
+            due.select_nth_unstable_by_key(max, |&(due, index, ..)| (due, index));
+            due.truncate(max);
+        }
+        due.sort_unstable_by_key(|&(due, index, ..)| (due, index));
+        due.into_iter().map(|(_, index, write, r)| (index, write, r)).collect()
+    }
+
+    /// A look at slot `index`'s memory in `frame` found it `changed` since
+    /// the upload or as it was. As it was: the next look, or none after the
+    /// last. Changed: the slot waits for an upload from this frame on,
+    /// behind the slots never uploaded ([`TextureQueue::due`]), and the
+    /// looks after that one are further apart.
+    fn relooked(&mut self, index: u32, write: u64, frame: u64, changed: bool) {
+        let Some(w) = self.same(index, write) else {
+            return;
+        };
+        let Some(r) = w.relook else {
+            return;
+        };
+        if changed {
+            w.changes = w.changes.saturating_add(1);
+            (w.due, w.looks, w.mapped, w.stale) = (frame, 0, 0, true);
+            w.relook = None;
+            return;
+        }
+        match relook_wait(r.looks.saturating_add(1), w.changes) {
+            Some(wait) => {
+                w.due = frame + wait;
+                w.relook = Some(Relook { looks: r.looks + 1, ..r });
+            }
+            None => {
+                self.slots.remove(&index);
+            }
+        }
     }
 
     /// The memory slot `index`'s texture lies in was mapped, unmapped or
@@ -483,7 +623,7 @@ impl TextureQueue {
         self.writes += 1;
         let write = self.writes;
         let due = self.slots.get(&index).map_or(due, |w| w.due.min(due));
-        self.slots.insert(index, Waiting { due, written: frame, write, looks: 0, mapped: 0, checked: (0, 0, 0, 0, 0) });
+        self.slots.insert(index, Waiting::new(due, frame, write));
     }
 
     /// Bytes of slot `index`'s memory that were mapped at its last upload
@@ -492,16 +632,29 @@ impl TextureQueue {
         self.slots.get(&index).map_or(0, |w| w.mapped)
     }
 
-    /// For the frame line: slots in the queue; of them due at `frame`;
-    /// waiting for their memory (looked at, never uploaded); uploaded in
-    /// part; and the frames the oldest due one has waited since its write.
-    fn census(&self, frame: u64) -> [u64; 5] {
-        let mut c = [self.slots.len() as u64, 0, 0, 0, 0];
+    /// For the frame line: slots in the queue; of them due for an upload
+    /// at `frame`; waiting for their memory (looked at, never uploaded);
+    /// uploaded in part; the frames the oldest due one has waited since its
+    /// write; and slots never uploaded; slots uploaded whole that wait for
+    /// a look at their memory; slots a look found changed, waiting for
+    /// their upload; and looks due.
+    fn census(&self, frame: u64) -> [u64; 9] {
+        let mut c = [self.slots.len() as u64, 0, 0, 0, 0, 0, 0, 0, 0];
         for w in self.slots.values() {
+            if w.relook.is_some() {
+                c[6] += 1;
+                c[8] += u64::from(w.due <= frame);
+                continue;
+            }
             if w.mapped > 0 {
                 c[3] += 1;
             } else if w.looks > 0 {
                 c[2] += 1;
+            }
+            if w.stale {
+                c[7] += 1;
+            } else if w.mapped == 0 {
+                c[5] += 1;
             }
             if w.due <= frame {
                 c[1] += 1;
@@ -925,7 +1078,7 @@ impl HostHeap {
     /// with its write number, in the order to serve them
     /// ([`TextureQueue::due`]), and the queue's counts
     /// ([`TextureQueue::census`]).
-    pub(crate) fn texture_slots_due(&self, frame: u64, max: usize) -> (Vec<(u32, u64)>, [u64; 5]) {
+    pub(crate) fn texture_slots_due(&self, frame: u64, max: usize) -> (Vec<(u32, u64)>, [u64; 9]) {
         let textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
         (if max == 0 { Vec::new() } else { textures.due(frame, max) }, textures.census(frame))
     }
@@ -940,7 +1093,7 @@ impl HostHeap {
             .slots
             .iter()
             .filter(|(_, w)| w.due <= frame)
-            .map(|(&index, w)| (index, w.mapped > 0 || w.checked.2 != 0))
+            .map(|(&index, w)| (index, w.mapped > 0 || w.relook.is_some() || w.stale))
             .collect()
     }
 
@@ -956,25 +1109,27 @@ impl HostHeap {
         }
     }
 
-    /// Title slot `index` was uploaded whole: see [`TextureQueue::recheck`].
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn texture_slot_recheck(
-        &self,
-        index: u32,
-        write: u64,
-        due: u64,
-        at: (u64, u64),
-        print: u64,
-        looks: u8,
-        uploaded: u64,
-    ) {
+    /// Title slot `index` was uploaded whole in `frame` from memory `at`
+    /// (address, bytes) with fingerprint `print`: see
+    /// [`TextureQueue::uploaded_whole`]. True if a look had asked for the
+    /// upload.
+    pub(crate) fn texture_slot_uploaded_whole(&self, index: u32, write: u64, frame: u64, at: (u64, u64), print: u64) -> bool {
         let mut textures = self.textures.lock().unwrap_or_else(|e| e.into_inner());
-        textures.recheck(index, write, due, at, print, looks, uploaded);
+        textures.uploaded_whole(index, write, frame, at, print)
     }
 
-    /// See [`TextureQueue::checked`].
-    pub(crate) fn texture_slot_checked(&self, index: u32) -> Option<(u64, u64, u64, u8, u64)> {
-        self.textures.lock().unwrap_or_else(|e| e.into_inner()).checked(index)
+    /// The looks at textures uploaded whole that are due at `frame`
+    /// ([`relook`]): the slots a look finds changed wait for their upload.
+    /// Returns the looks made and those that found a change.
+    pub(crate) fn texture_slots_relook(
+        &self,
+        frame: u64,
+        most: usize,
+        span: std::time::Duration,
+        print: impl Fn(u64, u64) -> u64,
+        changed: impl FnMut(u32, &Relook),
+    ) -> (u64, u64) {
+        relook(&self.textures, frame, most, span, print, changed)
     }
 
     /// Nothing to upload at title slot `index` now (its memory is not
@@ -1539,12 +1694,14 @@ impl HostHeap {
         match textures.slots.get(&index) {
             None => "not queued".into(),
             Some(w) => format!(
-                "queued due={} written@{} looks={} part_mapped={} recheck={}",
+                "queued due={} written@{} looks={} part_mapped={} relook={} stale={} changes={}",
                 if w.due <= frame { "now".to_string() } else { format!("@{}", w.due) },
                 w.written,
                 w.looks,
                 w.mapped,
-                w.checked.2 != 0
+                w.relook.is_some(),
+                w.stale,
+                w.changes
             ),
         }
     }
@@ -2529,7 +2686,7 @@ mod tests {
         // newest, oldest, newest, oldest, and so on
         assert_eq!(order, [5, 10, 17, 11, 16, 12, 15, 13, 14]);
         assert_eq!(q.due(9, 2).len(), 2);
-        assert_eq!(q.census(9), [9, 9, 0, 0, 8]);
+        assert_eq!(q.census(9), [9, 9, 0, 0, 8, 9, 0, 0, 0]);
         // Slot 17's memory is not mapped: again next frame, then in 2, 4, 4.
         let write = |q: &TextureQueue, index: u32| q.due(u64::MAX, 100).iter().find(|d| d.0 == index).unwrap().1;
         let w17 = write(&q, 17);
@@ -2677,6 +2834,214 @@ mod tests {
     /// The rule until run 188 (`VICTORY_STALE_TEXTURES=overlap`): a view
     /// written over memory that older views describe otherwise makes
     /// those stale; views of the same span are one texture's.
+    /// Slot `index` uploaded whole in `frame` from its own memory
+    /// (`0x1000 * index`, 4 KiB) with fingerprint `print`, as the pass does.
+    /// Returns the write number the pass was handed.
+    fn uploaded(q: &mut TextureQueue, index: u32, frame: u64, print: u64) -> u64 {
+        q.written(index, frame, 0, false);
+        let write = q.writes;
+        assert!(!q.uploaded_whole(index, write, frame, (0x1000 * u64::from(index), 4096), print));
+        write
+    }
+
+    /// The looks at a texture the title filled after its upload come at
+    /// 4, 12, 40, 120 and 400 frames, further apart for each change.
+    #[test]
+    fn looks_at_uploaded_textures_follow_the_schedule() {
+        let waits = |changes| (0..6).map(|looks| relook_wait(looks, changes)).collect::<Vec<_>>();
+        assert_eq!(waits(0), [Some(4), Some(12), Some(40), Some(120), Some(400), None]);
+        assert_eq!(waits(1), [Some(8), Some(24), Some(80), Some(240), Some(400), None]);
+        assert_eq!(waits(3), [Some(32), Some(96), Some(320), Some(400), Some(400), None]);
+        // However many changes there were, no wait is longer than 400
+        // frames.
+        for changes in [7, 8, 100, u8::MAX] {
+            assert_eq!(waits(changes), [Some(400), Some(400), Some(400), Some(400), Some(400), None]);
+        }
+        // A texture that holds still: its looks, then it leaves the queue.
+        let mut q = TextureQueue::default();
+        let write = uploaded(&mut q, 7, 100, 1);
+        let mut looked = Vec::new();
+        for frame in 100..=800 {
+            assert!(q.due(frame, 8).is_empty(), "a slot uploaded whole is not the pass's");
+            for (index, write, _) in q.relooks_due(frame, 8) {
+                looked.push(frame);
+                q.relooked(index, write, frame, false);
+            }
+        }
+        assert_eq!(looked, [104, 116, 156, 276, 676]);
+        assert!(q.slots.is_empty());
+        q.relooked(7, write, 800, true);
+        assert!(q.slots.is_empty());
+    }
+
+    /// A slot never uploaded goes ahead of every re-upload a look asked for,
+    /// whatever the size of the pass, and slots uploaded whole that wait for
+    /// a look are neither due for the pass nor counted as waiting for their
+    /// memory.
+    #[test]
+    fn slots_never_uploaded_go_ahead_of_every_look_and_re_upload() {
+        let mut q = TextureQueue::default();
+        // 300 slots uploaded in one burst at frame 10.
+        for i in 0..300u32 {
+            uploaded(&mut q, 1000 + i, 10, 7);
+        }
+        assert!(q.due(u64::MAX, 4096).is_empty());
+        assert_eq!(q.census(13), [300, 0, 0, 0, 0, 0, 300, 0, 0]);
+        assert_eq!(q.census(14), [300, 0, 0, 0, 0, 0, 300, 0, 300]);
+        // 50 slots written at frame 14, never uploaded.
+        for i in 0..50u32 {
+            q.written(i, 14, 0, false);
+        }
+        // Looks find two thirds of the burst changed.
+        let looks = q.relooks_due(14, 4096);
+        assert_eq!(looks.len(), 300);
+        for (index, write, look) in looks {
+            assert_eq!(look.uploaded, 10);
+            q.relooked(index, write, 14, index % 3 != 0);
+        }
+        let order = q.due(14, 4096);
+        assert_eq!(order.len(), 250);
+        assert!(order[..50].iter().all(|d| d.0 < 50), "never uploaded first");
+        assert!(order[50..].iter().all(|d| d.0 >= 1000));
+        for max in 0..=260 {
+            assert_eq!(q.due(14, max), order[..max.min(250)]);
+        }
+        // never uploaded, waiting for a look, changed and waiting, looks due
+        assert_eq!(q.census(14)[5..], [50, 100, 200, 0]);
+        assert_eq!(q.census(14)[..4], [350, 250, 0, 0]);
+        // The ones that were unchanged are looked at again in 12 frames.
+        assert_eq!(q.relooks_due(25, 4096).len(), 0);
+        assert_eq!(q.relooks_due(26, 4096).len(), 100);
+    }
+
+    /// The black face: a texture whose memory the title filled after the
+    /// upload is uploaded again in the frame of the first look that finds it
+    /// so, as soon as no slot never uploaded is ahead of it.
+    #[test]
+    fn a_texture_filled_after_its_upload_is_uploaded_again_in_a_few_frames() {
+        let mut q = TextureQueue::default();
+        let write = uploaded(&mut q, 7, 10, 1);
+        assert!(q.relooks_due(13, 8).is_empty());
+        let looks = q.relooks_due(14, 8);
+        assert_eq!(looks.iter().map(|l| (l.0, l.2.looks)).collect::<Vec<_>>(), [(7, 0)]);
+        q.relooked(7, write, 14, true);
+        assert_eq!(q.due(14, 8), [(7, write)]);
+        assert_eq!(q.census(14)[5..], [0, 0, 1, 0]);
+        // Uploaded again: the next look comes after twice the first wait.
+        assert!(q.uploaded_whole(7, write, 14, (0x7000, 4096), 2));
+        assert!(q.due(u64::MAX, 8).is_empty());
+        assert!(q.relooks_due(21, 8).is_empty());
+        assert_eq!(q.relooks_due(22, 8)[0].2.print, 2);
+    }
+
+    /// A texture the title keeps writing is not uploaded again at every
+    /// look: the waits double, up to 400 frames (every 4 before: 500
+    /// uploads in these 2,000 frames), and the slot is still looked at.
+    #[test]
+    fn a_texture_that_always_changes_does_not_loop_at_full_rate() {
+        let mut q = TextureQueue::default();
+        uploaded(&mut q, 3, 0, 1);
+        let mut uploads = vec![0u64];
+        for frame in 1..=2000u64 {
+            for (index, write, _) in q.relooks_due(frame, 8) {
+                q.relooked(index, write, frame, true);
+            }
+            for (index, write) in q.due(frame, 8) {
+                assert!(q.uploaded_whole(index, write, frame, (0x3000, 4096), frame + 1));
+                uploads.push(frame);
+            }
+        }
+        assert_eq!(uploads, [0, 4, 12, 28, 60, 124, 252, 508, 908, 1308, 1708]);
+        assert!(q.slots[&3].relook.is_some());
+    }
+
+    /// A slot found unmapped or only partly mapped forgets what the last
+    /// look compared with (the memory it held is not the memory it holds),
+    /// and a write or a remap of its memory starts it over.
+    #[test]
+    fn a_slot_waiting_for_its_memory_forgets_the_look_it_had() {
+        let mut q = TextureQueue::default();
+        let w1 = uploaded(&mut q, 1, 0, 9);
+        let w2 = uploaded(&mut q, 2, 0, 9);
+        uploaded(&mut q, 3, 0, 9);
+        let w4 = uploaded(&mut q, 4, 0, 9);
+        // A look finds slot 4 changed, then its memory is gone.
+        q.relooked(4, w4, 4, true);
+        assert_eq!(q.census(4)[7], 1);
+        q.later(4, w4, 4, 16);
+        q.later(1, w1, 4, 16);
+        q.partly(2, w2, 5, 4096);
+        // Slot 3 is written again by the title.
+        q.written(3, 4, 4, false);
+        assert!(q.relooks_due(u64::MAX, 8).is_empty());
+        let order: Vec<u32> = q.due(100, 8).into_iter().map(|d| d.0).collect();
+        // looked at before (waiting for memory or partly) first, then the new write
+        assert_eq!(order.len(), 4);
+        assert_eq!(order[3], 3);
+        assert_eq!(q.census(100)[2..4], [2, 1]);
+        assert_eq!(q.census(100)[5..], [3, 0, 0, 0]);
+        // Memory remapped under an uploaded slot starts it over.
+        let w5 = uploaded(&mut q, 5, 10, 9);
+        q.changed(5, 12, 13);
+        assert!(q.slots[&5].relook.is_none() && q.slots[&5].changes == 0);
+        assert_eq!(q.due(13, 8).iter().filter(|d| d.0 == 5).count(), 1);
+        // What the pass reports about the old write is dropped.
+        assert!(!q.uploaded_whole(5, w5, 13, (0x5000, 4096), 1));
+        assert!(q.slots[&5].relook.is_none());
+    }
+
+    /// A frame's looks are bounded in number and in time, the ones that
+    /// waited longest first, and the fingerprint runs without the queue's
+    /// lock.
+    #[test]
+    fn looks_per_frame_are_bounded() {
+        let queue = Mutex::new(TextureQueue::default());
+        {
+            let mut q = queue.lock().unwrap();
+            for i in 0..100u32 {
+                uploaded(&mut q, i, 0, 5);
+            }
+        }
+        let seen = Mutex::new(Vec::new());
+        let print = |at: u64, len: u64| {
+            assert_eq!(len, 4096);
+            // The lock is free while a fingerprint is worked out.
+            assert!(queue.try_lock().is_ok());
+            seen.lock().unwrap().push(at / 0x1000);
+            5
+        };
+        let forever = std::time::Duration::from_secs(60);
+        let (looks, found) = relook(&queue, 4, 8, forever, print, |_, _| panic!("unchanged"));
+        assert_eq!((looks, found), (8, 0));
+        assert_eq!(*seen.lock().unwrap(), (0..8).collect::<Vec<_>>());
+        // The next frame's looks go on with the ones not looked at yet.
+        let (looks, _) = relook(&queue, 5, 8, forever, print, |_, _| panic!("unchanged"));
+        assert_eq!(looks, 8);
+        assert_eq!(seen.lock().unwrap()[8..], (8..16).collect::<Vec<_>>());
+        // A change is told, once, and the slot waits for its upload.
+        let mut told = Vec::new();
+        let (looks, found) = relook(&queue, 5, 1, forever, |_, _| 6, |slot, look| told.push((slot, look.print)));
+        assert_eq!((looks, found), (1, 1));
+        assert_eq!(told, [(16, 5)]);
+        assert_eq!(queue.lock().unwrap().due(5, 8).iter().map(|d| d.0).collect::<Vec<_>>(), [16]);
+        // The time a frame may spend ends the looks early.
+        let slow = |_: u64, _: u64| {
+            std::thread::sleep(std::time::Duration::from_millis(4));
+            5
+        };
+        let (looks, _) = relook(&queue, 5, 64, std::time::Duration::from_millis(10), slow, |_, _| {});
+        assert!((1..64).contains(&looks), "{looks}");
+        // Looks not made stay due: all slots are looked at in the end.
+        let mut frame = 5;
+        while queue.lock().unwrap().census(frame)[8] > 0 {
+            frame += 1;
+            assert!(frame < 5000);
+            relook(&queue, frame, 8, forever, |_, _| 5, |_, _| {});
+        }
+    }
+
+    /// A view written over memory that older views describe otherwise
+    /// makes those stale; views of the same span are one texture's.
     #[test]
     fn a_newer_view_of_other_memory_makes_the_older_stale() {
         let mut spans = Spans { rule: Rule::Overlap, ..Default::default() };
