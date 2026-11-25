@@ -49,7 +49,14 @@ param(
     # The console the title is told it runs on. 'series-s' renders at the
     # smaller console's resolution: KLBF Lab measured ~7.3 fps there against
     # ~5 in Series X mode on an RX 9070 XT.
-    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x'
+    [ValidateSet('series-x', 'series-s')][string]$Console = 'series-x',
+    # With -Diag: save presented frames (every power of two, plus -CaptureFrames)
+    # as PNGs in this folder, outside the repository. -Targets also saves every
+    # render target of those frames. (VICTORY_CAPTURE set in the shell is
+    # cleared like the other test switches; this is the way to ask for it.)
+    [string]$Capture = '',
+    [string]$CaptureFrames = '',
+    [switch]$Targets
 )
 $ErrorActionPreference = 'Stop'
 $repo = (git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
@@ -65,6 +72,17 @@ if ($Profile -eq 'amd') {
     if ($Diag) { $amd['VICTORY_SHADER_LOOP_LIMIT'] = '1024' }
     if ($AmdSkips) { $amd['VICTORY_SKIP_PIPELINES'] = 'c1eee35dbc50a9ef,f16876929fa64f9f,eeed82b877b44b5f,02384a60fda6f2d0,39f0e9aeb156a61c' }
     foreach ($k in $amd.Keys) { if (-not $SetEnv.ContainsKey($k)) { $SetEnv[$k] = $amd[$k] } }
+}
+if ($Capture) {
+    if (-not $Diag) { throw "-Capture needs -Diag: only the diagnostics build saves frames" }
+    $capFull = [System.IO.Path]::GetFullPath($Capture)
+    if ($capFull.StartsWith([System.IO.Path]::GetFullPath($repo), [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Capture folder $capFull is inside the repository; frames hold game images (docs/asset-policy.md)"
+    }
+    New-Item -ItemType Directory -Force -Path $capFull | Out-Null
+    $SetEnv['VICTORY_CAPTURE'] = $capFull
+    if ($CaptureFrames) { $SetEnv['VICTORY_CAPTURE_FRAMES'] = $CaptureFrames }
+    if ($Targets) { $SetEnv['VICTORY_DUMP_TARGETS'] = '1' }
 }
 
 $commit = (git -C $repo rev-parse HEAD).Trim()
