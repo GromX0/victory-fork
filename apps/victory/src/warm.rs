@@ -27,6 +27,12 @@
 //! compile of compute shader 39f0e9aeb156a61c never ends and the driver's
 //! memory grows by some 240 MB a second meanwhile (see
 //! `VICTORY_SKIP_PIPELINES`).
+//!
+//! The host driver can also end the process in a compile. What is being
+//! made is listed in `warm-inflight.txt`; the next warm-up makes those
+//! first, one at a time, and a pipeline it then dies on alone goes into
+//! `warm-stalled.txt` too (KLBF Lab's pre-build does the same for
+//! `amdxc64.dll` deaths on an RX 9070 XT).
 
 use std::path::PathBuf;
 
@@ -49,8 +55,8 @@ pub fn run(paths: Vec<PathBuf>, jobs: Option<usize>) -> Result<()> {
 
 #[cfg(windows)]
 mod windows_only {
-    use std::collections::{BTreeMap, HashMap, HashSet};
-    use std::path::PathBuf;
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -60,9 +66,15 @@ mod windows_only {
 
     use crate::shader::{MAX_FILE, sources};
 
-    /// Pipelines a stall stopped an earlier warm-up on, by key, beside the
-    /// library.
+    /// Pipelines a stall stopped an earlier warm-up on, or one it died
+    /// making alone, by key, beside the library.
     const STALLED_FILE: &str = "warm-stalled.txt";
+    /// The pipelines being made now, by key: what a warm-up that died (the
+    /// host driver can end the process, `amdxc64.dll` on an RX 9070 XT in
+    /// KLBF Lab's runs) was making. The next one makes those first, one at
+    /// a time: one it then dies on is the only one listed, and is left out
+    /// from then on.
+    const INFLIGHT_FILE: &str = "warm-inflight.txt";
 
     /// Shader containers by their whole content hash.
     type Containers = HashMap<[u8; 32], Vec<u8>>;
@@ -88,13 +100,20 @@ mod windows_only {
             );
             return Ok(());
         }
-        let stalled_before: HashSet<String> = std::fs::read_to_string(dir.join(STALLED_FILE))
-            .unwrap_or_default()
-            .lines()
-            .map(|l| l.trim().to_owned())
-            .filter(|l| !l.is_empty())
-            .collect();
-        let (mut todo, mut left_out) = (Vec::new(), BTreeMap::<String, usize>::new());
+        let inflight_path = dir.join(INFLIGHT_FILE);
+        let mut stalled_before = read_keys(&dir.join(STALLED_FILE));
+        // What the last warm-up was making when it died: alone, the one it
+        // died on; several, made first and one at a time.
+        let died_on = read_keys(&inflight_path);
+        if died_on.len() == 1 {
+            stalled_before.extend(died_on.iter().cloned());
+            write_keys(&dir.join(STALLED_FILE), &stalled_before)?;
+            println!(
+                "warm-up      the last warm-up died making one pipeline alone: left out from now on ({STALLED_FILE})"
+            );
+        }
+        let (mut first, mut todo, mut left_out) =
+            (Vec::new(), Vec::new(), BTreeMap::<String, usize>::new());
         for d in described {
             if let Some(hash) = d.skipped() {
                 *left_out
@@ -103,16 +122,26 @@ mod windows_only {
             } else if stalled_before.contains(d.key()) {
                 *left_out
                     .entry(format!(
-                        "stalled an earlier warm-up ({STALLED_FILE}): {}",
+                        "stalled or ended an earlier warm-up ({STALLED_FILE}): {}",
                         d.label()
                     ))
                     .or_default() += 1;
+            } else if died_on.len() > 1 && died_on.contains(d.key()) {
+                first.push(d);
             } else {
                 todo.push(d);
             }
         }
+        if !first.is_empty() {
+            println!(
+                "warm-up      {} pipelines were being made when the last warm-up died: made first, one at a time",
+                first.len()
+            );
+        }
         let threads = jobs.unwrap_or_else(default_threads).max(1);
-        let wanted: HashSet<[u8; 32]> = todo.iter().flat_map(|d| d.shaders().copied()).collect();
+        let wanted: HashSet<[u8; 32]> = (first.iter().chain(&todo))
+            .flat_map(|d| d.shaders().copied())
+            .collect();
         let paths = crate::default_paths(paths)?;
         let looked = Instant::now();
         let (containers, files) = find(&paths, &wanted, threads);
@@ -122,7 +151,13 @@ mod windows_only {
             wanted.len(),
             looked.elapsed().as_secs_f64()
         );
-        let outcome = make(todo, containers, threads);
+        let containers = Arc::new(containers);
+        let mut outcome = make(first, containers.clone(), 1, &inflight_path);
+        if outcome.stalled.is_empty() {
+            outcome.absorb(make(todo, containers, threads, &inflight_path));
+        }
+        // An orderly end: what was in flight is done, or listed as stalled.
+        let _ = std::fs::remove_file(&inflight_path);
         let saved = gpu::save_pipeline_cache_within(Duration::from_secs(60));
         let o = &outcome;
         println!(
@@ -142,11 +177,8 @@ mod windows_only {
             println!("  {n:>7}  {why}");
         }
         if !o.stalled.is_empty() {
-            let mut keys: Vec<String> = stalled_before.into_iter().collect();
-            keys.extend(o.stalled.iter().map(|(key, _)| key.clone()));
-            keys.sort_unstable();
-            keys.dedup();
-            std::fs::write(dir.join(STALLED_FILE), keys.join("\n") + "\n")?;
+            stalled_before.extend(o.stalled.iter().map(|(key, _)| key.clone()));
+            write_keys(&dir.join(STALLED_FILE), &stalled_before)?;
             for (_, label) in &o.stalled {
                 println!("  stalled  {label}: listed in {STALLED_FILE}, left out from now on");
             }
@@ -158,6 +190,21 @@ mod windows_only {
         }
         anyhow::ensure!(saved, "the pipeline library was not saved");
         Ok(())
+    }
+
+    /// The keys a list file holds, one a line (none if there is no file).
+    fn read_keys(path: &Path) -> BTreeSet<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.trim().to_owned())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    fn write_keys(path: &Path, keys: &BTreeSet<String>) -> std::io::Result<()> {
+        let text: String = keys.iter().map(|k| format!("{k}\n")).collect();
+        std::fs::write(path, text)
     }
 
     /// As many threads as a run's pipeline workers: half the logical
@@ -243,14 +290,45 @@ mod windows_only {
         stalled: Vec<(String, String)>,
     }
 
+    impl Outcome {
+        fn absorb(&mut self, other: Outcome) {
+            self.made += other.made;
+            self.loaded += other.loaded;
+            self.refused += other.refused;
+            for (why, n) in other.failed {
+                *self.failed.entry(why).or_default() += n;
+            }
+            self.stalled.extend(other.stalled);
+        }
+    }
+
+    /// Keeps [`INFLIGHT_FILE`] at `path` listing the keys in `flying` (none:
+    /// no file).
+    fn note_inflight(path: &Path, flying: &BTreeSet<String>) {
+        let _ = if flying.is_empty() {
+            std::fs::remove_file(path)
+        } else {
+            write_keys(path, flying)
+        };
+    }
+
     /// Milliseconds since `since`, never 0 (0 marks an idle worker).
     fn ms(since: Instant) -> u64 {
         since.elapsed().as_millis() as u64 + 1
     }
 
     /// Makes `todo` on `threads` threads of their own, reporting progress,
-    /// until all are done or one stalls ([`super`]'s notes).
-    fn make(todo: Vec<Described>, containers: Containers, threads: usize) -> Outcome {
+    /// until all are done or one stalls ([`super`]'s notes), the keys being
+    /// made listed in the file `inflight` ([`INFLIGHT_FILE`]).
+    fn make(
+        todo: Vec<Described>,
+        containers: Arc<Containers>,
+        threads: usize,
+        inflight: &Path,
+    ) -> Outcome {
+        if todo.is_empty() {
+            return Outcome::default();
+        }
         let stall = Duration::from_secs(
             std::env::var("VICTORY_WARM_STALL_SECONDS")
                 .ok()
@@ -259,7 +337,8 @@ mod windows_only {
         );
         let n = todo.len();
         let todo = Arc::new(todo);
-        let containers = Arc::new(containers);
+        let flying: Arc<Mutex<BTreeSet<String>>> = Arc::default();
+        let inflight: Arc<PathBuf> = Arc::new(inflight.to_owned());
         let next = Arc::new(AtomicUsize::new(0));
         let stop = Arc::new(AtomicBool::new(false));
         let clock = Instant::now();
@@ -274,6 +353,7 @@ mod windows_only {
         let counts = Arc::new([const { AtomicUsize::new(0) }; 3]);
         let failed: Arc<Mutex<BTreeMap<String, usize>>> = Arc::default();
         for (w, _) in slots.iter().enumerate() {
+            let (flying, inflight) = (flying.clone(), inflight.clone());
             let (todo, containers, next, stop, own_slots, counts, failed) = (
                 todo.clone(),
                 containers.clone(),
@@ -290,9 +370,19 @@ mod windows_only {
                     let Some(d) = todo.get(i) else { break };
                     slot[1].store(i as u64, Ordering::Relaxed);
                     slot[0].store(ms(clock), Ordering::Relaxed);
+                    {
+                        let mut flying = lock(&flying);
+                        flying.insert(d.key().to_owned());
+                        note_inflight(&inflight, &flying);
+                    }
                     let began = Instant::now();
                     let warmed = d.warm(|hash| containers.get(hash).map(Vec::as_slice));
                     slot[0].store(0, Ordering::Relaxed);
+                    {
+                        let mut flying = lock(&flying);
+                        flying.remove(d.key());
+                        note_inflight(&inflight, &flying);
+                    }
                     let counted = match warmed {
                         Ok(Warmed::Made) => 0,
                         Ok(Warmed::Loaded) => 1,
