@@ -2028,7 +2028,7 @@ struct Deferred {
     /// Staging buffers the list's commands copy from (`crate::texture::upload`
     /// recorded a copy): the flight of its submission reads them on the card,
     /// so a later detile into them waits for it ([`staging_wait`]).
-    staging_copies: Vec<std::sync::Arc<crate::texture::Staging>>,
+    staging_copies: Vec<crate::texture::CopyHold>,
     /// Bottom-of-pipe writes, done once the list has run: address, what,
     /// bytes.
     writes: Vec<(usize, crate::queue::Written, usize)>,
@@ -7065,7 +7065,7 @@ impl HostList {
 
     /// The list's commands copy from `staging` on the card: its flight is
     /// noted in it at submission ([`staging_wait`]).
-    pub(crate) fn note_staging_copy(&self, staging: std::sync::Arc<crate::texture::Staging>) {
+    pub(crate) fn note_staging_copy(&self, staging: crate::texture::CopyHold) {
         self.deferred().staging_copies.push(staging);
     }
 
