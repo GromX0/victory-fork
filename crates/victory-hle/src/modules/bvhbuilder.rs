@@ -43,6 +43,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use victory_gpu::bvhguard::Named;
 use victory_loader::{ImportResolver, Provenance, Resolution};
 use victory_pe::ImportSymbol;
 
@@ -458,12 +459,46 @@ unsafe fn geometries(inputs: &Inputs) -> Vec<Geometry> {
 #[derive(Debug, Clone, Copy)]
 struct Structure {
     top: bool,
-    /// Its size, from a size query with the same inputs.
-    bytes: Option<u64>,
+    /// Its bytes before and from its address ([`found`]).
+    extent: Option<(u64, u64)>,
     builds: u64,
     rehydrated: bool,
     /// Made by a compacting copy.
     compacted: bool,
+}
+
+/// Where a build's sizes came from ([`found`]), in the summary's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SizedBy {
+    /// A size query with the same inputs ([`signature`]).
+    Exact = 0,
+    /// A size query with the same level, flags, count and primitives
+    /// ([`loose_key`]): the title's queries for geometry with index format
+    /// 53 never match exactly (run `20261125-130040`), though their answers
+    /// are what it packs destinations by.
+    Loose,
+    /// An earlier build at the same destination (an update, a rebuild in
+    /// place, a rehydration).
+    Earlier,
+    /// The structure's header in title memory (rehydrations: the title
+    /// loaded it there).
+    Header,
+    /// The smallest answer for the same level, flags and count with at
+    /// least as many primitives ([`capacity_key`]): a top level built with
+    /// fewer instances than it was asked about.
+    Capacity,
+    Nothing,
+}
+
+const SIZED_BY: usize = 6;
+
+/// What a build's ranges are ([`found`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Found {
+    /// Bytes before and from the destination.
+    dest: Option<(u64, u64)>,
+    scratch: Option<u64>,
+    by: SizedBy,
 }
 
 /// Counts over one summary line's time.
@@ -486,10 +521,8 @@ struct Window {
     /// Post-build requests by type (compacted size, tools, serialization,
     /// current size, anything else).
     postbuild: [u64; 5],
-    /// Builds whose destination size a size query told, and those it did
-    /// not.
-    sized: u64,
-    unsized_: u64,
+    /// Builds by where their sizes came from ([`SizedBy`]).
+    sized_by: [u64; SIZED_BY],
     /// The largest bottom level (triangles) and top level (instances).
     largest_bottom: u64,
     largest_top: u64,
@@ -505,12 +538,31 @@ struct State {
     last_line: Instant,
     /// Calls logged in full, per entry point.
     spelled: [u64; COUNT],
-    /// Size answers by [`signature`].
+    /// Size answers by [`signature`], by [`loose_key`], and by
+    /// [`capacity_key`] with the primitives asked about (the latest
+    /// [`MOST_CAPACITIES`]).
     sizes: HashMap<u64, Sizes>,
+    loose: HashMap<u64, Sizes>,
+    capacity: HashMap<u64, Vec<(u64, Sizes)>>,
     /// Structures by destination address.
     structures: HashMap<u64, Structure>,
     /// Morton code widths asked for.
     morton: Vec<bool>,
+}
+
+impl State {
+    fn new() -> State {
+        State {
+            window: Window::default(),
+            last_line: Instant::now(),
+            spelled: [0; COUNT],
+            sizes: HashMap::new(),
+            loose: HashMap::new(),
+            capacity: HashMap::new(),
+            structures: HashMap::new(),
+            morton: Vec::new(),
+        }
+    }
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -537,17 +589,13 @@ fn parse_level(v: Option<&str>) -> u64 {
 /// Runs `f` on the state, then writes the summary line if it is due.
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let state = guard.get_or_insert_with(|| State {
-        window: Window::default(),
-        last_line: Instant::now(),
-        spelled: [0; COUNT],
-        sizes: HashMap::new(),
-        structures: HashMap::new(),
-        morton: Vec::new(),
-    });
+    let state = guard.get_or_insert_with(State::new);
     let out = f(state);
     if state.last_line.elapsed() >= LINE_EVERY {
-        summary(state);
+        // With only the guard on, the counts are kept and not logged.
+        if level() > 0 {
+            summary(state);
+        }
         state.last_line = Instant::now();
         state.window = Window::default();
     }
@@ -572,9 +620,9 @@ fn summary(state: &State) {
         } else {
             bottoms += 1;
         }
-        if let Some(b) = s.bytes {
+        if let Some((below, from)) = s.extent {
             sized += 1;
-            bytes += b;
+            bytes += below + from;
         }
         rehydrated += u32::from(s.rehydrated);
         compacted += u32::from(s.compacted);
@@ -604,14 +652,13 @@ fn summary(state: &State) {
         compactions = w.compactions,
         other_copies = w.other_copies,
         postbuild = ?w.postbuild,
-        destinations_sized = w.sized,
-        destinations_unsized = w.unsized_,
+        sized_by = ?w.sized_by,
         other_geometry = w.other_geometry,
         vertex_formats = %formats(&w.vertex_formats),
         index_formats = %formats(&w.index_formats),
         "the ray-tracing structure builder's calls since the line before (VICTORY_BVH_TRACE; calls: new, drop, \
          build, copy, size query, rehydrate, Morton width; postbuild: compacted size, tools, serialization, \
-         current size, other)"
+         current size, other; sized_by: exact query, loose query, earlier build, header, capacity, nothing)"
     );
     tracing::info!(
         top_levels = tops,
@@ -626,18 +673,283 @@ fn summary(state: &State) {
     );
 }
 
-/// Notes one build description (a build or a rehydration) and logs it in
-/// full if `spelled`.
+/// Most answers kept per [`capacity_key`].
+const MOST_CAPACITIES: usize = 64;
+
+/// A top level's instances, or a bottom level's triangles and boxes.
+fn primitives(inputs: &Inputs, geometry: &[Geometry]) -> u64 {
+    if inputs.top() {
+        u64::from(inputs.count)
+    } else {
+        geometry.iter().map(|g| g.triangles() + g.aabbs()).sum()
+    }
+}
+
+/// A size query's inputs as far as sizes depend on them: level, flags but
+/// the update flag, count, primitives.
+fn loose_key(inputs: &Inputs, primitives: u64) -> u64 {
+    let mut h = Fnv::new();
+    for word in [
+        u64::from(inputs.kind),
+        u64::from(inputs.flags & !PERFORM_UPDATE),
+        u64::from(inputs.count),
+        primitives,
+    ] {
+        h.add(word);
+    }
+    h.0
+}
+
+/// Level and flags, and a bottom level's geometry count (a top level's
+/// count is its capacity, compared in [`found`]).
+fn capacity_key(inputs: &Inputs) -> u64 {
+    let mut h = Fnv::new();
+    h.add(u64::from(inputs.kind));
+    h.add(u64::from(inputs.flags & !PERFORM_UPDATE));
+    h.add(if inputs.top() {
+        0
+    } else {
+        u64::from(inputs.count)
+    });
+    h.add(0xca9a);
+    h.0
+}
+
+/// Notes a size query's answer.
+fn note_sizes(state: &mut State, inputs: &Inputs, geometry: &[Geometry], sizes: Sizes) {
+    let key = signature(inputs, geometry);
+    if state.sizes.len() < MOST_KEPT || state.sizes.contains_key(&key) {
+        state.sizes.insert(key, sizes);
+    }
+    let prims = primitives(inputs, geometry);
+    let key = loose_key(inputs, prims);
+    if state.loose.len() < MOST_KEPT || state.loose.contains_key(&key) {
+        state.loose.insert(key, sizes);
+    }
+    let key = capacity_key(inputs);
+    if state.capacity.len() < MOST_KEPT || state.capacity.contains_key(&key) {
+        let v = state.capacity.entry(key).or_default();
+        v.retain(|&(p, _)| p != prims);
+        if v.len() >= MOST_CAPACITIES {
+            v.remove(0);
+        }
+        v.push((prims, sizes));
+    }
+}
+
+/// The ranges a build or rehydration writes, from the sources
+/// [`SizedBy`] lists. A new build trusts only size answers. An update or
+/// a rehydration works on a structure that is there already: an earlier
+/// build's extent, or its header in title memory (read with
+/// `read_header`), first.
+fn found(
+    state: &State,
+    desc: &BuildDesc,
+    geometry: &[Geometry],
+    rehydrate: bool,
+    read_header: impl Fn(u64) -> Option<(u64, u64)>,
+) -> Found {
+    let inputs = &desc.inputs;
+    let prims = primitives(inputs, geometry);
+    let scratch_of = |s: &Sizes| {
+        if inputs.update() {
+            s.update_scratch
+        } else {
+            s.scratch
+        }
+    };
+    let asked = state
+        .sizes
+        .get(&signature(inputs, geometry))
+        .map(|s| (*s, SizedBy::Exact))
+        .or_else(|| {
+            state
+                .loose
+                .get(&loose_key(inputs, prims))
+                .map(|s| (*s, SizedBy::Loose))
+        });
+    // May reach past the title's allocation (another structure's answer):
+    // after an earlier build's extent.
+    let capacity = || {
+        let v = state.capacity.get(&capacity_key(inputs))?;
+        let s = v
+            .iter()
+            .filter(|(p, _)| *p >= prims)
+            .min_by_key(|(_, s)| s.result)?;
+        Some((s.1, SizedBy::Capacity))
+    };
+    let query = asked.or_else(capacity);
+    let scratch = query.map(|(s, _)| scratch_of(&s));
+    let answered = |(s, by): (Sizes, SizedBy)| Found {
+        dest: Some((0, s.result)),
+        scratch: Some(scratch_of(&s)),
+        by,
+    };
+    let earlier = state.structures.get(&desc.dest).and_then(|s| s.extent);
+    if !rehydrate && !inputs.update() {
+        if let Some(q) = asked {
+            return answered(q);
+        }
+        // Built again where it was (the title rebuilds some bottom levels
+        // in place every frame).
+        if let Some(extent) = earlier {
+            return Found {
+                dest: Some(extent),
+                scratch,
+                by: SizedBy::Earlier,
+            };
+        }
+        return capacity().map_or(
+            Found {
+                dest: None,
+                scratch: None,
+                by: SizedBy::Nothing,
+            },
+            answered,
+        );
+    }
+    if let Some(extent) = earlier {
+        return Found {
+            dest: Some(extent),
+            scratch,
+            by: SizedBy::Earlier,
+        };
+    }
+    if let Some(extent) = read_header(desc.dest) {
+        return Found {
+            dest: Some(extent),
+            scratch,
+            by: SizedBy::Header,
+        };
+    }
+    query.map_or(
+        Found {
+            dest: None,
+            scratch,
+            by: SizedBy::Nothing,
+        },
+        answered,
+    )
+}
+
+/// The structure header at title address `at`: its extent, if it holds a
+/// plausible one.
+fn header_at(at: u64) -> Option<(u64, u64)> {
+    let mut bytes = [0u8; 64];
+    victory_gpu::bvhguard::read_title(at, &mut bytes)
+        .then(|| victory_gpu::bvhguard::header_extent(&bytes))
+        .flatten()
+}
+
+/// Bytes of an index of the DXGI format `format` (the title's 53, which no
+/// public index format is, taken as 16-bit like 57).
+fn index_bytes(format: u32) -> u64 {
+    match format {
+        42 => 4,
+        _ => 2,
+    }
+}
+
+/// What a build description reads: its instances, or its geometry's
+/// vertices, indices, transforms and boxes; and its source structure.
+fn reads_of(state: &State, desc: &BuildDesc, geometry: &[Geometry]) -> Vec<Named> {
+    let inputs = &desc.inputs;
+    let mut out = Vec::new();
+    if desc.source != 0 && desc.source != desc.dest {
+        let extent = state.structures.get(&desc.source).and_then(|s| s.extent);
+        out.push(Named {
+            at: desc.source - extent.map_or(0, |e| e.0),
+            bytes: extent.map(|(below, from)| below + from),
+        });
+    }
+    if inputs.top() {
+        out.push(Named {
+            at: inputs.descs,
+            bytes: Some(64 * u64::from(inputs.count)),
+        });
+        return out;
+    }
+    for g in geometry {
+        match *g {
+            Geometry::Triangles {
+                transform,
+                index_format,
+                index_count,
+                vertex_count,
+                index_buffer,
+                vertex_start,
+                vertex_stride,
+                ..
+            } => {
+                // The stride's high bits carry something of the Xbox's
+                // (strides of 0x8008 next to 8s).
+                out.push(Named {
+                    at: vertex_start,
+                    bytes: Some(u64::from(vertex_count) * (vertex_stride & 0x7fff)),
+                });
+                out.push(Named {
+                    at: index_buffer,
+                    bytes: Some(u64::from(index_count) * index_bytes(index_format)),
+                });
+                out.push(Named {
+                    at: transform,
+                    bytes: Some(48),
+                });
+            }
+            Geometry::Aabbs {
+                count,
+                start,
+                stride,
+                ..
+            } => out.push(Named {
+                at: start,
+                bytes: Some(count.saturating_mul(stride)),
+            }),
+            Geometry::Other { .. } => {}
+        }
+    }
+    out
+}
+
+/// Notes one build description (a build or a rehydration), logs it in
+/// full if `spelled`, and adds what its work may write and reads to
+/// `writes` and `reads` (`victory_gpu::bvhguard`).
 ///
 /// # Safety
 /// `desc` is a live call's: its geometry descriptions are readable.
-unsafe fn note_desc(state: &mut State, desc: &BuildDesc, rehydrate: bool, spelled: Option<String>) {
+unsafe fn note_desc(
+    state: &mut State,
+    desc: &BuildDesc,
+    rehydrate: bool,
+    spelled: Option<String>,
+    writes: &mut Vec<Named>,
+    reads: &mut Vec<Named>,
+) {
     let inputs = &desc.inputs;
     // SAFETY: as the caller says.
     let geometry = unsafe { geometries(inputs) };
     let triangles: u64 = geometry.iter().map(Geometry::triangles).sum();
     let aabbs: u64 = geometry.iter().map(Geometry::aabbs).sum();
+    let found = found(state, desc, &geometry, rehydrate, header_at);
+    writes.push(match found.dest {
+        Some((below, from)) => Named {
+            at: desc.dest.saturating_sub(below),
+            bytes: Some(below + from),
+        },
+        None => Named {
+            at: desc.dest,
+            bytes: None,
+        },
+    });
+    if desc.scratch != 0 {
+        writes.push(Named {
+            at: desc.scratch,
+            bytes: found.scratch,
+        });
+    }
+    reads.extend(reads_of(state, desc, &geometry));
     let w = &mut state.window;
+    w.sized_by[found.by as usize] += 1;
     if rehydrate {
         w.rehydrated += 1;
         w.rehydrated_geometries += geometry.len() as u64;
@@ -669,16 +981,10 @@ unsafe fn note_desc(state: &mut State, desc: &BuildDesc, rehydrate: bool, spelle
             Geometry::Aabbs { .. } => {}
         }
     }
-    let sizes = state.sizes.get(&signature(inputs, &geometry)).copied();
-    if sizes.is_some() {
-        w.sized += 1;
-    } else {
-        w.unsized_ += 1;
-    }
     if state.structures.len() < MOST_KEPT || state.structures.contains_key(&desc.dest) {
         let s = state.structures.entry(desc.dest).or_insert(Structure {
             top: inputs.top(),
-            bytes: None,
+            extent: None,
             builds: 0,
             rehydrated: false,
             compacted: false,
@@ -686,8 +992,8 @@ unsafe fn note_desc(state: &mut State, desc: &BuildDesc, rehydrate: bool, spelle
         s.top = inputs.top();
         s.builds += 1;
         s.rehydrated |= rehydrate;
-        if let Some(sizes) = sizes {
-            s.bytes = Some(sizes.result);
+        if found.dest.is_some() {
+            s.extent = found.dest;
         }
     }
     if let Some(what) = spelled {
@@ -696,10 +1002,11 @@ unsafe fn note_desc(state: &mut State, desc: &BuildDesc, rehydrate: bool, spelle
             what,
             level = if inputs.top() { "top" } else { "bottom" },
             dest = format_args!("{:#x}", desc.dest),
-            bytes = ?sizes.map(|s| s.result),
+            bytes = ?found.dest,
+            sized_by = ?found.by,
             source = format_args!("{:#x}", desc.source),
             scratch = format_args!("{:#x}", desc.scratch),
-            scratch_bytes = ?sizes.map(|s| if inputs.update() { s.update_scratch } else { s.scratch }),
+            scratch_bytes = ?found.scratch,
             flags = format_args!("{:#x}", inputs.flags),
             count = inputs.count,
             layout = inputs.layout,
@@ -745,8 +1052,12 @@ unsafe extern "system" fn new(this: *mut c_void, device: *mut c_void, flag: u8) 
     };
     // SAFETY: the DLL's own constructor, bound for this import.
     let f: NewFn = unsafe { std::mem::transmute::<usize, NewFn>(f) };
+    // Buffers it makes meanwhile are its own (`VICTORY_BVH_GUARD`).
+    victory_gpu::bvhguard::enter("the builder's constructor", &[], &[]);
     // SAFETY: the title's arguments, passed on.
-    unsafe { f(this, device, flag) }
+    let made = unsafe { f(this, device, flag) };
+    victory_gpu::bvhguard::leave();
+    made
 }
 
 unsafe extern "system" fn release(this: *mut c_void) {
@@ -766,6 +1077,7 @@ unsafe extern "system" fn build(
     count: u32,
     descs: *const u8,
 ) {
+    let (mut writes, mut reads) = (Vec::new(), Vec::new());
     with_state(|state| {
         state.window.calls[Entry::Build as usize] += 1;
         let spelled = spell(state, Entry::Build);
@@ -784,17 +1096,25 @@ unsafe extern "system" fn build(
                 };
                 let kind = u32_at(&p, 8) as usize;
                 state.window.postbuild[kind.min(4)] += 1;
+                // The public results are 8 or 16 bytes; the Xbox's own
+                // type (0x10, RVA 0x2177f) is not known.
+                writes.push(Named {
+                    at: u64_at(&p, 0),
+                    bytes: Some(if kind <= 3 { 16 } else { 64 }),
+                });
             }
             let what = spelled.then(|| format!("build {} of {count}, list {list:?}", i + 1));
             // SAFETY: a live call's description.
-            unsafe { note_desc(state, &batched.desc, false, what) };
+            unsafe { note_desc(state, &batched.desc, false, what, &mut writes, &mut reads) };
         }
     });
     let Some(f) = real(Entry::Build) else { return };
     // SAFETY: as in `new`.
     let f: BuildFn = unsafe { std::mem::transmute::<usize, BuildFn>(f) };
+    victory_gpu::bvhguard::enter("a build", &writes, &reads);
     // SAFETY: as in `new`.
-    unsafe { f(this, list, count, descs) }
+    unsafe { f(this, list, count, descs) };
+    victory_gpu::bvhguard::leave();
 }
 
 unsafe extern "system" fn copy(
@@ -804,7 +1124,8 @@ unsafe extern "system" fn copy(
     source: u64,
     mode: u32,
 ) {
-    with_state(|state| {
+    // A compacted copy is no larger than its source.
+    let extent = with_state(|state| {
         state.window.calls[Entry::Copy as usize] += 1;
         if mode == COMPACT {
             state.window.compactions += 1;
@@ -812,18 +1133,20 @@ unsafe extern "system" fn copy(
             state.window.other_copies += 1;
         }
         let from = state.structures.get(&source).copied();
+        let extent = from.and_then(|f| f.extent);
         if mode == COMPACT
             && (state.structures.len() < MOST_KEPT || state.structures.contains_key(&dest))
         {
             let s = state.structures.entry(dest).or_insert(Structure {
                 top: from.is_some_and(|f| f.top),
-                bytes: None,
+                extent: None,
                 builds: 0,
                 rehydrated: false,
                 compacted: true,
             });
             s.compacted = true;
             s.builds += 1;
+            s.extent = extent;
         }
         if spell(state, Entry::Copy) {
             tracing::info!(
@@ -831,17 +1154,31 @@ unsafe extern "system" fn copy(
                 source = format_args!("{source:#x}"),
                 mode,
                 source_known = from.is_some(),
-                source_bytes = ?from.and_then(|f| f.bytes),
+                source_extent = ?extent,
                 list = ?list,
                 "the ray-tracing structure builder: a copy (mode 1 compacts; VICTORY_BVH_TRACE)"
             );
         }
+        extent
     });
     let Some(f) = real(Entry::Copy) else { return };
     // SAFETY: as in `new`.
     let f: CopyFn = unsafe { std::mem::transmute::<usize, CopyFn>(f) };
+    let (below, bytes) = (extent.map_or(0, |e| e.0), extent.map(|(b, f)| b + f));
+    victory_gpu::bvhguard::enter(
+        "a copy",
+        &[Named {
+            at: dest.saturating_sub(below),
+            bytes,
+        }],
+        &[Named {
+            at: source.saturating_sub(below),
+            bytes,
+        }],
+    );
     // SAFETY: as in `new`.
-    unsafe { f(this, list, dest, source, mode) }
+    unsafe { f(this, list, dest, source, mode) };
+    victory_gpu::bvhguard::leave();
 }
 
 /// The size query: asked first, the answer noted after.
@@ -872,10 +1209,7 @@ unsafe extern "system" fn prebuild(
     let geometry = unsafe { geometries(&inputs) };
     with_state(|state| {
         state.window.calls[Entry::Prebuild as usize] += 1;
-        let key = signature(&inputs, &geometry);
-        if state.sizes.len() < MOST_KEPT || state.sizes.contains_key(&key) {
-            state.sizes.insert(key, sizes);
-        }
+        note_sizes(state, &inputs, &geometry, sizes);
         if spell(state, Entry::Prebuild) {
             tracing::info!(
                 level = if inputs.top() { "top" } else { "bottom" },
@@ -886,6 +1220,7 @@ unsafe extern "system" fn prebuild(
                 scratch_bytes = sizes.scratch,
                 update_scratch_bytes = sizes.update_scratch,
                 stream = ?stream.map(|s| (format!("{:#x}", u64_at(&s, 0)), format!("{:#x}", u64_at(&s, 8)))),
+                geometry = %geometry.iter().take(SPELLED).map(Geometry::spell).collect::<Vec<_>>().join("; "),
                 "the ray-tracing structure builder: a size query (VICTORY_BVH_TRACE)"
             );
         }
@@ -901,6 +1236,7 @@ unsafe extern "system" fn rehydrate(
     descs: *const u8,
     keys: *const u64,
 ) -> i32 {
+    let (mut writes, mut reads) = (Vec::new(), Vec::new());
     with_state(|state| {
         state.window.calls[Entry::Rehydrate as usize] += 1;
         let spelled = spell(state, Entry::Rehydrate);
@@ -920,7 +1256,7 @@ unsafe extern "system" fn rehydrate(
                 )
             });
             // SAFETY: a live call's description.
-            unsafe { note_desc(state, &desc, true, what) };
+            unsafe { note_desc(state, &desc, true, what, &mut writes, &mut reads) };
         }
     });
     let Some(f) = real(Entry::Rehydrate) else {
@@ -928,8 +1264,10 @@ unsafe extern "system" fn rehydrate(
     };
     // SAFETY: as in `new`.
     let f: RehydrateFn = unsafe { std::mem::transmute::<usize, RehydrateFn>(f) };
+    victory_gpu::bvhguard::enter("a rehydration", &writes, &reads);
     // SAFETY: as in `new`.
     let hr = unsafe { f(this, list, count, descs, keys) };
+    victory_gpu::bvhguard::leave();
     if hr < 0 {
         tracing::warn!(
             hr = format_args!("{hr:#x}"),
@@ -983,12 +1321,17 @@ pub struct Traced<'a> {
 }
 
 impl<'a> Traced<'a> {
+    /// On with `VICTORY_BVH_TRACE` or `VICTORY_BVH_GUARD=1`: the guard
+    /// takes its ranges from the wrappers.
     pub fn new(inner: &'a dyn ImportResolver) -> Traced<'a> {
-        let on = level() > 0;
+        let guard = victory_gpu::bvhguard::on();
+        let on = level() > 0 || guard;
         if on {
             tracing::info!(
                 spelled = level(),
-                "the ray-tracing structure builder's entry points are traced (VICTORY_BVH_TRACE)"
+                guard,
+                "the ray-tracing structure builder's entry points are wrapped (VICTORY_BVH_TRACE, \
+                 VICTORY_BVH_GUARD)"
             );
         }
         Traced { inner, on }
@@ -1296,6 +1639,160 @@ mod tests {
         );
         let s = with_state(|s| s.structures.get(&dest).copied()).unwrap();
         assert!(!s.top && s.builds >= 1);
-        assert_eq!(s.bytes, Some(0x4_0000));
+        assert_eq!(s.extent, Some((0, 0x4_0000)));
+    }
+
+    fn inputs(kind: u32, flags: u32, count: u32) -> Inputs {
+        Inputs {
+            kind,
+            flags,
+            count,
+            layout: 0,
+            descs: 0x5000,
+        }
+    }
+
+    fn desc(dest: u64, inputs: Inputs) -> BuildDesc {
+        BuildDesc {
+            dest,
+            inputs,
+            source: 0,
+            scratch: 0x9000,
+        }
+    }
+
+    fn sizes(result: u64) -> Sizes {
+        Sizes {
+            result,
+            scratch: result / 4,
+            update_scratch: result / 16,
+        }
+    }
+
+    const NO_HEADER: fn(u64) -> Option<(u64, u64)> = |_| None;
+
+    /// The tiers seen in run `20261125-130040`: bottom levels whose query
+    /// does not match exactly (index format 53) but has the same level,
+    /// flags, count and triangles; top levels built with fewer instances
+    /// than a query of theirs; rehydrations whose size only their header
+    /// in title memory tells.
+    #[test]
+    fn a_builds_sizes_come_from_the_closest_source() {
+        let mut state = State::new();
+        // Queried with R16_UINT indices, built with format 53.
+        let asked = [Geometry::parse(&triangles(390, 135))];
+        let mut raw = triangles(390, 135);
+        put32(&mut raw, 16, 53);
+        let built = [Geometry::parse(&raw)];
+        let bottom = inputs(1, 0xa, 1);
+        note_sizes(&mut state, &bottom, &asked, sizes(26624));
+        let exact = found(&state, &desc(0x100, bottom), &asked, false, NO_HEADER);
+        assert_eq!((exact.dest, exact.by), (Some((0, 26624)), SizedBy::Exact));
+        let loose = found(&state, &desc(0x100, bottom), &built, false, NO_HEADER);
+        assert_eq!(
+            (loose.dest, loose.scratch, loose.by),
+            (Some((0, 26624)), Some(6656), SizedBy::Loose)
+        );
+        // A top level of 3305 instances: the smallest answer for at least
+        // as many.
+        let top = |count| inputs(0, 0, count);
+        note_sizes(&mut state, &top(32768), &[], sizes(8_913_920));
+        note_sizes(&mut state, &top(3072), &[], sizes(836_608));
+        note_sizes(&mut state, &top(4096), &[], sizes(1_100_000));
+        let by_capacity = found(&state, &desc(0x200, top(3305)), &[], false, NO_HEADER);
+        assert_eq!(
+            (by_capacity.dest, by_capacity.by),
+            (Some((0, 1_100_000)), SizedBy::Capacity)
+        );
+        // A new build nothing was asked about.
+        let none = found(
+            &state,
+            &desc(0x300, inputs(1, 0x4, 7)),
+            &[],
+            false,
+            NO_HEADER,
+        );
+        assert_eq!(
+            (none.dest, none.scratch, none.by),
+            (None, None, SizedBy::Nothing)
+        );
+        // A rehydration in place: its header.
+        let header = |at: u64| (at == 0x400).then_some((256, 4096));
+        let rehydrated = found(&state, &desc(0x400, inputs(1, 0x14, 25)), &[], true, header);
+        assert_eq!(
+            (rehydrated.dest, rehydrated.by),
+            (Some((256, 4096)), SizedBy::Header)
+        );
+        // An update of a structure built before: its extent, and the
+        // update's scratch.
+        state.structures.insert(
+            0x100,
+            Structure {
+                top: false,
+                extent: Some((0, 26624)),
+                builds: 1,
+                rehydrated: false,
+                compacted: false,
+            },
+        );
+        let update = found(
+            &state,
+            &desc(0x100, inputs(1, 0x2a, 1)),
+            &built,
+            false,
+            NO_HEADER,
+        );
+        assert_eq!(
+            (update.dest, update.scratch, update.by),
+            (Some((0, 26624)), Some(1664), SizedBy::Earlier)
+        );
+    }
+
+    /// What a build hands the guard: its destination and scratch as
+    /// writes, its geometry as reads.
+    #[test]
+    fn a_build_names_its_writes_and_reads() {
+        let mut state = State::new();
+        let geometry = triangles(300, 120);
+        let bottom = Inputs {
+            descs: geometry.as_ptr() as u64,
+            ..inputs(1, 0x2, 1)
+        };
+        let g = [Geometry::parse(&geometry)];
+        note_sizes(&mut state, &bottom, &g, sizes(0x8000));
+        let (mut writes, mut reads) = (Vec::new(), Vec::new());
+        // SAFETY: the description's geometry is `geometry`.
+        unsafe {
+            note_desc(
+                &mut state,
+                &desc(0x10_0000, bottom),
+                false,
+                None,
+                &mut writes,
+                &mut reads,
+            )
+        };
+        assert_eq!(
+            writes,
+            vec![
+                Named {
+                    at: 0x10_0000,
+                    bytes: Some(0x8000)
+                },
+                Named {
+                    at: 0x9000,
+                    bytes: Some(0x2000)
+                },
+            ]
+        );
+        // Vertices (120 of 12 bytes), indices (300 of 2), no transform.
+        assert!(reads.contains(&Named {
+            at: 0x10_0000_2000,
+            bytes: Some(1440)
+        }));
+        assert!(reads.contains(&Named {
+            at: 0x10_0000_1000,
+            bytes: Some(600)
+        }));
     }
 }

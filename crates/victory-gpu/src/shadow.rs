@@ -3352,6 +3352,9 @@ fn buffers() -> std::sync::MutexGuard<'static, BTreeMap<(u64, usize), Entry>> {
 
 /// A title buffer exists at `start` (`len` bytes).
 pub(crate) fn register(resource: usize, start: u64, len: u64) {
+    // Made by the ray-tracing structure builder for itself, if it is
+    // inside a call (`VICTORY_BVH_GUARD`).
+    crate::bvhguard::created(start, len);
     buffers().insert(
         (start, resource),
         Entry {
@@ -3367,8 +3370,8 @@ pub(crate) fn unregister(resource: usize, start: u64) {
 }
 
 /// The title buffer holding `address`, as (start, length), without making
-/// its copy (diagnostics: which buffer a dropped program's root view names).
-#[cfg(feature = "diagnostics")]
+/// its copy (diagnostics: which buffer a dropped program's root view names;
+/// `crate::bvhguard`: how far a write range of unknown size reaches).
 pub(crate) fn extent(address: u64) -> Option<(u64, u64)> {
     buffers()
         .range(..=(address, usize::MAX))
