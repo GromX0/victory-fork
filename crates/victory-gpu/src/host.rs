@@ -604,6 +604,7 @@ fn create() -> windows::core::Result<Host> {
             crate::tdr::log();
         }
         let device = device.ok_or_else(windows::core::Error::empty)?;
+        log_adapter(&device);
         // `VICTORY_D3D12_BACKGROUND=0`: the runtime's background work (the
         // driver compiling shaders again on the "D3D Background Thread"s,
         // for minutes after pipelines were made or loaded) is switched off.
@@ -698,6 +699,32 @@ fn warp_adapter() -> windows::core::Result<IDXGIAdapter> {
             ));
         }
         Ok(adapter)
+    }
+}
+
+/// Logs which card the host device is on. The device takes DXGI's default
+/// adapter, and on a PC with a discrete and an integrated GPU a run's
+/// numbers mean nothing until it is known which of the two that was.
+fn log_adapter(device: &ID3D12Device) {
+    // SAFETY: plain DXGI adapter queries by the live device's LUID.
+    let desc = unsafe {
+        let luid = device.GetAdapterLuid();
+        CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+            .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter1>(luid))
+            .and_then(|adapter| adapter.GetDesc1())
+    };
+    match desc {
+        Ok(desc) => {
+            let len = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+            tracing::info!(
+                vendor = format_args!("{:#x}", desc.VendorId),
+                device = format_args!("{:#x}", desc.DeviceId),
+                dedicated_mb = desc.DedicatedVideoMemory / (1 << 20),
+                "host device on {}",
+                String::from_utf16_lossy(&desc.Description[..len])
+            );
+        }
+        Err(error) => tracing::warn!(%error, "the host device's adapter could not be named"),
     }
 }
 
