@@ -345,16 +345,37 @@ Ray tracing, state of the forks: Xeltax/VIcky `rt` (VICKY-RT.md) runs the
 builder on an RTX 4080 at 502-583 ms a frame against 361 off, and the dark
 corner of the cell is not lit yet. Research, not a switch to turn on.
 
+Lighting and texture runs on the RX 9070 (same scene, the cell; screenshots
+taken during the runs):
+
+| Run | Switches | Result |
+|-----|----------|--------|
+| `20261125-111141-rt-miss` | `VICTORY_RT_MISS=1` (429e3e5a, after Xeltax 3fb7f967) | sun patches and cast shadows on the walls; ceiling, corners and floor still near black; purple papers, a magenta block, a pink rope. 6.5-8.0 fps at 5,100-7,500 draws, no error |
+| `20261125-111938-bvh-levels` | `VICTORY_BVH_BUILDER=1` + levels on demand | the builder's 53 pipelines made, then the **title crashed** 4 s later (98 s in): several threads read garbage pointers at once, `0x7f8000007f800000` (two float infinities) in registers. The builder's writes corrupt title memory. Do not turn it on |
+| `20261125-112150-levels-rtmiss` | `VICTORY_LEVELS_ON_DEMAND=1` + `VICTORY_RT_MISS=1` | **the cell lit** (ceiling lights, walls, door, floor), purple blocks and pink rope gone, **gameplay reached** ("Approach a cellmate", then "Go with the prison guard"); 480 s, no error; 5.0-6.8 fps at 6,800-7,500 draws; the card ~55% busy |
+
+Both now on by default (df9ac61a). Still wrong in that run: the brightest
+lines of some ceiling lights (and white papers) turn purple, as if green
+is lost in very bright colours (look at how R9G9B9E5/R11G11B10 targets and
+the FP16 stand-in for R9G9B9E5 carry bright values); the exposure overshoots
+for the first seconds after a load (the title's auto exposure catching up at
+0.3 fps); bounce light indoors is approximate (rays miss).
+
 ## Next
 
-1. Series S device loss: try `VICTORY_FILL_WAIT=1` (fxceless's fills that
+1. Purple in the brightest colours: captures of a frame with a ceiling light
+   in a diagnostics build (`VICTORY_CAPTURE`, `VICTORY_DUMP_TARGETS=1`) and
+   the pass where green drops out.
+2. Frame rate: the card is ~55% busy; the CPU side (copies 40-55 ms,
+   preparing 70-90 ms a frame) is the limit.
+3. Series S device loss: try `VICTORY_FILL_WAIT=1` (fxceless's fills that
    no longer wait for flights, new and NVIDIA-only so far), then the FSR 4
    pipelines (the title's `FFX_FSR4_*` passes; KLBF runs Series S with FSR
    on an RX 9070 XT without device loss, on its own stack).
-2. Pipelines that survive a launch (Skillter's pipeline-library fixes,
+4. Pipelines that survive a launch (Skillter's pipeline-library fixes,
    upstream `translate --cache --pipelines`, mangrove's `victory warm`).
-3. KLBF's Lab 31/33 work as separate ports: myokex's wall fixes, upstream
+5. KLBF's Lab 31/33 work as separate ports: myokex's wall fixes, upstream
    #334 (buffer-state tracking: characters and faces), #1271 (`glc` loads
    coherent on RDNA).
-4. Then the frame line's dominant cost: copying to and from the card, not
+6. Then the frame line's dominant cost: copying to and from the card, not
    the GPU.

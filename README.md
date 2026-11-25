@@ -19,9 +19,9 @@ an Xbox Series title running natively on Windows, from files you supply.**
 
 > [!NOTE]
 > **Is it NVIDIA-only? No.** Most community testing so far was on NVIDIA,
-> but this fork runs on AMD: on a Radeon RX 9070 it loads into the world
-> and plays its opening cutscenes at **about 6 fps**. Slow and rough, on
-> every vendor, for now.
+> but this fork runs on AMD: on a Radeon RX 9070 it loads into the world,
+> plays the opening cutscenes and **reaches the first gameplay in the cell**,
+> lit, at **about 5-8 fps**. Slow and rough, on every vendor, for now.
 
 > [!WARNING]
 > **Use Series X mode (the default) on AMD for now.** With
@@ -40,43 +40,61 @@ Measured on the target PC: **Radeon RX 9070 16 GB** (driver 32.0.32029.2010),
 |---|---|
 | Builds, tests pass | ✅ 624 tests pass, **including the GPU tests on the RX 9070**. The first run on RDNA4 found a real descriptor allocator bug, now fixed. One fxceless test depends on test order (also on fxceless's own tree). |
 | Start screen | ✅ About 1.5 min after launch; the keyboard works (Enter = A) |
-| Loads into the world | ✅ Loading, title card, opening credits, then indoor and rooftop cutscenes with lit, textured characters. **72 s** to the world (was 178 s) |
-| Stable session | ✅ Series X: 7 to 10 minutes without a crash in the last runs · ⚠️ Series S: GPU lost after about 3 minutes |
-| Playable | ❌ Not yet |
+| Loads into the world | ✅ Loading, title card, opening credits, indoor and rooftop cutscenes with lit, textured characters |
+| First gameplay | ✅ **The cell, lit by its ceiling lights and the sun through the bars**; the "approach a cellmate" and "go with the guard" objectives appear |
+| Stable session | ✅ Series X: 7 to 10 minutes without a crash in each of the last runs · ⚠️ Series S: GPU lost after about 3 minutes |
+| Playable | ❌ Not yet (too slow, picture faults below) |
 
-**Speed in the first cutscenes** (median of the last 3 minutes of a run,
-the build's own frame line):
+**Speed** (median of the last 3 minutes of a run, the build's own frame line):
 
 | Build | fps | ms/frame | of which on the GPU |
 |---|---|---|---|
-| Before the latest merge (fxceless 310c6eb + picks) | 4.9 | 202 | 75 ms |
-| **Now** (fxceless f85101b + KLBF Lab's AMD fixes) | **6.3** (peaks 6.5) | **158** | 76 ms |
+| fxceless 310c6eb + picks | 4.9 | 202 | 75 ms |
+| + fxceless f85101b and KLBF Lab's AMD fixes | 6.3 | 158 | 76 ms |
+| **+ fxceless's frame-rate switches, now on by default** | **7.4** (peaks 8.0) | **135** | 50 ms |
 
-Menus and loading screens run at the game's own 30 fps. A scene whose
-shaders are still being built drops to 0.5-2 fps until they are made.
+In heavier scenes (7,000+ draws a frame) it runs at 5-6 fps. Menus and
+loading screens run at the game's own 30 fps; a scene whose shaders are
+still being built drops to 0.5-2 fps until they are made.
 
-The GPU is not the bottleneck yet: about half of each frame is copying
-memory to and from the card and preparing work for it.
+**Is it using my GPU?** Yes (the log names the card), but it is only about
+55 % busy: most of each frame is spent on the processor side, copying the
+game's memory to and from the card and preparing work for it. That is
+where more frames have to come from.
 
-### What changed in the latest merge
+### What changed today
 
-- **fxceless's newest work:** descriptor records the game copies as raw bytes
-  are mirrored (the first rooms render right), a much cheaper descriptor sync
-  (70-220 ms a frame down to a few), and a shader cache keyed on the
-  translator, so a rebuild no longer throws all translations away.
-  **Every shader that failed to translate on AMD before now does.**
-- **KLBF Lab's AMD fixes** (tested on an RX 9070 XT): 32-lane console shaders
-  run per half of AMD's 64-lane waves (fixes purple blocks), reductions per
-  half, a NaN guard on colour outputs, texture ranges kept through loading.
+- **The cell is lit, and the purple and magenta blocks are gone.** Two
+  switches are now on by default:
+  - *Levels on demand* (fxceless, after PR #747 by AscilCH): a streamed
+    texture gets card memory only for the mip levels the game holds, instead
+    of reading the next texture's bytes as its larger levels.
+  - *Rays miss*: the game's ray-traced passes run with every ray missing
+    (recipe from Xeltax/VIcky). Without a ray-tracing structure the rays were
+    hitting garbage and shadowing whole rooms black. Real ray tracing (the
+    game's structure builder, `VICTORY_BVH_BUILDER=1`) crashed the game within
+    seconds and stays off.
+- **fxceless's frame-rate switches on by default:** a submit thread of our
+  own, a copy queue for fetches, indirect draw windows, no texture wait.
+  GPU time per frame 76 → 50 ms.
+- **fxceless's newest work and KLBF Lab's AMD fixes merged:** byte-copied
+  descriptors mirrored, a much cheaper descriptor sync, a shader cache keyed
+  on the translator, 32-lane console shaders per half of AMD's 64-lane
+  waves, a NaN guard on colour outputs. **Every shader that failed to
+  translate on AMD before now does.**
 
 ### Known issues on AMD
 
-- **Series S mode loses the GPU** (see the warning above). Being looked at.
-- **The picture is still off:** glowing eyes, an over-exposed image and some
-  magenta patches.
-- **Memory.** The game commits about **27 GB**. Close heavy background apps
-  before a long run, or give Windows a larger page file, or it stops with
-  "memory allocation failed".
+- **Purple in the brightest colours:** the brightest lines of some ceiling
+  lights and white papers turn purple. Next to be looked at.
+- **Exposure overshoots** for a few seconds after a load (the game's own
+  auto exposure catching up at a low frame rate), then settles.
+- **Bounce light indoors is approximate** (rays miss instead of hitting the
+  scene).
+- **Series S mode loses the GPU** (see the warning above).
+- **Memory.** The game commits about **25-27 GB**. Close heavy background
+  apps before a long run, or give Windows a larger page file, or it stops
+  with "memory allocation failed".
 - **The driver refuses one mesh pipeline**; its draws are missing.
 - **Pipelines are built again on each launch**, so loads stutter every time.
 
@@ -202,14 +220,15 @@ what is new since the last check.
 
 ## Next
 
-1. Series S mode on AMD: find why the GPU is lost (leads: fills that no
+1. Purple in the brightest colours: capture a frame with a ceiling light and
+   find the pass where green drops out.
+2. More frames: the processor side (memory copies and preparing work), since
+   the card is only about half busy.
+3. Series S mode on AMD: find why the GPU is lost (leads: fills that no
    longer wait for work in flight, and the game's FSR 4 passes).
-2. The picture: glowing eyes, over-exposure, magenta patches.
-3. Keep pipelines between launches, so a second start does not rebuild them.
-4. More of KLBF Lab's AMD work (walls, characters and faces, pipeline
+4. Keep pipelines between launches, so a second start does not rebuild them.
+5. More of KLBF Lab's AMD work (walls, characters and faces, pipeline
    pre-build), and the refused mesh pipeline.
-5. Then the measured bottleneck (memory copies, not the GPU), and light in
-   shadowed areas.
 
 ## Credits
 
