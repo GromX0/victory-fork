@@ -239,12 +239,18 @@ impl Memory {
 /// has its view in `heap`'s run and is brought up to date when `list` is
 /// submitted (and, with `writes`, copied back after). None if the host
 /// cannot hold it; the draw is then dropped.
+///
+/// With `cut` (a dispatch of the ray-tracing structure builder under
+/// `VICTORY_BVH_GUARD`: its call's number and write ranges), what is
+/// declared written is only the parts of the copies inside those ranges
+/// (`crate::bvhguard`).
 pub(crate) fn ready(
     list: &HostList,
     heap: &HostHeap,
     addresses: &[u64],
     constants: &[u32],
     writes: bool,
+    cut: Option<(u64, &crate::bvhguard::Ranges)>,
 ) -> Option<Ready> {
     let mut guard = MEMORY.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
@@ -297,14 +303,30 @@ pub(crate) fn ready(
     const READ: usize = usize::MAX - 0x6d;
     const WRITE: usize = usize::MAX - 0x6e;
     let first_read = list.first_use(READ);
-    let first_write = writes && list.first_use(WRITE);
+    // Guarded: once per list and call, and for copies numbered since.
+    let first_write = writes
+        && match cut {
+            None => list.first_use(WRITE),
+            Some((call, _)) => list.first_use(usize::MAX - 0x1000 - call as usize),
+        };
     for (n, shadow) in m.copies.iter().enumerate() {
         let (start, len) = shadow.span();
         if first_read || n >= numbered {
             shadow.refresh(list, start, len);
         }
-        if writes && (first_write || n >= numbered) {
-            shadow.gpu_writes(list, start, len);
+        if !(writes && (first_write || n >= numbered)) {
+            continue;
+        }
+        match cut {
+            None => shadow.gpu_writes(list, start, len),
+            Some((_, ranges)) => {
+                let mut kept = 0;
+                for (from, to) in ranges.clip(start, start + len) {
+                    shadow.gpu_writes(list, from, to - from);
+                    kept += to - from;
+                }
+                crate::bvhguard::memory_cut(len, kept);
+            }
         }
     }
     if first_read {

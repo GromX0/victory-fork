@@ -900,7 +900,13 @@ impl State {
     /// For a shader that reads title memory by address
     /// ([`crate::memory`]): its directory, fault notes and view slots,
     /// with the pages of the root views the list has set made ready.
-    fn memory_ready(&self, list: &HostList, compute: bool, writes: bool) -> Option<crate::memory::Ready> {
+    fn memory_ready(
+        &self,
+        list: &HostList,
+        compute: bool,
+        writes: bool,
+        cut: Option<(u64, &crate::bvhguard::Ranges)>,
+    ) -> Option<crate::memory::Ready> {
         let heap = match self.heaps[0] {
             0 => None,
             h => crate::descriptor::heap(h as This).host(),
@@ -913,7 +919,7 @@ impl State {
                 _ => {}
             }
         }
-        crate::memory::ready(list, heap, &addresses, &constants, writes)
+        crate::memory::ready(list, heap, &addresses, &constants, writes, cut)
     }
 
     /// The bound heap holding `handle`.
@@ -1033,6 +1039,20 @@ impl State {
     pub(crate) fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
         list.begin_command();
         let l = &list.list;
+        // `VICTORY_BVH_GUARD`: a dispatch of the ray-tracing structure
+        // builder declares written only what its call into the builder
+        // may write (`crate::bvhguard`); `guard_on` without it: another
+        // program, whose copies of title memory by address are declared
+        // written only if it stores through an address.
+        let guard_on = crate::bvhguard::on();
+        let guarded = guard_on && compute && crate::pipeline::is_builder(self.pipeline as This);
+        let scope = if guarded { crate::bvhguard::dispatch_scope() } else { None };
+        let cut = guarded.then(|| {
+            (
+                scope.as_ref().map_or(0, |s| s.id),
+                crate::bvhguard::writes(scope.as_deref()),
+            )
+        });
         // Textures picked by index, before anything asks for them.
         self.early_textures(list, p, compute);
         if crate::host::walls_trace() {
@@ -1100,7 +1120,13 @@ impl State {
                 && !crate::pipeline::builder_quarantined(self.pipeline as This);
             // Title memory by address: what the shader finds it by.
             let memory = if t.host.root_srvs.contains(&victory_shader::emit::SLOT_MEMORY) {
-                let Some(ready) = self.memory_ready(list, compute, writes) else {
+                let memory_writes = if guard_on && !guarded && writes && !t.raw_stores {
+                    crate::bvhguard::reader_left_out();
+                    false
+                } else {
+                    writes
+                };
+                let Some(ready) = self.memory_ready(list, compute, memory_writes, cut) else {
                     once!("a shader that reads title memory by address without a view heap to hold its views: the draw is dropped");
                     return false;
                 };
@@ -1235,7 +1261,8 @@ impl State {
                         None
                     }
                 };
-                if !self.root_uav(list, address, param, compute, writes) {
+                let guard = guarded.then(|| (scope.as_deref(), stage.shader.hash.as_str()));
+                if !self.root_uav(list, address, param, compute, writes, guard) {
                     return false;
                 }
             }
@@ -1253,7 +1280,10 @@ impl State {
     /// `VICTORY_ROOT_SRV_DIRECT=1` (the dispatch is dropped then if there
     /// is nothing to bind). With `writes`, what the shader stored is copied
     /// back into title memory when the list has run. False if the draw
-    /// must be dropped.
+    /// must be dropped. With `guard` (a builder dispatch under
+    /// `VICTORY_BVH_GUARD`: its call and its program), only the parts of
+    /// the view inside the call's write ranges are declared written
+    /// (`crate::bvhguard`); the view itself is as without.
     /// shortcut: a root view has no size: the view, the refresh and the
     /// copy back cover all that is left of the title's buffer
     /// (`VICTORY_ROOT_UAV_MB` sets a limit for all three).
@@ -1264,6 +1294,7 @@ impl State {
         param: u32,
         compute: bool,
         writes: bool,
+        guard: Option<(Option<&crate::bvhguard::Scope>, &str)>,
     ) -> bool {
         const UNORDERED: i32 = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.0;
         static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -1288,8 +1319,19 @@ impl State {
             s.refresh(list, a, len);
             // Bound for unordered access, written or not.
             list.buffer_state(&s.buffer, crate::host::BUFFER_WRITE);
-            if writes {
-                s.gpu_writes(list, a, len);
+            if !writes {
+                return;
+            }
+            match guard {
+                None => s.gpu_writes(list, a, len),
+                Some((scope, program)) => {
+                    let mut kept = 0;
+                    for (from, to) in crate::bvhguard::writes(scope).clip(a, a + len) {
+                        s.gpu_writes(list, from, to - from);
+                        kept += to - from;
+                    }
+                    crate::bvhguard::root_view(scope, program, a, len, kept);
+                }
             }
         };
         if !crate::pipeline::host::bounded_root_srvs() {

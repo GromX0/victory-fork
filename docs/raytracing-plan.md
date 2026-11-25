@@ -352,7 +352,60 @@ flag. That gives each structure's extent, which step 2 needs. Unit tests
 cover the layouts, the signature, the resolver and a wrapped query and build
 reaching stand-ins for the DLL.
 
+**Result** (run `20261125-130040-merged-keys-64fd2470b1`, builder off,
+about 3 minutes in the cell):
+
+- **Volume.** Per 10 s there are 36-155 batched build calls. They hold
+  440-1,899 bottom-level builds (100-1,256 of them updates) and 25-158
+  top-level builds of up to 3,933 instances. That is 2-17 million triangles,
+  plus 9-74 rehydration calls with 89-1,105 structures. Size queries come
+  at about one per build. There are no compactions, although compacted-size
+  results are asked for (189-974 per 10 s).
+- **Memory.** By the end there were 5 top levels and 6,784 bottom levels by
+  destination. Destinations lie in plain title memory at 0xd5...-0xd7...,
+  the same region as the heap objects of the crash. The title packs them
+  back to back at exactly the queried sizes, and scratch in the 64 MiB
+  title buffer at 0x100b620000 the same way. Top levels match their queries
+  exactly.
+- **Sizes.** Bottom levels with R16_UINT indices match their queries.
+  Those with the title's index format 53 never do exactly, though the
+  answers fit the packing. So the guard takes sizes by a looser key (level,
+  flags, count, primitives).
+- **Rehydrations** relocate in place: destination and source are the same,
+  with no scratch. Their per-call key is the destination minus
+  0x6_0000_0000. Their size comes only from the structure's header, which
+  the title loaded into title memory.
+- **Formats.** Vertex formats are R32G32B32_FLOAT and R32G32_FLOAT (stride 8,
+  some strides with bit 15 set). Rehydrations carry geometry with real
+  vertex and index addresses. So host builds of the static world from the
+  same inputs (B-build or H1) are possible.
+
 ### Step 2: hold the builder's stores inside what each call was given
+
+**Done, as a copy-back guard (`VICTORY_BVH_GUARD=1`,
+`crates/victory-gpu/src/bvhguard.rs`).**
+
+- Each wrapper opens a scope with the call's write ranges while the DLL
+  runs. The writes are the destination, scratch and post-build results,
+  plus buffers the DLL makes for itself. The reads are geometry, instances
+  and the source.
+- Sizes come from an exact query, then a loose one, then an earlier build at
+  the same destination, then the header in title memory (rehydrations),
+  then the smallest answer with enough primitives. Each build's source is
+  counted in the trace's `sized_by`.
+- A builder dispatch declares written, for the copy-back, only the parts of
+  its root views and of its copies of title memory by address that lie
+  inside its call's ranges. Other programs that read title memory by
+  address and store through no address (the traversal programs) no longer
+  declare those copies written.
+- Root views outside every range are logged by program and page.
+
+What it does not do yet: see single stores, or stop them with title memory
+in place. That needs the check in the translated stores below. It changes
+the translator, which re-keys the whole shader cache, and it needs card
+test support for root UAVs, so it comes as its own commit.
+
+The plan for that per-store check:
 
 - The wrappers already know each call's ranges: destination plus size,
   scratch plus size or update size, post-build destinations, and the
