@@ -38,7 +38,7 @@ reaches the world at 1-2 s a frame, surfaces unlit.
   `ffe310e`; upstream has 319 commits (182 non-merge) since.
 - Local `dev/integrate-clean` (worktree `/home/user/wt-integrate`, not
   pushed): fxceless `310c6eb` + 24 clean upstream cherry-picks + 3
-  resolved picks + 1 port + 1 lint fix + these notes. This is the build
+  resolved picks + 1 port + 1 lint fix + ztrx's launcher + these notes. This is the build
   to try first on the owner's PC. (`dev/integrate` is an earlier copy
   whose last two commits also carried a Linux build folder by mistake;
   superseded, never pushed, same source tree.)
@@ -137,6 +137,7 @@ Picks not taken (conflict, and judged not worth a blind resolution now):
 |---------|--------|----------|------|
 | 2026-11-25 | Marvisak/VIctory main | 940d32f | 182 non-merge commits since ffe310e; README now: world drawn, unlit, 1-2 s/frame on RX 6700 XT; "some compute programs need 64-lane waves" (the RX 9070 has them, the RTX 4070 does not) |
 | 2026-11-25 | fxceless/victory-fork main | 310c6eb | depth bounds (#82), defaults ~230 ms/frame on RTX 4070 (claim) |
+| 2026-11-25 | Zettrox/ztrx main | 90b529f | no code of its own: fxceless's history to 2119b0e plus a README and `scripts/play.ps1` (taken, 02afc8d). Claim: on an RTX 3050 the prologue plays from the cell to the boat chase at 1-3 fps, 1 h 30 min without a crash, at 2119b0e's code. So 2119b0e is the known-stable fallback to bisect against if a newer build crashes |
 
 Notable upstream work not yet in the fork: `translate --cache` shader
 warm-up and `--pipelines` pre-build from the shader pack (9c58a1c,
@@ -158,7 +159,10 @@ Questions the first runs answer, smallest first:
 2. Which build gets further on AMD: `dev/integrate-clean` (fork line, tested on
    NVIDIA) or `upstream/main` (tested on AMD)? Same scene, same settings,
    separate cache folders.
-3. Furthest milestone (B/C) and the release build's periodic frame line
+3. If the newest build crashes or hangs early: the same run at 2119b0e
+   (Zettrox's 1 h 30 min stable report on NVIDIA), to tell a regression in
+   the 36 newer commits from an AMD-specific failure.
+4. Furthest milestone (B/C) and the release build's periodic frame line
    (`fps, ms/frame (preparing ..., waiting ...)`) after the shader cache
    is warm (second launch), not the first.
 
@@ -169,7 +173,11 @@ pwsh tools\fork-run.ps1 -GameExe '<game dir>\<title exe>' -Tests -Seconds 600 -L
 pwsh tools\fork-run.ps1 -GameExe '<game dir>\<title exe>' -NoBuild -Seconds 600 -Label integrate-warm
 ```
 
-`tools/fork-run.ps1` records commit, GPU and driver, CPU, OS, disk and
+For plain play without measurement: `powershell -ExecutionPolicy Bypass -File
+scripts\play.ps1 -Game '<game dir>\<title exe>'` (Zettrox's launcher).
+
+`tools/fork-run.ps1` clears leftover scripted-press and capture switches
+(as `play.ps1` does) unless `-Env` asks for them, records commit, GPU and driver, CPU, OS, disk and
 `VICTORY_*` variables, keeps a copy of the executable under
 `%LOCALAPPDATA%\victory\runs\builds\<commit>`, and writes the logs there.
 It was written without PowerShell to test it on: expect a first fix.

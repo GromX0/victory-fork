@@ -90,6 +90,15 @@ Copy-Item -Force $exe $kept
 & $exe config *> (Join-Path $run 'config.txt')
 
 # --- The run.
+# Switches left over in this shell that press keys or save frames would make
+# the run unlike normal play: clear them unless this run asks for them with
+# -Env (the same list as scripts\play.ps1, from Zettrox/ztrx).
+$cleared = @()
+foreach ($v in 'VICTORY_KEYS', 'VICTORY_CAPTURE', 'VICTORY_CAPTURE_FRAMES', 'VICTORY_DUMP_TARGETS') {
+    if (-not $Env.ContainsKey($v) -and (Test-Path "env:$v")) { Remove-Item "env:$v"; $cleared += $v }
+}
+if ($cleared) { Write-Host "cleared for this run: $($cleared -join ', ')" }
+$facts['cleared_env'] = $cleared
 foreach ($k in $Env.Keys) { Set-Item -Path "env:$k" -Value $Env[$k] }
 if (-not $env:VICTORY_LOG) { $env:VICTORY_LOG = 'info' }
 $log = Join-Path $run 'victory.log'
