@@ -58,6 +58,14 @@ struct Ray {
     inverse: [V; 3],
 }
 
+/// `VICTORY_RT_MISS=1`: every ray-tracing node test finds no node (see
+/// [`Lower::bvh`]). Off by default. Part of the shader cache fingerprint
+/// (the build script lists every switch this crate reads).
+pub(crate) fn rt_miss() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_RT_MISS").is_some_and(|v| v == "1"))
+}
+
 impl<'a> Lower<'a> {
     /// `image_bvh_intersect_ray` and `image_bvh64_intersect_ray`.
     pub(super) fn bvh(&mut self, inst: &Inst, b: usize, i: usize) -> Result<(), Why> {
@@ -94,6 +102,21 @@ impl<'a> Lower<'a> {
         let Operand::Vector { reg: dst, .. } = *data else {
             return Err("a ray-tracing node test's result");
         };
+        // `VICTORY_RT_MISS=1`: the test finds no node (0xFFFFFFFF in each of
+        // the four results, the hardware's "no child"), so every traversal
+        // ends in a miss: shadow rays see nothing in the way and bounce rays
+        // reach the sky. Without the structure builder
+        // (`VICTORY_BVH_BUILDER=1`) the nodes read are not a scene, and the
+        // ray-traced shadow and indirect-light passes came out black.
+        // Recipe from Xeltax/VIcky 3fb7f967 (after LooperSalty, VIctory #841).
+        if rt_miss() {
+            let guard = self.guard(b, i)?;
+            let none = self.s.m.i32(u32::MAX);
+            for k in 0..4u8 {
+                self.write(inst, Reg::V(dst + k), none, guard);
+            }
+            return Ok(());
+        }
         let site = (b, i);
         let nodes = self
             .x
