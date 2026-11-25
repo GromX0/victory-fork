@@ -39,7 +39,8 @@ pub(crate) struct HostHeap {
     /// index heaps directly, so a slot the title has not rewritten since it
     /// released the resource may still be read, and a freed host resource
     /// read there is a GPU page fault (the console reads stale memory).
-    kept: Mutex<Vec<Option<ID3D12Resource>>>,
+    /// With the slots' bytes for device-removed reports ([`slots_at`]).
+    slots: std::sync::Arc<Slots>,
     /// Where the search for free dynamic slots starts, and which are taken
     /// (by lists not yet reset).
     next: Mutex<(u32, Vec<bool>)>,
@@ -899,6 +900,20 @@ pub(crate) static OBJECT_TEXTURE_SLOTS: std::sync::atomic::AtomicU64 = std::sync
 /// Bytes per element of a buffer view, as the console's descriptor holds
 /// them for indexed reads (structured: the stride; raw: 1, the index is the
 /// byte; typed: the format's); `None` if `view` is not a buffer view.
+/// What the table for shaders that pick buffers from the heap says of a
+/// slot holding `view` (`victory_shader::emit::SLOT_STRIDES`): a buffer
+/// view's element bytes; `SLOT_UNSTRIDED` for a buffer descriptor without
+/// them (a constant buffer view, a buffer view of a format of unknown
+/// size), which the hardware still reads as a buffer; 0 for anything else.
+fn slot_word(view: &View) -> u32 {
+    match view_stride(view) {
+        Some(stride) if stride != 0 && stride & victory_shader::emit::SLOT_UNSTRIDED == 0 => stride,
+        Some(_) => victory_shader::emit::SLOT_UNSTRIDED,
+        None if matches!(view, View::Constant(..)) => victory_shader::emit::SLOT_UNSTRIDED,
+        None => 0,
+    }
+}
+
 fn view_stride(view: &View) -> Option<u32> {
     const BUFFER: u32 = 1;
     let (words, unordered): (&[u32; 10], bool) = match view {
@@ -933,6 +948,144 @@ fn view_stride(view: &View) -> Option<u32> {
 /// Host heaps' GPU ranges (start, bytes, bytes per slot, sampler), for
 /// device-removed reports: a shader indexing a heap past its end faults.
 static GPU_RANGES: Mutex<Vec<(u64, u64, u64, bool)>> = Mutex::new(Vec::new());
+
+/// What a device-removed report reads of a host view heap ([`slots_at`]):
+/// its slots' bytes, and the host resource each slot views (held while it
+/// does, `HostHeap::kept`).
+struct Slots {
+    /// Holds the heap, so its memory is there while a report reads it.
+    _heap: ID3D12DescriptorHeap,
+    cpu: usize,
+    step: u32,
+    size: u32,
+    gpu: u64,
+    kept: Mutex<Vec<Option<ID3D12Resource>>>,
+    /// The table for shaders that pick buffers from the heap, held, and its
+    /// mapping (`victory_shader::emit::SLOT_STRIDES`).
+    table: Option<(ID3D12Resource, usize)>,
+}
+
+// SAFETY: D3D12 objects are free-threaded; the addresses are only read.
+unsafe impl Send for Slots {}
+// SAFETY: as above.
+unsafe impl Sync for Slots {}
+
+/// Every host view heap's [`Slots`] while it lives.
+static SLOTS: Mutex<Vec<std::sync::Weak<Slots>>> = Mutex::new(Vec::new());
+
+/// A slot's first two dwords as AMD's hardware takes them (GFX10 to GFX12:
+/// the RX 9070 measured, `descriptor_words_read_as_amd_hardware_reads_them`):
+/// the base address the slot has read as a buffer descriptor (dword 0, then
+/// the low 16 bits of dword 1), and read as a texture descriptor (dword 0
+/// times 256, then the low byte of dword 1 from bit 40). A texture's
+/// descriptor read as a buffer's is a wild address: above its address bits
+/// dword 1 holds its last level (bits 12 to 15), so a texture of 8 levels at
+/// 0x3_5b40_0000 reads as the buffer at 0x7000_035b_4000.
+fn amd_bases(w0: u32, w1: u32) -> (u64, u64) {
+    let as_buffer = u64::from(w0) | u64::from(w1 & 0xffff) << 32;
+    let as_texture = u64::from(w0) << 8 | u64::from(w1 & 0xff) << 40;
+    (as_buffer, as_texture)
+}
+
+/// For device-removed reports: the host view heap slots whose descriptor
+/// reaches GPU address `va`, as AMD's hardware reads descriptors
+/// ([`amd_bases`]): read as a buffer's from within a megabyte below it, or
+/// as a texture's inside the texture the slot views; with what the slot
+/// views and its word in the table of shaders that pick buffers. A texture
+/// slot that reads as a buffer at the fault is a shader that took a
+/// texture's descriptor for a buffer's. The heaps' bytes are read through
+/// the kernel (a page that does not read ends that heap's look).
+/// Every slot is looked at: some tens of milliseconds, only once the
+/// device is gone.
+pub(crate) fn slots_at(va: u64) -> String {
+    const NEAR: u64 = 1 << 20;
+    const MOST: usize = 8;
+    let live: Vec<std::sync::Arc<Slots>> = {
+        let all = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+        all.iter().filter_map(std::sync::Weak::upgrade).collect()
+    };
+    let mut text = String::new();
+    for slots in live {
+        if slots.step < 8 {
+            continue;
+        }
+        let kept = slots.kept.lock().unwrap_or_else(|e| e.into_inner());
+        let step = slots.step as usize;
+        let per_chunk = 4096usize;
+        let mut bytes = vec![0u8; per_chunk * step];
+        let mut hits = Vec::new();
+        let mut first = 0usize;
+        while first < slots.size as usize && hits.len() < MOST {
+            let n = per_chunk.min(slots.size as usize - first);
+            let chunk = &mut bytes[..n * step];
+            if !crate::host::read_into((slots.cpu + first * step) as *const u8, chunk) {
+                text.push_str(&format!("; view heap {:#x}: slots from {first} do not read", slots.gpu));
+                break;
+            }
+            for k in 0..n {
+                let at = k * step;
+                let word = |i: usize| u32::from_le_bytes(chunk[at + 4 * i..at + 4 * i + 4].try_into().unwrap_or_default());
+                let (as_buffer, as_texture) = amd_bases(word(0), word(1));
+                let index = first + k;
+                let viewed = kept.get(index).and_then(Option::as_ref);
+                let buffer_hit = as_buffer != 0 && va >= as_buffer && va - as_buffer < NEAR;
+                let texture_hit = as_texture != 0
+                    && va >= as_texture
+                    && va - as_texture < 1 << 30
+                    && viewed.is_some_and(|r| va - as_texture < allocation_bytes(r));
+                if buffer_hit || texture_hit {
+                    let how = if buffer_hit {
+                        format!("reads as a buffer at {as_buffer:#x}")
+                    } else {
+                        format!("reads as a texture at {as_texture:#x}")
+                    };
+                    hits.push((index, how, viewed.map(describe_resource)));
+                }
+            }
+            first += n;
+        }
+        for (index, how, viewed) in hits {
+            let table = slots.table.as_ref().filter(|_| index < victory_shader::emit::SLOT_STRIDES_COUNT as usize).map(|(_, data)| {
+                // SAFETY: inside the table's mapping, which `slots` holds.
+                unsafe { (*data as *const u32).add(index).read_volatile() }
+            });
+            let kind = match &viewed {
+                Some(d) if !d.starts_with("buffer") && how.contains("buffer") => ": a texture's descriptor read as a buffer's",
+                _ => "",
+            };
+            text.push_str(&format!(
+                "; view heap {:#x} slot {index} {how}, viewing {}, table word {}{kind}",
+                slots.gpu,
+                viewed.as_deref().unwrap_or("nothing of the host's"),
+                table.map_or("none".to_owned(), |w| format!("{w:#x}")),
+            ));
+        }
+    }
+    text
+}
+
+/// The card's bytes for `resource` (0 if it will not say).
+fn allocation_bytes(resource: &ID3D12Resource) -> u64 {
+    let Some(host) = host() else { return 0 };
+    // SAFETY: plain queries on a live resource.
+    unsafe {
+        let desc = resource.GetDesc();
+        host.device.GetResourceAllocationInfo(0, &[desc]).SizeInBytes
+    }
+}
+
+/// A host resource in a few words, for reports.
+fn describe_resource(resource: &ID3D12Resource) -> String {
+    // SAFETY: a plain query on a live resource.
+    let d = unsafe { resource.GetDesc() };
+    if d.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER {
+        return format!("buffer of {} bytes", d.Width);
+    }
+    format!(
+        "texture {}x{}x{} format {} levels {} dimension {}",
+        d.Width, d.Height, d.DepthOrArraySize, d.Format.0, d.MipLevels, d.Dimension.0
+    )
+}
 
 /// For device-removed reports: where host GPU address `va` lies against
 /// the host descriptor heaps.
@@ -1106,6 +1259,20 @@ impl HostHeap {
                 Some((buffer, gpu, data as usize))
             })
             .flatten();
+        let slots = std::sync::Arc::new(Slots {
+            _heap: heap.clone(),
+            cpu,
+            step,
+            size,
+            gpu,
+            kept: Mutex::new(vec![None; (count + extra) as usize]),
+            table: strides.as_ref().map(|s| (s.0.clone(), s.2)),
+        });
+        if !sampler {
+            let mut all = SLOTS.lock().unwrap_or_else(|e| e.into_inner());
+            all.retain(|s| s.strong_count() > 0);
+            all.push(std::sync::Arc::downgrade(&slots));
+        }
         let h = HostHeap {
             heap,
             cpu,
@@ -1116,7 +1283,7 @@ impl HostHeap {
             made: Mutex::new(vec![0; count as usize]),
             copied: Mutex::new(Vec::new()),
             forgotten: Mutex::new(Vec::new()),
-            kept: Mutex::new(vec![None; (count + extra) as usize]),
+            slots,
             next: Mutex::new((0, vec![false; DYNAMIC as usize])),
             free: std::sync::atomic::AtomicU32::new(DYNAMIC),
             too_long: std::sync::atomic::AtomicU32::new(u32::MAX),
@@ -1485,6 +1652,7 @@ impl HostHeap {
         let made = self.made.lock().unwrap_or_else(|e| e.into_inner());
         made.get(index as usize).is_some_and(|&made| made != 0 && made == key)
             && self
+                .slots
                 .kept
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -1737,9 +1905,38 @@ impl HostHeap {
         std::mem::take(&mut *changed).into_iter().collect()
     }
 
+    /// Title slot `index`'s dword in the table for shaders that pick
+    /// buffers from the heap (`victory_shader::emit::SLOT_STRIDES`).
+    fn set_slot_word(&self, index: u32, word: u32) {
+        if let Some((_, _, data)) = &self.strides
+            && index < victory_shader::emit::SLOT_STRIDES_COUNT
+        {
+            // SAFETY: inside the mapping; shaders read it while we write (a
+            // dword, either value is one the slot had).
+            unsafe { (*data as *mut u32).add(index as usize).write_volatile(word) };
+        }
+    }
+
+    /// After title slot `index`'s host descriptor was written for `view`:
+    /// the table says what the slot holds now ([`slot_word`]). Only now: a
+    /// shader that picks the slot as a buffer while its descriptor is still
+    /// a texture's reads a wild address (the store fence keeps the table's
+    /// write behind the descriptor's on the way to the card).
+    fn publish_slot(&self, index: u32, view: &View) {
+        if self.sampler {
+            return;
+        }
+        let word = slot_word(view);
+        if word != 0 {
+            std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+            self.set_slot_word(index, word);
+        }
+    }
+
     /// Records what title slot `index` now holds for shaders that pick
-    /// buffers from the heap: its element stride in the table, and whether
-    /// it is a buffer view at all.
+    /// buffers from the heap: no buffer in the table until the caller has
+    /// written the slot ([`HostHeap::publish_slot`]), and whether it is a
+    /// buffer view at all.
     /// `seen`: the slot was not written now, a draw or a pass made its
     /// host slot from what it held.
     /// Returns the title slots whose placed texture view the write made
@@ -1809,13 +2006,11 @@ impl HostHeap {
             }
         }
         let stride = view.and_then(view_stride);
-        if let Some((_, _, data)) = &self.strides
-            && index < victory_shader::emit::SLOT_STRIDES_COUNT
-        {
-            // SAFETY: inside the mapping; shaders read it while we write (a
-            // dword, either value is one the slot had).
-            unsafe { (*data as *mut u32).add(index as usize).write_volatile(stride.unwrap_or(0)) };
-        }
+        // The slot holds no buffer for shaders that pick it until the caller
+        // has written it (`publish_slot`): the descriptor there now may be a
+        // texture's, and read as a buffer's that is a wild address.
+        self.set_slot_word(index, 0);
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         let mut buffers = self.buffers.lock().unwrap_or_else(|e| e.into_inner());
         let was = if stride.is_some() {
             buffers.insert(index);
@@ -1872,7 +2067,7 @@ impl HostHeap {
 
     /// Slot `index` now views `resource` (or nothing of the host's).
     fn keep(&self, index: u32, resource: Option<ID3D12Resource>) {
-        let mut kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        let mut kept = self.slots.kept.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(slot) = kept.get_mut(index as usize) {
             // A running submission may still read the old resource through
             // this slot.
@@ -2213,6 +2408,7 @@ impl HostHeap {
                                 null_for(&view, self.cpu(index));
                             }
                             self.keep(index, kept.flatten());
+                            self.publish_slot(index, &view);
                             Some(view)
                         }
                     } else {
@@ -2252,7 +2448,7 @@ impl HostHeap {
     /// that is brought up to date for it).
     #[cfg(feature = "diagnostics")]
     pub(crate) fn shows(&self, index: u32, buffer: &ID3D12Resource) -> Option<bool> {
-        let kept = self.kept.lock().unwrap_or_else(|e| e.into_inner());
+        let kept = self.slots.kept.lock().unwrap_or_else(|e| e.into_inner());
         let shown = kept.get(index as usize)?.as_ref()?;
         Some(windows::core::Interface::as_raw(shown) == windows::core::Interface::as_raw(buffer))
     }
@@ -3438,6 +3634,38 @@ mod tests {
     use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
     use windows::core::Interface;
 
+    /// The page the card faulted on in run diag-look, 0x7000_02ae_b000, is a
+    /// texture's descriptor read as a buffer's: a texture of 8 levels (last
+    /// level 7 in bits 12 to 15 of dword 1) at 0x2_aeb0_0000 has dword 0
+    /// 0x02ae_b000, and read as a buffer's that dword is the low address,
+    /// dword 1's low 16 bits the high one. Read as a texture's it is the
+    /// texture's own address.
+    #[test]
+    fn a_texture_descriptor_read_as_a_buffer_is_the_wild_address_of_the_fault() {
+        let (w0, w1) = (0x02ae_b000u32, 7 << 12);
+        let (as_buffer, as_texture) = amd_bases(w0, w1);
+        assert_eq!(as_buffer, 0x7000_02ae_b000);
+        assert_eq!(as_texture, 0x2_aeb0_0000);
+        // And the one the agent's notes name (run 20261125-114311).
+        assert_eq!(amd_bases(0x035b_4000, 7 << 12).0, 0x7000_035b_4000);
+    }
+
+    /// The table for shaders that pick buffers from the heap: a constant
+    /// buffer view is a buffer without a stride (`SLOT_UNSTRIDED`, read as
+    /// a buffer), a null or texture view is no buffer (0: the access goes
+    /// to the null slot instead of reading a texture's descriptor as a
+    /// buffer's, which removed the device).
+    #[test]
+    fn the_slot_table_tells_buffers_from_textures() {
+        use victory_shader::emit::SLOT_UNSTRIDED;
+        assert_eq!(slot_word(&View::Constant(0x2000_0000, 480)), SLOT_UNSTRIDED);
+        assert_eq!(slot_word(&View::Shader(0, None)), 0, "a null view");
+        // A placed texture view (the 64x64 2D one the tests below make).
+        let desc = [0u32; 16];
+        let texture = View::Placed(false, [3, 0, 0, 0, 64, 0, 64, 0x1_0001, 98, 1, 0, 0x105, 0, 0], desc);
+        assert_eq!(slot_word(&texture), 0, "a texture's view is no buffer");
+    }
+
     #[test]
     fn copied_sampler_uses_the_record_that_was_fingerprinted() {
         let heap = HostHeap::new(true, 8).expect("D3D12 test sampler heap");
@@ -4323,7 +4551,7 @@ mod tests {
         assert_eq!(heap.mirror(slot, handle, true), Some(view));
         assert_eq!(super::device_removed(), None);
         let key = u64::from(generation) << 32 | u64::from(entry);
-        assert!(heap.kept.lock().unwrap()[slot as usize].is_some());
+        assert!(heap.slots.kept.lock().unwrap()[slot as usize].is_some());
         assert!(!heap.texture_slot_gone(slot, observed));
         assert_eq!(heap.made.lock().unwrap()[slot as usize], key);
         assert_eq!(heap.texture_slots_due(u64::MAX, 1).0, [(slot, replacement)]);

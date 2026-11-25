@@ -16,16 +16,28 @@ pub const ROOT_CBV_SPACE: u32 = 1;
 /// The root SRV `t<SLOT_STRIDES>` in [`ROOT_CBV_SPACE`] of a shader that
 /// reads buffers through descriptors it picks from the view heap at an
 /// index it computes (SM 6.6 dynamic resources): a raw buffer of
-/// [`SLOT_STRIDES_COUNT`] dwords the host keeps, dword `i` the bytes per
-/// element of the buffer view at heap slot `i` (0: none or not a buffer).
+/// [`SLOT_STRIDES_COUNT`] dwords the host keeps, dword `i` what heap slot
+/// `i` holds: the bytes per element of its buffer view, [`SLOT_UNSTRIDED`]
+/// for a buffer descriptor without a stride (a constant buffer view, a
+/// buffer view of a format of unknown size), or 0 for anything else (a
+/// texture's view, nothing).
 /// The console's descriptor holds that stride and its hardware multiplies
 /// the element index by it; the program's code does not say it, and the
 /// used-resource list only names what tables hold. A shader that has this
 /// root SRV also tells the host that the buffer views of the whole heap
 /// must be ready when it runs, not only those its tables name.
+/// A buffer access picked at a slot of 0 reads zeros and drops its writes
+/// (the view heap's null slot, or no load at all): read as a buffer's, a
+/// texture's descriptor is a wild address on AMD (the low dwords of the
+/// texture's address, its level count above them: a texture of 8 levels
+/// at 0x3_5b40_0000 is the buffer at 0x7000_035b_4000, the page the card
+/// faulted on in run 20261125-114311, which removed the device).
 pub const SLOT_STRIDES: u8 = 255;
 /// Dwords of the [`SLOT_STRIDES`] buffer: heap indices are clamped to it.
 pub const SLOT_STRIDES_COUNT: u32 = 1 << 21;
+/// A [`SLOT_STRIDES`] dword: the slot holds a buffer descriptor whose
+/// element bytes are not known (its low bits, 0). Strides never reach it.
+pub const SLOT_UNSTRIDED: u32 = 1 << 31;
 
 /// Title memory by address (`resource::MEMORY`): console code reads and
 /// writes through raw 40-bit addresses it takes from root constants,
