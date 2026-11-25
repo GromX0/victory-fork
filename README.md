@@ -189,6 +189,7 @@ cargo build --release -p victory
 | **Play** | `powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<game folder>\<the game's exe>"` |
 | **Record a run** | `powershell -ExecutionPolicy Bypass -File tools\fork-run.ps1 -GameExe "<...>" -Seconds 600` |
 | **Other console mode** | the same with `-Console series-s` (renders less; on AMD it currently loses the GPU, see above) |
+| **Warm up a new build** | `target\release\victory.exe warm`: makes every pipeline earlier runs used into the pipeline library before you play (seconds when nothing changed). Set the same `VICTORY_*` switches as for playing, and never run it while the game runs |
 
 The `-Profile amd` settings (relay off) ran at the same speed as the default on
 the RX 9070 and drew a worse picture, so the default is the one to use.

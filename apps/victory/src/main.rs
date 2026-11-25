@@ -8,6 +8,7 @@ mod inspect;
 mod run;
 mod shader;
 mod translate;
+mod warm;
 
 use std::path::PathBuf;
 
@@ -92,6 +93,18 @@ enum Command {
         #[arg(long)]
         warm: Option<PathBuf>,
     },
+    /// Make every pipeline earlier runs used into the host pipeline library
+    /// (and their shaders into the shader cache) before a run: after a new
+    /// build, with the switches the runs will have, never while the title
+    /// runs. See `warm.rs`.
+    Warm {
+        /// The title's files (default: the configured game directory).
+        paths: Vec<PathBuf>,
+        /// Threads making pipelines (default: as many as a run's pipeline
+        /// workers, half the logical processors, 2 to 8).
+        #[arg(long)]
+        jobs: Option<usize>,
+    },
     /// Prepare, map and bind a title executable; with --execute, run it.
     Run {
         exe: PathBuf,
@@ -174,6 +187,7 @@ fn main() -> Result<()> {
             }
             translate::run(paths, validate, pipelines, list, jobs)
         }
+        Command::Warm { paths, jobs } => warm::run(paths, jobs),
         Command::Run {
             exe,
             unimplemented,

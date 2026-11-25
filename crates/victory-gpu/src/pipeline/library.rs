@@ -11,6 +11,15 @@
 //!    known when the title creates them (their shader containers and
 //!    graphics state); the next run hands those to the workers at
 //!    creation, during loading.
+//! 3. Beside that list, what each of those pipelines is made from: its
+//!    shaders' content hashes and its graphics state, the title's own
+//!    formats (`pipeline-descriptions.txt`, [`note_description`]). The
+//!    warm-up (`victory warm`) makes every pipeline described there into
+//!    the library before a run, through the code a run makes them with, so
+//!    under the names a run of that build looks them up by. A build whose
+//!    translation changed made every pipeline again in the first minutes of
+//!    its first run (runs of 25 November: 2,247, 1,003 and 913 made, against
+//!    1 to 101 on a second run of the same build); warmed, it makes none.
 //!
 //! Library calls overlap: the host documents the library as safe to use
 //! from several threads ("The pipeline library is thread-safe to use, and
@@ -47,7 +56,7 @@
 //! 16,352 of 16,384 pages read zeros with the handle closed, none with it
 //! open (the test below). `VICTORY_LIBRARY_HANDLE=0`: closed, as before.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
@@ -252,6 +261,15 @@ static CALLS: Mutex<Vec<(u32, &'static str, String, u64)>> = Mutex::new(Vec::new
 thread_local! {
     /// The pipeline this thread is making (its shaders), for [`CALLS`].
     static LABEL: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// Whether this thread's last [`pipeline`] came from the library
+    /// (true) or was made (false), for the warm-up's tally.
+    static FROM_LIBRARY: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Whether this thread's last pipeline came from the library, since the
+/// last call (`None`: no library call since).
+pub(crate) fn take_from_library() -> Option<bool> {
+    FROM_LIBRARY.with(std::cell::Cell::take)
 }
 
 /// Names the pipeline this thread makes next.
@@ -521,6 +539,7 @@ pub(crate) fn pipeline(
     let wide = HSTRING::from(name);
     let Some(library) = library() else {
         MADE.fetch_add(1, Ordering::Relaxed);
+        FROM_LIBRARY.with(|c| c.set(Some(false)));
         return create();
     };
     let began = std::time::Instant::now();
@@ -536,6 +555,7 @@ pub(crate) fn pipeline(
     let refused = match loaded {
         Ok(pso) => {
             LOADED.fetch_add(1, Ordering::Relaxed);
+            FROM_LIBRARY.with(|c| c.set(Some(true)));
             crate::host::trail(|| {
                 let label = LABEL.with(|l| l.borrow().clone());
                 format!("pipeline library: loaded {label} in {:.1} ms", began.elapsed().as_secs_f64() * 1e3)
@@ -550,6 +570,7 @@ pub(crate) fn pipeline(
         create()?
     };
     MADE.fetch_add(1, Ordering::Relaxed);
+    FROM_LIBRARY.with(|c| c.set(Some(false)));
     crate::host::trail(|| {
         let label = LABEL.with(|l| l.borrow().clone());
         format!(
@@ -578,13 +599,33 @@ pub(crate) fn pipeline(
 /// every pipeline again.
 static SAVE_FILE: Mutex<()> = Mutex::new(());
 
-/// When a save last started (`now`, or after `SAVE_EVERY`).
+/// When a save last started (`now`, or after [`save_gap`]).
 static LAST_SAVE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
-/// Writes the library and the early list if pipelines were added since the
-/// last save and `SAVE_EVERY` has passed (or `now`). Without `now` it gives
-/// way to a save under way; with `now` it waits for it, then saves what
-/// was added since.
+/// What the last save that wrote the library took (serialising it and
+/// renaming it into place), in microseconds: for [`save_gap`].
+static SAVE_TOOK_US: AtomicU64 = AtomicU64::new(0);
+
+/// How long after a save the next one waits unless it is forced: fifty
+/// times what the last save of the library took, from 5 s up to `most`, so
+/// that saving takes at most a fiftieth of the time. The fixed 20 s (`most`
+/// for the workers' saves) was set for libraries of hundreds of megabytes,
+/// which still wait that long. This PC's AMD driver keeps some 146 bytes a
+/// pipeline in the library (1.1 MB for 2,990 pipelines on 25 November), a
+/// save of a few milliseconds, and the fixed 20 s let a removed device take
+/// up to 20 s of compiles with it: the save at the removal is refused ("The
+/// GPU device instance has been suspended", 10:46:44 that day), and 140
+/// pipelines had been made in the 20 s before the last save that went through.
+fn save_gap(most: std::time::Duration) -> std::time::Duration {
+    const LEAST: std::time::Duration = std::time::Duration::from_secs(5);
+    let took = std::time::Duration::from_micros(SAVE_TOOK_US.load(Ordering::Relaxed));
+    took.saturating_mul(50).max(LEAST).min(most)
+}
+
+/// Writes the library, the early list and the descriptions if pipelines
+/// were added, listed or described since the last save and [`save_gap`]
+/// has passed (or `now`). Without `now` it gives way to a save under way;
+/// with `now` it waits for it, then saves what was added since.
 ///
 /// Whether the library on disk now holds what was added: false only when a
 /// save was wanted and failed (the host device gone, the disk refusing).
@@ -604,7 +645,7 @@ pub(crate) fn save(now: bool) -> bool {
     };
     {
         let mut last = LAST_SAVE.lock().unwrap_or_else(|e| e.into_inner());
-        if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
+        if !now && last.is_some_and(|t| t.elapsed() < save_gap(SAVE_EVERY)) {
             return true;
         }
         *last = Some(std::time::Instant::now());
@@ -614,20 +655,23 @@ pub(crate) fn save(now: bool) -> bool {
         return false;
     }
     let tmp = dir.join(LIBRARY_FILE).with_extension("tmp");
+    let began = std::time::Instant::now();
     // The bytes of the library written to `tmp`; 0 when no pipeline was
-    // added: the library on disk is then what it was, and only the early
-    // list is written (a title pipeline first drawn with wrote all 1,352 MB
-    // of the library again: run 60's second save).
-    let bytes = {
+    // added: the library on disk is then what it was, and only the lists
+    // are written (a title pipeline first drawn with wrote all 1,352 MB of
+    // the library again: run 60's second save).
+    let (bytes, listed, described) = {
         let _all = one_call();
         // No store between asking the size and writing; loads go on.
         let _alone = library.saving.write().unwrap_or_else(|e| e.into_inner());
         let added = library.added.load(Ordering::Relaxed);
-        if !USED_CHANGED.swap(false, Ordering::Relaxed) && added == 0 {
+        let listed = USED_CHANGED.swap(false, Ordering::Relaxed);
+        let described = DESCRIBED_CHANGED.swap(false, Ordering::Relaxed);
+        if !listed && !described && added == 0 {
             return true;
         }
         if added == 0 {
-            0
+            (0, listed, described)
         } else {
             // SAFETY: a plain query.
             let size = unsafe { library.library.GetSerializedSize() };
@@ -635,16 +679,22 @@ pub(crate) fn save(now: bool) -> bool {
             if let Err(e) = serialise(&library.library, &tmp, size) {
                 tracing::warn!(error = %e, "host pipeline library not serialised");
                 let _ = std::fs::remove_file(&tmp);
+                USED_CHANGED.fetch_or(listed, Ordering::Relaxed);
+                DESCRIBED_CHANGED.fetch_or(described, Ordering::Relaxed);
                 return false;
             }
             library.added.store(0, Ordering::Relaxed);
             SAVED.store(size as u64, Ordering::Relaxed);
-            size
+            (size, listed, described)
         }
     };
-    let used: Vec<String> = USED.lock().unwrap_or_else(|e| e.into_inner()).iter().flatten().cloned().collect();
+    // Read from the disk first if this process has not yet (the warm-up
+    // makes pipelines without asking whether any is wanted early): the
+    // list as held was written, so one never read was written empty.
+    let used: Vec<String> = used().iter().flatten().cloned().collect();
     let library_written = if bytes > 0 { replace_library(dir, &tmp) } else { Ok(()) };
     if bytes > 0 && library_written.is_ok() {
+        SAVE_TOOK_US.store(began.elapsed().as_micros() as u64, Ordering::Relaxed);
         // In place unless the system refused and the new one waits beside it.
         let in_place = !dir.join(NEXT_FILE).exists();
         if in_place && VIEW[0].load(Ordering::Relaxed) != 0 {
@@ -659,31 +709,40 @@ pub(crate) fn save(now: bool) -> bool {
         });
     }
     let written = library_written
-        .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()));
+        .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()))
+        .and_then(|()| match described.then(descriptions_text) {
+            Some(text) => write_atomically(&dir.join(DESCRIPTIONS_FILE), text.as_bytes()),
+            None => Ok(()),
+        });
     match written {
         Ok(()) => {
             tracing::info!(
                 bytes,
                 early = used.len(),
+                described = described_count(),
                 made = MADE.load(Ordering::Relaxed),
                 loaded = LOADED.load(Ordering::Relaxed),
                 started_early = EARLY.load(Ordering::Relaxed),
+                took_ms = began.elapsed().as_millis() as u64,
                 "host pipeline library saved"
             );
             true
         }
         Err(e) => {
+            USED_CHANGED.fetch_or(listed, Ordering::Relaxed);
+            DESCRIBED_CHANGED.fetch_or(described, Ordering::Relaxed);
             tracing::warn!(error = %e, "host pipeline library not saved");
             false
         }
     }
 }
 
-/// `VICTORY_PIPELINE_SAVE_EVERY`: seconds between the saves of a thread of
-/// its own (60; 0: no such thread). The workers save only after making a
-/// pipeline (at most every 20 s), so what they made in the 20 s before
-/// they ran out of work waited for the end of the run, and a run that
-/// crashed or was ended without that save lost it: the next run made
+/// `VICTORY_PIPELINE_SAVE_EVERY`: the most seconds between the saves of a
+/// thread of its own (60; 0: no such thread); a library that saves quickly
+/// is saved sooner ([`save_gap`]: from 5 s after the last save). The
+/// workers save only after making a pipeline, so what they made just
+/// before they ran out of work waited for the end of the run, and a run
+/// that crashed or was ended without that save lost it: the next run made
 /// thousands of pipelines again, minutes of "being made". The thread also
 /// saves at once when [`SAVE_AFTER`] pipelines were added. It is none of
 /// the title's threads, and a save is written beside the library and
@@ -715,13 +774,16 @@ fn start_saver() {
                 std::thread::sleep(LOOK);
                 let Some(library) = library() else { return };
                 let added = library.added.load(Ordering::Relaxed);
-                if added == 0 && !USED_CHANGED.load(Ordering::Relaxed) {
+                if added == 0
+                    && !USED_CHANGED.load(Ordering::Relaxed)
+                    && !DESCRIBED_CHANGED.load(Ordering::Relaxed)
+                {
                     continue;
                 }
                 let due = LAST_SAVE
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .is_none_or(|t| t.elapsed() >= every);
+                    .is_none_or(|t| t.elapsed() >= save_gap(every));
                 if due || added >= SAVE_AFTER {
                     save(true);
                 }
@@ -731,7 +793,7 @@ fn start_saver() {
             Ok(_) => tracing::info!(
                 every_s = every.as_secs(),
                 after = SAVE_AFTER,
-                "pipeline library saved by a thread of its own (VICTORY_PIPELINE_SAVE_EVERY)"
+                "pipeline library saved by a thread of its own (VICTORY_PIPELINE_SAVE_EVERY; sooner when a save is quick)"
             ),
             Err(e) => tracing::warn!(error = %e, "no thread to save the pipeline library"),
         }
@@ -853,6 +915,107 @@ pub(crate) fn note_used(key: &str) {
     }
 }
 
+/// The title pipelines of the early list are described here for the
+/// warm-up, by key (this run's and the earlier runs'): each line a key,
+/// the shaders' stages and content hashes, and the graphics state
+/// (`make::Pending::description`), tab-separated.
+const DESCRIPTIONS_FILE: &str = "pipeline-descriptions.txt";
+/// The first line of [`DESCRIPTIONS_FILE`]: a file without it (another
+/// layout) is not read, and is written anew.
+const DESCRIPTIONS_HEADER: &str = "victory pipeline descriptions 1";
+
+/// Descriptions by key, read from the disk on first use, and whether one
+/// was added since the last save.
+static DESCRIBED: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+static DESCRIBED_CHANGED: AtomicBool = AtomicBool::new(false);
+
+fn described() -> MutexGuard<'static, Option<HashMap<String, String>>> {
+    let mut described = DESCRIBED.lock().unwrap_or_else(|e| e.into_inner());
+    if described.is_none() {
+        let text = DIR
+            .get()
+            .and_then(|d| std::fs::read_to_string(d.join(DESCRIPTIONS_FILE)).ok())
+            .unwrap_or_default();
+        let read = parse_descriptions(&text);
+        tracing::info!(pipelines = read.len(), "title pipelines described for the warm-up");
+        *described = Some(read);
+    }
+    described
+}
+
+/// The descriptions of a description file's `text`; none for another
+/// layout's. Lines that are not a key and a description are left out.
+fn parse_descriptions(text: &str) -> HashMap<String, String> {
+    let mut lines = text.lines();
+    if lines.next() != Some(DESCRIPTIONS_HEADER) {
+        return HashMap::new();
+    }
+    lines
+        .filter_map(|line| {
+            let (key, description) = line.split_once('\t')?;
+            let key_like = key.len() == 32 && key.bytes().all(|b| b.is_ascii_hexdigit());
+            (key_like && !description.is_empty()).then(|| (key.to_owned(), description.to_owned()))
+        })
+        .take(EARLY_MAX)
+        .collect()
+}
+
+/// The description file as it is written: sorted by key, so that a save
+/// that adds a few changes a few lines.
+fn descriptions_text() -> String {
+    let described = described();
+    let mut lines: Vec<String> = described
+        .iter()
+        .flatten()
+        .map(|(key, description)| format!("{key}\t{description}"))
+        .collect();
+    lines.sort_unstable();
+    let mut text = String::from(DESCRIPTIONS_HEADER);
+    for line in lines {
+        text.push('\n');
+        text.push_str(&line);
+    }
+    text.push('\n');
+    text
+}
+
+fn described_count() -> usize {
+    described().as_ref().map_or(0, HashMap::len)
+}
+
+/// The title pipeline `key` is wanted (drawn with, or started early): what
+/// it is made from (`describe`) is kept for the warm-up, unless it is
+/// already. Worked out outside the lock (it hashes the shaders).
+pub(crate) fn note_description(key: &str, describe: impl FnOnce() -> String) {
+    {
+        let described = described();
+        let known = described.as_ref().is_some_and(|d| d.contains_key(key));
+        if known || described.as_ref().is_some_and(|d| d.len() >= EARLY_MAX) {
+            return;
+        }
+    }
+    let description = describe();
+    let mut described = described();
+    let map = described.get_or_insert_with(HashMap::new);
+    if map.len() < EARLY_MAX && !map.contains_key(key) {
+        map.insert(key.to_owned(), description);
+        DESCRIBED_CHANGED.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Every description kept: key, description (as [`note_description`] was
+/// given it).
+pub(crate) fn descriptions() -> Vec<(String, String)> {
+    let mut all: Vec<(String, String)> = described().iter().flatten().map(|(k, d)| (k.clone(), d.clone())).collect();
+    all.sort_unstable();
+    all
+}
+
+/// Title pipelines listed for an early start (this run's and the last).
+pub(crate) fn early_count() -> usize {
+    used().as_ref().map_or(0, HashSet::len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,6 +1030,44 @@ mod tests {
         assert_ne!(a, name("mesh", b"root", &[b"vs", b"ps"], "state"));
         // Parts do not run into each other.
         assert_ne!(a, name("graphics", b"root", &[b"vsp", b"s"], "state"));
+    }
+
+    /// The description file holds only what has its header and a key and a
+    /// description per line; lines of another layout are left out.
+    #[test]
+    fn descriptions_read_back_and_others_are_left_out() {
+        let key = "0123456789abcdef0123456789ABCDEF";
+        let text = format!(
+            "{DESCRIPTIONS_HEADER}\n{key}\tvertex=00\t-\nnot a key\tx\n{}\tcompute=11\t-\n{key}x\ty\n{}\t\n",
+            "f".repeat(32),
+            "e".repeat(32)
+        );
+        let read = parse_descriptions(&text);
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[key], "vertex=00\t-");
+        assert_eq!(read[&"f".repeat(32)], "compute=11\t-");
+        // Another layout (no header) is not read at all.
+        assert!(parse_descriptions(&text.replacen(DESCRIPTIONS_HEADER, "victory pipeline descriptions 0", 1)).is_empty());
+        assert!(parse_descriptions("").is_empty());
+    }
+
+    /// A quick save waits 5 s for the next, a slow one fifty times what it
+    /// took, never more than the most it is given.
+    #[test]
+    fn the_save_gap_follows_what_a_save_takes() {
+        let s = std::time::Duration::from_secs;
+        let gap = |took_ms: u64, most| {
+            SAVE_TOOK_US.store(took_ms * 1000, Ordering::Relaxed);
+            save_gap(most)
+        };
+        let before = SAVE_TOOK_US.load(Ordering::Relaxed);
+        assert_eq!(gap(0, s(20)), s(5));
+        assert_eq!(gap(4, s(20)), s(5));
+        assert_eq!(gap(200, s(20)), s(10));
+        assert_eq!(gap(3_000, s(20)), s(20));
+        assert_eq!(gap(3_000, s(60)), s(60));
+        assert_eq!(gap(0, s(2)), s(2), "a most below 5 s is kept");
+        SAVE_TOOK_US.store(before, Ordering::Relaxed);
     }
 
     #[test]

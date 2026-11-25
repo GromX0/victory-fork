@@ -351,6 +351,28 @@ pub(crate) fn take_frame() -> Vec<String> {
 pub(crate) fn take_dropped() -> u64 {
     DROPPED.swap(0, Ordering::Relaxed)
 }
+
+/// Of the drops since the last call ([`take_dropped`]): those whose host
+/// pipeline was still being made, and those not run on purpose (a pipeline
+/// `VICTORY_SKIP_PIPELINES` names, a stage of the ray-tracing structure
+/// builder while it is off). The frame line's drops were read as pipelines
+/// not made yet; on second runs of a build nearly all were the builder's
+/// (277 to 2,983 a frame in the diagnostics runs of 25 November, against
+/// 0.3 a frame still being made), with nothing being made.
+pub(crate) fn take_drop_kinds() -> [u64; 2] {
+    [WAITED.swap(0, Ordering::Relaxed), SKIPPED.swap(0, Ordering::Relaxed)]
+}
+
+/// Counts a drop of a draw or mesh dispatch with `pipeline` by kind (see
+/// [`take_drop_kinds`]); [`DROPPED`] is counted by the caller.
+fn drop_kind(pipeline: usize) {
+    if crate::pipeline::is_skipped(pipeline as This) {
+        SKIPPED.fetch_add(1, Ordering::Relaxed);
+    } else if crate::pipeline::being_made(pipeline as This) {
+        WAITED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// A root SRV's dynamic slot in a list, and the host copy it shows.
 type RootSlot = (u32, Option<std::sync::Arc<crate::shadow::Shadow>>);
 
@@ -481,6 +503,10 @@ pub(crate) static HEAP_TEXTURES_QUEUE: [AtomicU64; 9] = [const { AtomicU64::new(
 /// as before, they counted as not there at all).
 pub(crate) static HEAP_TEXTURES_PARTLY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static DROPPED: AtomicU64 = AtomicU64::new(0);
+/// Drops with a host pipeline still being made, and drops on purpose
+/// ([`take_drop_kinds`]).
+static WAITED: AtomicU64 = AtomicU64::new(0);
+static SKIPPED: AtomicU64 = AtomicU64::new(0);
 
 /// Marks the last traced draw as not run on the host.
 #[cfg(feature = "diagnostics")]
@@ -2150,6 +2176,7 @@ impl State {
         #[cfg(windows)]
         if crate::pipeline::is_skipped(self.pipeline as This) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            SKIPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             crate::pipeline::note_drop(self.pipeline as This);
             return;
@@ -2157,6 +2184,7 @@ impl State {
         // The ray-tracing structure builder's stages run all or none.
         if crate::pipeline::is_builder(self.pipeline as This) && !crate::pipeline::builder_runs() {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            SKIPPED.fetch_add(1, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_why("a stage of the ray-tracing structure builder, which is off".to_owned());
@@ -2170,6 +2198,9 @@ impl State {
                 "a dispatch without a host pipeline dropped"
             );
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            if crate::pipeline::being_made(self.pipeline as This) {
+                WAITED.fetch_add(1, Ordering::Relaxed);
+            }
             #[cfg(feature = "diagnostics")]
             {
                 crate::pipeline::note_drop(self.pipeline as This);
@@ -2472,6 +2503,7 @@ impl State {
             };
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_kind(self.pipeline);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -2868,6 +2900,7 @@ impl State {
         }
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_kind(self.pipeline);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
@@ -2969,6 +3002,7 @@ impl State {
         }
         if !ran {
             DROPPED.fetch_add(1, Ordering::Relaxed);
+            drop_kind(self.pipeline);
             #[cfg(feature = "diagnostics")]
             dropped(self.pipeline);
         }
