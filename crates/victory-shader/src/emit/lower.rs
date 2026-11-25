@@ -32,6 +32,7 @@ mod dot;
 /// it shares the emitter's state.
 #[path = "intersect.rs"]
 pub(super) mod intersect;
+mod guarded_first_lane;
 
 type Why = &'static str;
 
@@ -7084,6 +7085,15 @@ impl<'a> Lower<'a> {
             return r;
         }
         let mut guard = self.guard(b, i)?;
+        if name == "v_readfirstlane_b32"
+            && self.exchange.as_ref().is_some_and(|e| !e.1)
+            && !self.local && !self.all_lanes(b)
+            && guarded_first_lane::can_read_locally(self.x, b, i)
+        {
+            let source = self.src(inst, 0)?;
+            let (first, _) = self.first_lane(source, guard);
+            return self.write_i(inst, first, guard);
+        }
         if let Some(d) = v.dpp {
             let (x, enable) = self.dpp(inst, d)?;
             guard = match (guard, enable) {
