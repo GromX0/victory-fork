@@ -56,7 +56,14 @@ param(
     # cleared like the other test switches; this is the way to ask for it.)
     [string]$Capture = '',
     [string]$CaptureFrames = '',
-    [switch]$Targets
+    [switch]$Targets,
+    # The run is stopped when the system's commit grows by more than this
+    # many GB (a normal run takes ~25), when fewer than -CommitFreeMinGB are
+    # left, or when the drive of a page file has less than -PageDriveMinGB
+    # free (Windows grows the page file there until the disk is full).
+    [int]$CommitGrowLimitGB = 38,
+    [int]$CommitFreeMinGB = 2,
+    [int]$PageDriveMinGB = 6
 )
 $ErrorActionPreference = 'Stop'
 $repo = (git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
@@ -160,19 +167,78 @@ foreach ($k in $SetEnv.Keys) { Set-Item -Path "env:$k" -Value $SetEnv[$k] }
 if (-not $env:VICTORY_LOG) { $env:VICTORY_LOG = 'info' }
 $log = Join-Path $run 'victory.log'
 $err = Join-Path $run 'victory.err.log'
+# --- The system's commit (what Windows promised processes, against its limit
+# of RAM plus page file), watched for the whole run. Placing title memory in
+# the card's reach (VICTORY_INPLACE*) raised it by ~30 GB within seconds on
+# an AMD card and left ~11 GB behind after the process ended, until a restart
+# (alexanderskyequinn/victory-chapter-ii d0f69012): the run is stopped before
+# the system runs short, and what is left afterwards is recorded.
+function Get-Commit {
+    $os = Get-CimInstance Win32_OperatingSystem
+    [pscustomobject]@{
+        UsedGB  = [math]::Round(($os.TotalVirtualMemorySize - $os.FreeVirtualMemory) / 1MB, 1)
+        LimitGB = [math]::Round($os.TotalVirtualMemorySize / 1MB, 1)
+        FreeGB  = [math]::Round($os.FreeVirtualMemory / 1MB, 1)
+    }
+}
+$before = Get-Commit
+$facts['commit_before'] = $before
+Write-Host ("commit before: {0} of {1} GB used, {2} GB free" -f $before.UsedGB, $before.LimitGB, $before.FreeGB)
+# The drives that hold a page file: their free space is the real limit.
+$pageDrives = @(Get-CimInstance Win32_PageFileUsage | ForEach-Object { $_.Name.Substring(0, 1) } | Sort-Object -Unique)
+function Get-PageDriveFreeGB {
+    ($pageDrives | ForEach-Object { (Get-Volume -DriveLetter $_).SizeRemaining / 1GB } | Measure-Object -Minimum).Minimum
+}
+$pageFree = Get-PageDriveFreeGB
+Write-Host ("page file drive(s) {0}: {1:N1} GB free" -f ($pageDrives -join ','), $pageFree)
+if ($pageFree -lt $PageDriveMinGB + 4) {
+    throw "only $([math]::Round($pageFree, 1)) GB free on the page file's drive; free some space (or restart Windows if a run left commit behind) and try again"
+}
+
 $runArgs = @('run', "`"$GameExe`"", '--execute', '--console', $Console)
 $p = Start-Process -FilePath (Join-Path $kept 'victory.exe') -ArgumentList $runArgs `
     -RedirectStandardOutput $log -RedirectStandardError $err -PassThru -NoNewWindow
 # Without the handle taken now, ExitCode reads empty once the process has exited.
 $null = $p.Handle
 $started = Get-Date
-if ($Seconds -gt 0) {
-    if (-not $p.WaitForExit($Seconds * 1000)) { Stop-Process -Id $p.Id -Force; Write-Host "stopped after $Seconds s" }
-} else {
-    $p.WaitForExit()
+$stopReason = $null
+$peak = $before.UsedGB
+while (-not $p.WaitForExit(2000)) {
+    $now = Get-Commit
+    $peak = [math]::Max($peak, $now.UsedGB)
+    if ($now.UsedGB - $before.UsedGB -gt $CommitGrowLimitGB) {
+        $stopReason = "commit grew by $([math]::Round($now.UsedGB - $before.UsedGB, 1)) GB (limit $CommitGrowLimitGB)"
+    } elseif ($now.FreeGB -lt $CommitFreeMinGB) {
+        $stopReason = "only $($now.FreeGB) GB of commit left (minimum $CommitFreeMinGB)"
+    } elseif ((Get-PageDriveFreeGB) -lt $PageDriveMinGB) {
+        $stopReason = "the page file's drive is down to $([math]::Round((Get-PageDriveFreeGB), 1)) GB free (minimum $PageDriveMinGB)"
+    } elseif ($Seconds -gt 0 -and ((Get-Date) - $started).TotalSeconds -ge $Seconds) {
+        $stopReason = "time limit of $Seconds s"
+    }
+    if ($stopReason) {
+        # A window close first (the process lets go of its device and heaps
+        # itself), then the hard way.
+        $null = $p.CloseMainWindow()
+        if (-not $p.WaitForExit(10000)) { Stop-Process -Id $p.Id -Force; $null = $p.WaitForExit(10000) }
+        Write-Host "stopped: $stopReason"
+        break
+    }
 }
 $facts['exit_code'] = $p.ExitCode
 $facts['ran_seconds'] = [int]((Get-Date) - $started).TotalSeconds
+$facts['stopped_because'] = $stopReason
+$facts['commit_peak_gb'] = $peak
+# What is left once the process is gone: more than a little is commit the
+# driver kept (only a restart gives it back).
+Start-Sleep -Seconds 5
+$after = Get-Commit
+$facts['commit_after'] = $after
+$left = [math]::Round($after.UsedGB - $before.UsedGB, 1)
+$facts['commit_left_gb'] = $left
+Write-Host ("commit: before {0} GB, peak {1} GB, after {2} GB (left behind {3} GB)" -f $before.UsedGB, $peak, $after.UsedGB, $left)
+if ($left -gt 2) {
+    Write-Warning "$left GB of commit is still taken after the process ended: a driver may be holding it; restart Windows before long runs"
+}
 $facts | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 (Join-Path $run 'run.json')
 
 # --- crashes.log from the data folder (default location; VICTORY_DATA_DIR overrides).
