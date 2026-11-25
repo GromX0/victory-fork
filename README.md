@@ -19,50 +19,66 @@ an Xbox Series title running natively on Windows, from files you supply.**
 
 > [!NOTE]
 > **Is it NVIDIA-only? No.** Most community testing so far was on NVIDIA,
-> but this fork runs on AMD: on a Radeon RX 9070 it gets through the start
-> screen and loading into the first cutscene of the world. It is slow
-> (about 1-6 fps) and rough, on every vendor, for now.
+> but this fork runs on AMD: on a Radeon RX 9070 it loads into the world
+> and plays its opening cutscenes at **about 6 fps**. Slow and rough, on
+> every vendor, for now.
+
+> [!WARNING]
+> **Use Series X mode (the default) on AMD for now.** With
+> `--console series-s` this build lost the GPU after about three minutes on
+> the RX 9070. Series X ran without a device loss.
 
 Work happens on **`dev/integrate-clean`**; `main` follows it.
 
-## First results on an RX 9070 (2026-11-25)
+## Results on an RX 9070 (2026-11-25)
 
 Measured on the target PC: **Radeon RX 9070 16 GB** (driver 32.0.32029.2010),
-**Ryzen 7 9800X3D**, 32 GB RAM, Windows 11. Release build of
-`dev/integrate-clean`, default settings, 10-minute recorded runs
-(`tools/fork-run.ps1`).
+**Ryzen 7 9800X3D**, 32 GB RAM, Windows 11. Release builds of
+`dev/integrate-clean`, default settings, recorded runs (`tools/fork-run.ps1`).
 
 | Milestone | Result |
 |---|---|
-| Builds, tests pass | ✅ 580 tests pass, **including the GPU tests on the RX 9070** (their first run on RDNA4). The first run found 3 failures: one real allocator bug, now fixed, and two out-of-date tests. |
-| Start screen | ✅ Reached in about 1.5 min; the keyboard works (Enter = A) |
-| Loads into the world | ✅ Loading screens, title card, opening credits, then the first cutscene, character lit |
-| Stable session | ⚠️ 10 minutes without a crash once; a second run ran out of memory after 6 minutes (see below) |
+| Builds, tests pass | ✅ 624 tests pass, **including the GPU tests on the RX 9070**. The first run on RDNA4 found a real descriptor allocator bug, now fixed. One fxceless test depends on test order (also on fxceless's own tree). |
+| Start screen | ✅ About 1.5 min after launch; the keyboard works (Enter = A) |
+| Loads into the world | ✅ Loading, title card, opening credits, then indoor and rooftop cutscenes with lit, textured characters. **72 s** to the world (was 178 s) |
+| Stable session | ✅ Series X: 7 to 10 minutes without a crash in the last runs · ⚠️ Series S: GPU lost after about 3 minutes |
 | Playable | ❌ Not yet |
 
-**Frame times** (the build's own frame line):
+**Speed in the first cutscenes** (median of the last 3 minutes of a run,
+the build's own frame line):
 
-| Scene | fps | ms/frame | of which on the GPU |
+| Build | fps | ms/frame | of which on the GPU |
 |---|---|---|---|
-| Menus, loading screen | 30 (the game's cap) | 33.3 | < 1 ms |
-| First cutscene, its shaders ready | **5.8-6.2** | 162-172 | 48-64 ms |
-| A scene whose shaders are still being built | 0.5-2 | 500-2,000 | 10-60 ms |
+| Before the latest merge (fxceless 310c6eb + picks) | 4.9 | 202 | 75 ms |
+| **Now** (fxceless f85101b + KLBF Lab's AMD fixes) | **6.3** (peaks 6.5) | **158** | 76 ms |
 
-The GPU is not the bottleneck yet. Most of each frame is spent copying
-memory to and from the card and preparing work for it, and building
-pipelines the first time a scene shows up.
+Menus and loading screens run at the game's own 30 fps. A scene whose
+shaders are still being built drops to 0.5-2 fps until they are made.
 
-### Known issues found on AMD
+The GPU is not the bottleneck yet: about half of each frame is copying
+memory to and from the card and preparing work for it.
 
-- **Memory.** The game commits about **24 GB**. With background apps holding
-  another 28 GB against a 44 GB Windows commit limit, run 2 stopped with
-  "memory allocation failed". Close heavy background apps, or give Windows a
-  larger page file, before a long run.
-- **Five shaders do not translate yet** (a 16-bit wave sum, descriptor reads),
-  and the driver refuses one mesh pipeline. Their draws are missing.
-- **Some buildings draw dark or out of place** in the first cutscene.
-- **The pipeline cache does not stay warm.** Even a second launch rebuilds
-  thousands of pipelines, so loads stutter every time.
+### What changed in the latest merge
+
+- **fxceless's newest work:** descriptor records the game copies as raw bytes
+  are mirrored (the first rooms render right), a much cheaper descriptor sync
+  (70-220 ms a frame down to a few), and a shader cache keyed on the
+  translator, so a rebuild no longer throws all translations away.
+  **Every shader that failed to translate on AMD before now does.**
+- **KLBF Lab's AMD fixes** (tested on an RX 9070 XT): 32-lane console shaders
+  run per half of AMD's 64-lane waves (fixes purple blocks), reductions per
+  half, a NaN guard on colour outputs, texture ranges kept through loading.
+
+### Known issues on AMD
+
+- **Series S mode loses the GPU** (see the warning above). Being looked at.
+- **The picture is still off:** glowing eyes, an over-exposed image and some
+  magenta patches.
+- **Memory.** The game commits about **27 GB**. Close heavy background apps
+  before a long run, or give Windows a larger page file, or it stops with
+  "memory allocation failed".
+- **The driver refuses one mesh pipeline**; its draws are missing.
+- **Pipelines are built again on each launch**, so loads stutter every time.
 
 ## Why this fork
 
@@ -140,7 +156,7 @@ in the history.
 
 **You need:** Windows 10/11, a CPU with AVX2, a Direct3D 12 GPU with shader
 model 6.6 and mesh shaders, Rust, the Visual Studio Build Tools (C++ and a
-Windows SDK), and **about 24 GB of free memory commit** for the game.
+Windows SDK), and **about 27 GB of free memory commit** for the game.
 
 ```powershell
 git clone https://github.com/GromX0/victory-fork
@@ -154,7 +170,10 @@ cargo build --release -p victory
 |---|---|
 | **Play** | `powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<game folder>\<the game's exe>"` |
 | **Record a run** | `powershell -ExecutionPolicy Bypass -File tools\fork-run.ps1 -GameExe "<...>" -Seconds 600` |
-| **Try the AMD profile** | the same with `-Profile amd`, and compare with a run without it |
+| **Other console mode** | the same with `-Console series-s` (renders less; on AMD it currently loses the GPU, see above) |
+
+The `-Profile amd` settings (relay off) ran at the same speed as the default on
+the RX 9070 and drew a worse picture, so the default is the one to use.
 
 `fork-run.ps1` works in the Windows PowerShell that comes with Windows. It
 records the machine and the GPU the game actually used, keeps a copy of the
@@ -170,7 +189,8 @@ Their machines, their numbers:
 
 | Fork | GPU | Reported |
 |---|---|---|
-| fxceless/victory-fork | RTX 4070 | prologue renders with HUD and input, 3-5 fps; shadowed areas black (ray-traced lighting does not run yet) |
+| fxceless/victory-fork | RTX 4070 | prologue renders with HUD and input; about 4.5-5 fps with defaults, 6-7 with its new frame-rate switches; shadowed areas black (ray-traced lighting does not run yet) |
+| PastiiJay/klbf-lab-beta (AMD branch) | RX 9070 XT (RDNA4) | first cell with walls and characters; 4.8-5.2 fps in Series X mode, about 7.3 fps in Series S mode with AMD FSR, 74 minutes without a device loss (on its own build) |
 | ezbyDev/victory-amd | RX 9060 XT (RDNA4) | 3D scenes at 1-3 fps, no device loss with its AMD settings |
 | ka1qux/victory-ka1qux | RX 7800 XT | 25-minute session, 12 runs without a crash, 2-3.5 fps |
 
@@ -182,14 +202,13 @@ what is new since the last check.
 
 ## Next
 
-1. Finish the RX 9070 runs: default against `-Profile amd`, each launched
-   twice, with enough free memory.
-2. Keep pipelines between launches, so a second start does not rebuild them.
-3. The shaders that do not translate, the refused mesh pipeline, and the
-   remaining hand ports: integer render targets the driver refuses, 46
-   dropped world programs, dispatches over 65,535 groups, sRGB views, partly
-   streamed textures.
-4. Then the measured bottleneck (memory copies, not the GPU), and light in
+1. Series S mode on AMD: find why the GPU is lost (leads: fills that no
+   longer wait for work in flight, and the game's FSR 4 passes).
+2. The picture: glowing eyes, over-exposure, magenta patches.
+3. Keep pipelines between launches, so a second start does not rebuild them.
+4. More of KLBF Lab's AMD work (walls, characters and faces, pipeline
+   pre-build), and the refused mesh pipeline.
+5. Then the measured bottleneck (memory copies, not the GPU), and light in
    shadowed areas.
 
 ## Credits
@@ -201,8 +220,8 @@ what is new since the last check.
   the authors of every fix taken from ezbyDev/victory-amd,
   ka1qux/victory-ka1qux, Slaktarn700/xs-proton, triippywhale/victory-fork,
   DesertGamer/VIctory-V2, TaynanGT/victory-windows, pablogonz12/Scarlight,
-  Zettrox/ztrx and upstream pull requests; their names stay on their
-  commits.
+  Zettrox/ztrx, PastiiJay/klbf-lab-beta (KLBF Lab's AMD fixes) and upstream
+  pull requests; their names stay on their commits.
 - **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only), which fxceless
   used as a reference; fixes inspired by it were written anew.
 
