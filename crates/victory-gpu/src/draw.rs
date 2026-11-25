@@ -1596,11 +1596,45 @@ impl State {
             );
         }
         let began = std::time::Instant::now();
+        let uploaded_before = HEAP_TEXTURES.load(Ordering::Relaxed);
         PASS_BUDGET.set(Some(budget));
         self.heap_textures(list, heap, host);
+        // A pass takes at most 4,096 slots, and a bake reads whatever its
+        // shader picks, once: before a bake the pass runs again for as long
+        // as slots were due and it uploaded some, within the bake's time.
+        // (With one pass the first bakes of a run met 4,400 to 6,800 slots
+        // due on a Radeon RX 7800 XT, and the clothes of the characters
+        // baked then stayed stained for the run.)
+        let mut passes = 1u32;
+        while bake {
+            let due = HEAP_TEXTURES_QUEUE[1].load(Ordering::Relaxed);
+            let spent = began.elapsed().as_millis() as u64;
+            if due == 0 || spent >= budget.0 || passes >= 64 {
+                break;
+            }
+            let before = HEAP_TEXTURES.load(Ordering::Relaxed);
+            PASS_BUDGET.set(Some((budget.0 - spent, budget.1)));
+            self.heap_textures(list, heap, host);
+            passes += 1;
+            if HEAP_TEXTURES.load(Ordering::Relaxed) == before {
+                break;
+            }
+        }
         PASS_BUDGET.set(None);
         if bake {
             baked_ms.fetch_add(began.elapsed().as_millis() as u64, Ordering::Relaxed);
+            if n.is_power_of_two() {
+                tracing::info!(
+                    frame,
+                    bakes = n,
+                    passes,
+                    uploaded = HEAP_TEXTURES.load(Ordering::Relaxed) - uploaded_before,
+                    due_at_the_last_pass = HEAP_TEXTURES_QUEUE[1].load(Ordering::Relaxed),
+                    waiting_for_their_memory = HEAP_TEXTURES_QUEUE[2].load(Ordering::Relaxed),
+                    ms = began.elapsed().as_millis() as u64,
+                    "textures picked by index uploaded before a draw of the decoration bake"
+                );
+            }
         }
         true
     }
