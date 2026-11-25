@@ -1,71 +1,99 @@
-# victory-fork (thomb2123): an AMD-focused integration fork
+# victory-fork: AMD-first integration of VIctory
 
-A work-in-progress fork of [VIctory](https://github.com/Marvisak/VIctory), a
-compatibility layer that runs an Xbox Series title natively on Windows from
-files the user supplies. It builds on
-[fxceless/victory-fork](https://github.com/fxceless/victory-fork) and gathers
-fixes from upstream and from other forks, with one aim: the game's world
-rendered correctly, stable and responsive on a **Windows PC with an AMD
-Radeon RX 9070 (RDNA4)**.
+A fork of [VIctory](https://github.com/Marvisak/VIctory), the compatibility
+layer that runs an Xbox Series title natively on Windows from files the
+user supplies. The goal here is narrow: the game's world rendered
+correctly, stable and responsive on a **Windows PC with an AMD Radeon
+RX 9070 (RDNA4)**, the kind of card most of the community work so far was
+not tested on.
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's
+**This repository contains no game files, code or assets.** You need your
+own copy of the game. Not affiliated with or endorsed by the game's
 developer or publisher.
 
-The work is on the branch **`dev/integrate-clean`**.
+Work happens on **`dev/integrate-clean`**.
+
+## Why this fork
+
+Dozens of forks now carry real fixes, each tested on one machine, many
+conflicting with one another, some trading rendering work for speed. This
+fork starts from [fxceless/victory-fork](https://github.com/fxceless/victory-fork)
+(the furthest-along renderer) and does the integration work for AMD:
+
+- **Every fork with work of its own was reviewed commit by commit** (17 so
+  far), and only fixes for a concrete failure were taken: device loss,
+  driver compiler crashes, missing geometry or textures, wrong shader
+  results, real speed costs. Changes that skip or fake rendering work were
+  left out; each decision and its reason is recorded in
+  [docs/fork-handoff.md](docs/fork-handoff.md).
+- **Fixes are made to work together, not just stacked.** Combining them
+  turned up problems none of the sources had on its own:
+  - The mesh shader index mask still included the triangle's edge-flag
+    bit, and this branch also culls triangles whose indices are out of
+    range: together, any triangle exported with an edge flag set was
+    dropped. Masked to the 9-bit index.
+  - A 64-bit compare fix for AMD (dword-wise compares) would have read
+    negative constants as large positive ones next to upstream's
+    sign-extension rule. Corrected and covered by a test.
+  - The AMD skip list for compute programs that crash the driver's
+    compiler only worked in diagnostics builds, and even there a skipped
+    program was still compiled ahead of time. Now honoured in every build.
+  - Helper lanes in pixel-shader waterfall loops could spin to the loop
+    limit (seconds per draw, then a GPU hang). The upstream fix did not
+    apply to this branch's lowering; ported by hand, with a test.
+  - fxceless's latest commits and two of the AMD picks failed the CI lint
+    gate; fixed, and a diagnostic one of them dropped was restored.
+- **AMD settings are checked against this code, not copied.** The relay
+  thread that one RDNA4 report blames for device loss is *on by default*
+  in this line (it was off where that report was made). The "AMD shader
+  option" that report recommends turns off three optimisation passes, not
+  the one it names. Its texture-queue switch names do not exist here. The
+  AMD run profile uses only switches whose meaning was verified in this
+  branch, and the notes ask for A/B runs where the reports disagree.
 
 ## Status (2026-11-25)
 
-**Not run on the target PC yet.** Everything below is either checked at
-build level or reported by the forks the fixes came from.
+**Not run on the target PC yet.** What is verified and what is reported
+are kept apart:
 
 | | |
 |---|---|
-| Builds (Windows target), both CI lint passes, test binaries link | checked (cross-built from Linux) |
-| Tests that run without Windows (shader translator, formats, ...) | pass: 187 translator tests and the rest |
-| GPU tests, the game itself | **not run yet**: they need the Windows machine |
+| Windows build, both CI lint passes, test binaries link | verified (cross-built) |
+| Shader translator and other host-independent tests | verified: all pass, 187 translator tests |
+| GPU tests and the game on the RX 9070 | **next** |
 
-What the fork's base reached on other machines (their reports, not ours):
+Reported by the forks this builds on (their machines, their numbers):
 
 | Fork | GPU | Reported |
 |---|---|---|
-| fxceless/victory-fork | RTX 4070 | prologue renders with HUD and input at 3-5 fps; shadowed areas black (ray-traced lighting does not run yet) |
+| fxceless/victory-fork | RTX 4070 | prologue renders with HUD and input, 3-5 fps; shadowed areas black (ray-traced lighting does not run yet) |
 | ezbyDev/victory-amd | RX 9060 XT (RDNA4) | 3D scenes at 1-3 fps, no device loss with its AMD settings |
-| ka1qux/victory-ka1qux | RX 7800 XT | 25-minute play session, 12 runs without a crash, about 2-3.5 fps |
+| ka1qux/victory-ka1qux | RX 7800 XT | 25-minute session, 12 runs without a crash, 2-3.5 fps |
 
-## What this fork adds on top of fxceless
+## What is in it
 
-**Taken from upstream VIctory** (about 30 fixes): sampler filtering the
-device supports, mesh triangle indices without their edge-flag bit (such
-triangles were dropped), helper lanes in waterfall loops (draws could spin
-for seconds and hang the GPU), several shader instructions and float
-fixes, the host device's removal reason, GPU-hang settings logged.
+About 60 fixes from upstream and other forks, plus this fork's own work
+above. By area:
 
-**Taken from other forks, each tested by its author on AMD unless noted:**
+- **Stability on AMD:** stale descriptor slots mirrored before each
+  submission (device loss 5-90 s into the world on an RX 9070 XT); shader
+  code that crashed AMD's compiler (optimiser handle reuse, buffer size
+  queries); 64-bit compares AMD's driver got wrong; a staging-buffer race
+  under the relay; R9G9B9E5 targets that lost the device.
+- **What is drawn:** mesh triangles with edge flags; textures uploaded
+  before the characters' bake (black skin and clothes); DirectStorage
+  page lists filled late (models and textures left unwritten); a dropped
+  deferred material; samplers the device supports; several shader
+  instruction and float fixes.
+- **Load times and stutter:** the pipeline library is saved safely and
+  often (a corrupt or lost library meant minutes of rebuilding); bounded
+  texture re-uploads.
+- **Frame time:** faster card-side compares, fewer barriers between
+  indirect draws, a late frame flips at once.
 
-- **victory-amd** (ezbyDev): the pipeline library is saved one save at a
-  time, by a thread of its own and on crash and exit (a corrupt or lost
-  library cost minutes of rebuilding); `VICTORY_SKIP_PIPELINES` works in
-  release builds.
-- **ka1qux and the RDNA3 forks:** textures uploaded before the characters'
-  bake (black skin and clothes), DirectStorage page lists filled late
-  (models and textures left unwritten), an AMD shader-compiler crash
-  guard, bounded texture re-uploads.
-- **xs-proton** (slaktarn, RX 9070 XT): descriptor slots the title rewrites
-  are mirrored before each submission (device loss 5-90 s into the world).
-- **triippywhale line:** the shader clean-up passes no longer produce code
-  that crashes AMD's compiler.
-- **VIctory-V2** (alexdeliu): 64-bit integer compares that AMD's driver
-  got wrong on an RX 9070.
-- **TaynanGT and upstream pull requests** (NVIDIA): a staging-buffer race
-  under the relay, faster card-side compares, fewer barriers between
-  indirect draws.
-- Smaller fixes from Scarlight, VIctory-V2 and others.
-
-Changes that skip or fake rendering work to gain speed were left out. The
-full list, with the source commit of every change and the reasons for
-what was not taken, is in [docs/fork-handoff.md](docs/fork-handoff.md).
-Every change keeps its author.
+Source commits and authors for each are in
+[docs/fork-handoff.md](docs/fork-handoff.md); every change keeps its
+author in the history.
 
 ## Running it
 
@@ -76,36 +104,47 @@ Direct3D 12 GPU with shader model 6.6 and mesh shaders, Rust.
 git clone https://github.com/thomb2123/victory-fork
 cd victory-fork
 git switch dev/integrate-clean
-copy victory.example.toml victory.toml        # set your paths, outside the repository
+copy victory.example.toml victory.toml        # your paths, outside the repository
 ```
 
-- Play: `powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<game folder>\<the game's exe>"`
-- A recorded run (build, machine details, logs and frame times kept
-  outside the repository): `pwsh tools\fork-run.ps1 -GameExe "<...>" -Seconds 600`
-- On AMD, try `-Profile amd` as well: the stability settings victory-amd
-  reports for RDNA4. Whether they are needed on an RX 9070 is not known
-  yet.
+- **Play:** `powershell -ExecutionPolicy Bypass -File scripts\play.ps1 -Game "<game folder>\<the game's exe>"`
+- **Recorded run:** `pwsh tools\fork-run.ps1 -GameExe "<...>" -Seconds 600`
+  builds, records the machine (GPU, driver, CPU), keeps a copy of the
+  build next to its logs and frame times, and clears leftover test
+  switches so the run is normal play.
+- **On AMD:** add `-Profile amd` (verified stability settings) and compare
+  with a run without it. `-AmdSkips` and `-Diag` are there for crash hunts.
 
-The first launch of each build is slow while shaders are translated and
-cached.
+Each new build translates its shaders once; time warm runs, not the first.
 
-## Tools for following other forks
+## Following other forks
 
-`tools/fork-watch.sh` lists, for every fork in `tools/fork-watch.txt`, the
-commits that neither upstream, fxceless nor this branch has.
+`tools/fork-watch.sh` fetches every fork in `tools/fork-watch.txt` and
+lists only the commits that neither upstream, fxceless nor this branch
+has, marking what is new since the last check.
+
+## Next
+
+1. First runs on the RX 9070: GPU tests, then the game with and without
+   the AMD profile.
+2. Hand ports still open: integer render targets the driver refuses,
+   46 dropped world programs, dispatches over 65,535 groups, sRGB views,
+   partly streamed textures.
+3. Then the measured bottleneck, and light in shadowed areas.
 
 ## Credits
 
 - **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: everything this is built on. GPL-3.0-or-later, as is this
+  contributors, the base of everything here. GPL-3.0-or-later, as is this
   fork.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**
-  and the forks named above, whose authors keep their names on their
-  commits here.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was used by
-  fxceless as a reference; fixes inspired by it were written anew.
-- This fork's integration work was done with
-  [Claude Code](https://claude.com/claude-code).
+- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**,
+  and the authors of every fix taken from ezbyDev/victory-amd,
+  ka1qux/victory-ka1qux, Slaktarn700/xs-proton, triippywhale/victory-fork,
+  DesertGamer/VIctory-V2, TaynanGT/victory-windows, pablogonz12/Scarlight,
+  Zettrox/ztrx and upstream pull requests; their names stay on their
+  commits.
+- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only), which fxceless
+  used as a reference; fixes inspired by it were written anew.
 
 Everything below this line is upstream VIctory's own README, unchanged; its
 status section describes upstream, not this fork.
