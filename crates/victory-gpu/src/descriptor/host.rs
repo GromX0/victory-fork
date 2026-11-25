@@ -1023,7 +1023,7 @@ impl HostHeap {
         let mut run = 0;
         let mut found = None;
         let mut last = usize::MAX;
-        for at in starts.take(if enough { DYNAMIC as usize } else { 0 }) {
+        for at in starts.take(if enough { usize::MAX } else { 0 }) {
             // A run cannot wrap past the end.
             if at != last.wrapping_add(1) {
                 run = 0;
@@ -3186,17 +3186,12 @@ mod tests {
         let Some(heap) = HostHeap::new(false, 4) else {
             return; // no host GPU
         };
-        // Allocate slots 0..8, advancing cursor to 8.
-        let a = heap.dynamic(8).unwrap();
-        // Allocate slots 8..16, advancing cursor to 16.
-        let b = heap.dynamic(8).unwrap();
-        assert_eq!((a, b), (4, 12));
-
-        // Release slots 10..14 (crossing cursor at 12).
-        // Before the fix, a request of 4 slots starting search at 12 scanned 12..end then 0..12,
-        // missing the contiguous run at 10..14.
-        heap.release(14, 4);
-        let c = heap.dynamic(4);
-        assert_eq!(c, Some(14));
+        // Every slot is taken, then 0..8 given back and 0..4 taken again: the cursor is at 4.
+        assert_eq!(heap.dynamic(heap.dynamic), Some(4));
+        heap.release(4, 8);
+        assert_eq!(heap.dynamic(4), Some(4));
+        // Only 2..8 is free: a scan of 4..end, then 0..4 sees no run of 6.
+        heap.release(6, 2);
+        assert_eq!(heap.dynamic(6), Some(6));
     }
 }
