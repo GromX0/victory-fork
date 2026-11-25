@@ -455,11 +455,20 @@ environment, stops 14-16 s into boot on the title's own `int 3` at image
 +0x4e52a40, called from the main loop at +0x5ab13e8). Not code: the
 same build booted at 17:21. Not the game files (none changed), the
 network or input devices (identical), disk space (99 GB free) or the
-graphics driver (no reset in the event log). Untested: the PC's uptime
-(the title stamps with it: 41.67 M ms at the failure, ~11.6 h; every
-boot below ~11 h worked) and anything else a restart resets. Next: a
-restart of Windows, then one boot of 01f194bf to confirm, then the KLBF
-runs and ours under the same conditions.
+graphics driver (no reset in the event log).
+
+**Cause found: no audio output device.** Saving the writer's bytes at
+the breakpoint (a temporary dump in `crash.rs`, removed again) showed
+0x17fb0 of 0x18000 bytes of 16-byte audio parameter records (ids
+0x04002821/0x04001019..., floats 2000.0, 1000.0, 23900.0, 0.55): the
+title's audio command queue, drained by its mixer, which runs from
+XAudio2 (`xaudio2_9.dll`, host-bound). Every playback endpoint of the
+PC was "not present" or "unplugged" (headphones, USB sound card, the
+monitors' DisplayPort audio); with none, XAudio2 processes nothing, the
+queue fills in ~14 s and the bounds check stops the title. A console
+always has an output. Fix for now: an active playback device. To do in
+the layer: a run without one must not stop the title (a silent output,
+or the mixer driven without a device).
 
 Captured frame 1637 (diag-look, 53c47a3a, 37 frames into the world,
 the opening cutscene's prison yard): sunlight, shadows, depth of field
