@@ -405,12 +405,25 @@ fn clamp_into(
     spec: (u32, u32, u32),
     ahead: bool,
 ) -> bool {
+    sources_read(list, src, count);
     let before = list.indirect_state(dst);
     let recorded = record_clamp_as(c, &list.list, (dst, before), budget, src, count, spec, ahead);
     if recorded {
         list.indirect_readable(dst);
     }
     recorded
+}
+
+/// The clamp is a command of its own that reads the title's arguments and
+/// count from their host copies (upstream VIctory #334's state tracking,
+/// [`crate::host::BufferStates`]): a pass that wrote them earlier in the
+/// list has its writes visible to the clamp.
+fn sources_read(list: &HostList, src: (&ID3D12Resource, u64), count: Option<(&ID3D12Resource, u64)>) {
+    list.begin_command();
+    list.buffer_state(src.0, crate::host::BUFFER_READ);
+    if let Some((c, _)) = count {
+        list.buffer_state(c, crate::host::BUFFER_READ);
+    }
 }
 
 /// Records the clamp into `dst`, which is in state `before` (common, or
@@ -704,6 +717,7 @@ pub(crate) fn check_hit(
     // (common before and after every check).
     let common = D3D12_RESOURCE_STATE_COMMON;
     let spec = (kind, step, 1);
+    sources_read(list, src, None);
     if !record_clamp_as(c, &list.list, (&check.args, common), budget, src, None, spec, true) {
         return false;
     }
