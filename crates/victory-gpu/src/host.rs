@@ -731,6 +731,9 @@ fn log_adapter(device: &ID3D12Device) {
                 "host device on {}",
                 String::from_utf16_lossy(&desc.Description[..len])
             );
+            // The translation leaves out what the host's compiler cannot take
+            // (`victory_shader::emit::set_host_vendor`), before the first one.
+            victory_shader::emit::set_host_vendor(desc.VendorId);
         }
         Err(error) => tracing::warn!(%error, "the host device's adapter could not be named"),
     }
