@@ -207,6 +207,29 @@ impl GraphicsState {
         )
     }
 
+    /// The state as the host takes it: [`fit_outputs`] applied to its blend
+    /// state and target formats (the same state where nothing needs it).
+    pub(crate) fn for_host(&self, blendable: impl Fn(DXGI_FORMAT) -> bool) -> GraphicsState {
+        let names = self.names.clone();
+        let inputs = self
+            .inputs
+            .iter()
+            .zip(&names)
+            .map(|(e, name)| D3D12_INPUT_ELEMENT_DESC {
+                SemanticName: PCSTR(name.as_ptr().cast()),
+                ..*e
+            })
+            .collect();
+        let (blend, targets) = fit_outputs(self.blend, self.targets, blendable);
+        GraphicsState {
+            blend,
+            targets,
+            inputs,
+            names,
+            ..*self
+        }
+    }
+
     fn depth1(&self) -> D3D12_DEPTH_STENCIL_DESC1 {
         let d = &self.depth;
         D3D12_DEPTH_STENCIL_DESC1 {
@@ -253,6 +276,64 @@ impl GraphicsState {
             })
             .collect()
     }
+}
+
+/// The title's blend state and target formats made acceptable to D3D12
+/// where the console takes them and does what they say (returned as they
+/// are otherwise):
+///
+/// - Blending on a target the host cannot blend into (the integer formats)
+///   is switched off for that target: GPUs do not blend integer targets
+///   (the AMD colour block bypasses blending for them; Vulkan and OpenGL
+///   say blending does not apply) and write the shader's value, which is
+///   what a target without blending does. D3D12 refuses the pipeline
+///   instead (`E_INVALIDARG`; debug layer message 676, "This format does
+///   not support blending"). A state that shares target 0's blending
+///   (`IndependentBlendEnable` off) is made independent first, with
+///   target 0's blending on every other target.
+/// - Formats past the target count are cleared: they are unused, and
+///   D3D12 refuses them (655, "RTVFormats[] must be DXGI_FORMAT_UNKNOWN
+///   for all indices >= NumRenderTargets").
+///
+/// For the windshield-wiper mask's mesh pipeline (mesh f5e50eb2108c425b,
+/// pixel ce3f0432a08f1d35), refused in every run: its pixel shader writes
+/// three targets, the third an integer one (`SV_Target2` is `uint`), and
+/// offline the translated pair is made with every state tried that D3D12
+/// allows (so the shaders, their signatures and our root signature are
+/// not the cause), refused only for states D3D12 refuses for a vertex
+/// pipeline too. Blending shared from target 0 is the likeliest of those;
+/// the run's state was not logged then (the refusal names it now).
+/// shortcut: a logic op on a target without logic ops (678) or a forced
+/// sample count with depth (672) are still refused; the console's results
+/// for those are not known.
+fn fit_outputs(
+    blend: D3D12_BLEND_DESC,
+    targets: D3D12_RT_FORMAT_ARRAY,
+    blendable: impl Fn(DXGI_FORMAT) -> bool,
+) -> (D3D12_BLEND_DESC, D3D12_RT_FORMAT_ARRAY) {
+    let (mut blend, mut targets) = (blend, targets);
+    let count = (targets.NumRenderTargets as usize).min(targets.RTFormats.len());
+    for f in &mut targets.RTFormats[count..] {
+        *f = DXGI_FORMAT_UNKNOWN;
+    }
+    let shared = !blend.IndependentBlendEnable.as_bool();
+    // (target 0 blends for every target when blending is shared)
+    let blends = |n: usize| blend.RenderTarget[if shared { 0 } else { n }].BlendEnable;
+    let refused: Vec<usize> = (0..count)
+        .filter(|&n| blends(n).as_bool() && !blendable(targets.RTFormats[n]))
+        .collect();
+    if refused.is_empty() {
+        return (blend, targets);
+    }
+    if shared {
+        let first = blend.RenderTarget[0];
+        blend.RenderTarget = [first; 8];
+        blend.IndependentBlendEnable = true.into();
+    }
+    for n in refused {
+        blend.RenderTarget[n].BlendEnable = false.into();
+    }
+    (blend, targets)
 }
 
 /// One input element: vertex buffer slot, byte offset, format.
@@ -569,9 +650,20 @@ impl HostPipeline {
                 state: String::new(),
             });
         }
-        let Some(g) = g else {
+        let Some(title) = g else {
             return refuse("graphics state not kept (plain description)", shaders);
         };
+        // The title's state, with what D3D12 refuses but the console carries
+        // out changed to what the console does (`fit_outputs`).
+        let fitted = title.for_host(|f| host.blendable(f));
+        if fitted.blend != title.blend || fitted.targets != title.targets {
+            tracing::info!(
+                ?shaders,
+                targets = ?title.targets,
+                "title state fitted for the host: no blending on integer targets (GPUs do not blend them), no formats past the count"
+            );
+        }
+        let g = &fitted;
         let depth_bounds = if g.depth_bounds {
             if host.depth_bounds() {
                 true
@@ -602,7 +694,7 @@ impl HostPipeline {
             let pso = match mesh_pipeline(&host.device, &root, code(0), code(1), g, depth_bounds, &name) {
                 Ok(pso) => pso,
                 Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host mesh pipeline refused");
+                    tracing::warn!(error = %e, ?shaders, %state, "host mesh pipeline refused");
                     host.log_messages();
                     return None;
                 }
@@ -708,7 +800,7 @@ impl HostPipeline {
         let pso = match made {
             Ok(pso) => pso,
             Err(e) => {
-                tracing::warn!(error = %e, ?shaders, "host pipeline refused");
+                tracing::warn!(error = %e, ?shaders, %state, "host pipeline refused");
                 host.log_messages();
                 return None;
             }
@@ -1071,6 +1163,124 @@ mod tests {
             super::super::library::LOADED.load(Ordering::Relaxed) > loaded,
             "the mesh pipeline was compiled again instead of loaded from the library"
         );
+    }
+
+    /// Three targets, the last an integer one, as the windshield-wiper
+    /// mask's pixel shader writes them, with target 0's blending shared by
+    /// all (`IndependentBlendEnable` off; the title's own blend state is not
+    /// known), and a stale format past the count.
+    fn three_targets_shared_blend() -> GraphicsState {
+        let mut g = GraphicsState::default();
+        g.depth.DepthEnable = false.into();
+        g.targets.NumRenderTargets = 3;
+        g.targets.RTFormats[0] = DXGI_FORMAT_R8_UNORM;
+        g.targets.RTFormats[1] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        g.targets.RTFormats[2] = DXGI_FORMAT_R8_UINT;
+        g.targets.RTFormats[3] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        let rt = &mut g.blend.RenderTarget[0];
+        rt.BlendEnable = true.into();
+        rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        rt.BlendOp = D3D12_BLEND_OP_MAX;
+        g
+    }
+
+    /// Blending is switched off on the integer target alone (target 0's
+    /// blending copied to the others first), formats past the count are
+    /// cleared, and a state D3D12 takes as it is stays as it is.
+    #[test]
+    fn host_state_stops_blending_only_where_the_host_cannot_blend() {
+        let not_uint = |f: DXGI_FORMAT| f != DXGI_FORMAT_R8_UINT;
+        let title = three_targets_shared_blend();
+        let host = title.for_host(not_uint);
+        let shared = title.blend.RenderTarget[0];
+        assert!(host.blend.IndependentBlendEnable.as_bool());
+        assert_eq!(host.blend.RenderTarget[0], shared);
+        assert_eq!(host.blend.RenderTarget[1], shared);
+        assert_eq!(
+            host.blend.RenderTarget[2],
+            D3D12_RENDER_TARGET_BLEND_DESC {
+                BlendEnable: false.into(),
+                ..shared
+            }
+        );
+        assert_eq!(host.targets.NumRenderTargets, 3);
+        assert_eq!(host.targets.RTFormats[..3], title.targets.RTFormats[..3]);
+        assert_eq!(host.targets.RTFormats[3], DXGI_FORMAT_UNKNOWN);
+        // Everything else is the title's.
+        assert_eq!(host.rasterizer, title.rasterizer);
+        assert_eq!(host.depth, title.depth);
+        assert_eq!(host.samples, title.samples);
+
+        // Independent blending: only the integer target changes.
+        let mut independent = three_targets_shared_blend();
+        independent.targets.RTFormats[3] = DXGI_FORMAT_UNKNOWN;
+        independent.blend.IndependentBlendEnable = true.into();
+        independent.blend.RenderTarget[2] = shared;
+        let host = independent.for_host(not_uint);
+        assert_eq!(host.blend.RenderTarget[..2], independent.blend.RenderTarget[..2]);
+        assert!(!host.blend.RenderTarget[2].BlendEnable.as_bool());
+
+        // Nothing to change: the same description (and pipeline name).
+        let mut fine = three_targets_shared_blend();
+        fine.targets.RTFormats[3] = DXGI_FORMAT_UNKNOWN;
+        fine.blend.IndependentBlendEnable = true.into();
+        let host = fine.for_host(not_uint);
+        assert_eq!(host.describe(), fine.describe());
+        let default = GraphicsState::default();
+        assert_eq!(default.for_host(not_uint).describe(), default.describe());
+    }
+
+    /// The windshield-wiper mask's pipeline, with shaders of our own: D3D12
+    /// refuses a mesh pipeline whose blending reaches an integer target
+    /// (`E_INVALIDARG`, as the title's was in every run), and makes it from
+    /// the state as the host takes it.
+    #[test]
+    fn a_mesh_pipeline_blending_into_an_integer_target_is_made() {
+        const MS3: &str = "struct V { float4 p : SV_Position; float4 c : TEXCOORD0; };
+            [outputtopology(\"triangle\")] [numthreads(1, 1, 1)]
+            void main(out vertices V v[3], out indices uint3 t[1]) {
+                SetMeshOutputCounts(3, 1);
+                v[0].p = float4(0, 0, 0, 1); v[0].c = 0;
+                v[1].p = float4(1, 0, 0, 1); v[1].c = 0;
+                v[2].p = float4(0, 1, 0, 1); v[2].c = 0;
+                t[0] = uint3(0, 1, 2);
+            }";
+        const PS3: &str = "struct O { float a : SV_Target0; float4 b : SV_Target1; uint c : SV_Target2; };
+            O main(float4 p : SV_Position, float4 c : TEXCOORD0) {
+                O o; o.a = c.x; o.b = c; o.c = 7; return o;
+            }";
+        let Some(host) = host() else {
+            return;
+        };
+        if !host.mesh_shaders() {
+            eprintln!("no host mesh shader support; skipped");
+            return;
+        }
+        let Some(dxc) = dxc() else {
+            eprintln!("no PC dxc.exe; skipped");
+            return;
+        };
+        assert!(!host.blendable(DXGI_FORMAT_R8_UINT));
+        assert!(host.blendable(DXGI_FORMAT_R8_UNORM));
+        assert!(host.blendable(DXGI_FORMAT_UNKNOWN));
+        let dir = tempfile::tempdir().unwrap();
+        let ms = compile(&dxc, dir.path(), MS3, "ms_6_5");
+        let ps = compile(&dxc, dir.path(), PS3, "ps_6_5");
+        let (root, root_blob) = root_signature(&host.device, &[], &[], false).unwrap();
+        let title = three_targets_shared_blend();
+        let fitted = title.for_host(|f| host.blendable(f));
+        for (label, g, made) in [("title", &title, false), ("host", &fitted, true)] {
+            let name = super::super::library::name(
+                &format!("mesh integer target test {label}"),
+                &root_blob,
+                &[&ms, &ps],
+                &g.describe(),
+            );
+            let result = mesh_pipeline(&host.device, &root, code(&ms), code(&ps), g, false, &name);
+            host.log_messages();
+            assert_eq!(result.is_ok(), made, "{label} state: {:?}", result.err());
+        }
     }
 
     const VS: &str = "float4 main(uint i : SV_VertexID) : SV_Position {

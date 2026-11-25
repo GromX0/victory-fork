@@ -5,7 +5,7 @@
 //! (unless `VICTORY_LATE_WAIT=1`, see [`late`]);
 //! overlap them with per-submission fences once more than clears run.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -3904,6 +3904,43 @@ fn hand_back(back: &[Declared]) {
 }
 
 impl Host {
+    /// Whether the host blends into render targets of `format` (true for
+    /// `UNKNOWN` and for a format the host does not answer for: such a state
+    /// is left as the title made it). Asked once per format.
+    pub(crate) fn blendable(&self, format: DXGI_FORMAT) -> bool {
+        const UNASKED: u8 = 0;
+        const YES: u8 = 1;
+        const NO: u8 = 2;
+        static KNOWN: [AtomicU8; 256] = [const { AtomicU8::new(UNASKED) }; 256];
+        let Some(known) = usize::try_from(format.0).ok().and_then(|i| KNOWN.get(i)) else {
+            return true;
+        };
+        if format == DXGI_FORMAT_UNKNOWN {
+            return true;
+        }
+        match known.load(Ordering::Relaxed) {
+            YES => return true,
+            NO => return false,
+            _ => {}
+        }
+        let mut support = D3D12_FEATURE_DATA_FORMAT_SUPPORT {
+            Format: format,
+            ..Default::default()
+        };
+        // SAFETY: writes `support` of the given size.
+        let asked = unsafe {
+            self.device.CheckFeatureSupport(
+                D3D12_FEATURE_FORMAT_SUPPORT,
+                (&raw mut support).cast(),
+                size_of_val(&support) as u32,
+            )
+        };
+        let blends = support.Support1.0 & D3D12_FORMAT_SUPPORT1_BLENDABLE.0 != 0;
+        let blendable = asked.is_err() || blends;
+        known.store(if blendable { YES } else { NO }, Ordering::Relaxed);
+        blendable
+    }
+
     /// Whether the host runs mesh shaders at shader model 6.6 (translated
     /// mesh shaders need both); logged once.
     pub(crate) fn mesh_shaders(&self) -> bool {
