@@ -57,6 +57,11 @@ param(
     [string]$Capture = '',
     [string]$CaptureFrames = '',
     [switch]$Targets,
+    # Scripted keys for an unattended run (VICTORY_KEYS, every build):
+    # '<seconds>:<key>,...', or 'start' for Enter every 5 s from 20 s to
+    # 150 s (past the start screen and the menus after it; the title skips
+    # nothing else with Enter/A on the way in).
+    [string]$Keys = '',
     # The run is stopped when the system's commit grows by more than this
     # many GB (a normal run takes ~25), when fewer than -CommitFreeMinGB are
     # left (0: not checked: Windows grows the page file only once commit is
@@ -92,6 +97,10 @@ if ($Capture) {
     $SetEnv['VICTORY_CAPTURE'] = $capFull
     if ($CaptureFrames) { $SetEnv['VICTORY_CAPTURE_FRAMES'] = $CaptureFrames }
     if ($Targets) { $SetEnv['VICTORY_DUMP_TARGETS'] = '1' }
+}
+if ($Keys) {
+    if ($Keys -eq 'start') { $Keys = ((20..150 | Where-Object { $_ % 5 -eq 0 }) | ForEach-Object { "${_}:Enter" }) -join ',' }
+    $SetEnv['VICTORY_KEYS'] = $Keys
 }
 
 $commit = (git -C $repo rev-parse HEAD).Trim()
