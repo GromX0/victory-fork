@@ -1,0 +1,18 @@
+# owner/repo  why it is watched (one per line; # comments)
+ezbyDev/victory-amd             tuned for AMD Radeon (RDNA)
+pablogonz12/Scarlight           AMD RDNA4 focus (check whether it is VIctory-based)
+ka1qux/victory-ka1qux           VIctory fork, mentions AMD
+DesertGamer/VIctory-V2          community-merged VIctory
+triippywhale/victory-fork       fxceless line; AMD view-heap clamp came from here
+alexanderskyequinn/victory-chapter-ii  continues fxceless
+FQY55kai/victory-gta6           fxceless + ported shader fixes
+mauri9911/leonida-victory       fxceless + victory-amd
+Joaco9020/mangrove              VIctory for 8 GB NVIDIA cards
+mravatins/victory-nv            tuned for NVIDIA
+shadany7824/LowVI               VIctory for low-end PCs
+Skillter/victory-fork-plus      fork of a fork
+qub3d2/victory-fork             VIctory fork
+TaynanGT/victory-windows        VIctory fork
+JordanFromIT/CGBJ-VIctory       VIctory on Linux (Proton)
+Slaktarn700/xs-proton           VIctory on Linux (Proton)
+Zettrox/ztrx                    fxceless line; launcher taken
