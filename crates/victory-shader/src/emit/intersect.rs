@@ -58,12 +58,23 @@ struct Ray {
     inverse: [V; 3],
 }
 
-/// `VICTORY_RT_MISS=1`: every ray-tracing node test finds no node (see
-/// [`Lower::bvh`]). Off by default. Part of the shader cache fingerprint
-/// (the build script lists every switch this crate reads).
+/// Whether every ray-tracing node test finds no node (see [`Lower::bvh`]).
+/// On unless `VICTORY_RT_MISS=0`, or the structure builder runs
+/// (`VICTORY_BVH_BUILDER=1`): without the builder the nodes are not a
+/// scene, and on the RX 9070 (2026-11-25) the cell was lit with it and
+/// dark without. Both switches are in the shader cache fingerprint (the
+/// build script lists every switch this crate reads).
 pub(crate) fn rt_miss() -> bool {
+    // The unit tests check the node test itself against the card.
+    if cfg!(test) {
+        return false;
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_RT_MISS").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        let builder = std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1");
+        let off = std::env::var_os("VICTORY_RT_MISS").is_some_and(|v| v == "0");
+        !builder && !off
+    })
 }
 
 impl<'a> Lower<'a> {
@@ -102,7 +113,7 @@ impl<'a> Lower<'a> {
         let Operand::Vector { reg: dst, .. } = *data else {
             return Err("a ray-tracing node test's result");
         };
-        // `VICTORY_RT_MISS=1`: the test finds no node (0xFFFFFFFF in each of
+        // `rt_miss` (on by default): the test finds no node (0xFFFFFFFF in each of
         // the four results, the hardware's "no child"), so every traversal
         // ends in a miss: shadow rays see nothing in the way and bounce rays
         // reach the sky. Without the structure builder
