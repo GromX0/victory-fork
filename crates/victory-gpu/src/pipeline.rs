@@ -406,7 +406,7 @@ pub(crate) fn making() -> u64 {
 static DROPS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 
 /// Shader hashes as printed in the pipeline diagnostics.
-#[cfg(all(windows, feature = "diagnostics"))]
+#[cfg(windows)]
 fn parse_skip_hashes(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -426,8 +426,14 @@ fn parse_skip_hashes(value: &str) -> Vec<String> {
         .collect()
 }
 
-#[cfg(all(windows, feature = "diagnostics"))]
-fn skipped_shader(p: &Pipeline) -> Option<&str> {
+/// The shader of `shaders` (a pipeline's) that `VICTORY_SKIP_PIPELINES` names, if any: its
+/// draws and dispatches are not run. Read in release builds too, empty
+/// unless set. On AMD's Windows drivers the host compile of compute shader
+/// 39f0e9aeb156a61c never finishes, and the driver's memory grows by about
+/// 240 MB a second while it waits for it: AMD users may want to skip it
+/// (`VICTORY_SKIP_PIPELINES=39f0e9aeb156a61c`).
+#[cfg(windows)]
+fn skipped_shader(shaders: &[Arc<Shader>]) -> Option<&str> {
     static HASHES: OnceLock<Vec<String>> = OnceLock::new();
     let hashes = HASHES.get_or_init(|| {
         let value = std::env::var("VICTORY_SKIP_PIPELINES").unwrap_or_default();
@@ -436,15 +442,15 @@ fn skipped_shader(p: &Pipeline) -> Option<&str> {
     if hashes.is_empty() {
         return None;
     }
-    p.shaders
+    shaders
         .iter()
         .find(|shader| hashes.contains(&shader.hash))
         .map(|shader| shader.hash.as_str())
 }
 
-#[cfg(all(windows, feature = "diagnostics"))]
+#[cfg(windows)]
 pub(crate) fn is_skipped(this: This) -> bool {
-    !this.is_null() && skipped_shader(pipeline(this)).is_some()
+    !this.is_null() && skipped_shader(&pipeline(this).shaders).is_some()
 }
 
 /// Counts a draw or dispatch of `this` intentionally skipped or dropped
@@ -455,7 +461,7 @@ pub(crate) fn note_drop(this: This) {
         Some("no pipeline set".to_owned())
     } else {
         let p = pipeline(this);
-        skipped_shader(p)
+        skipped_shader(&p.shaders)
             .map(|hash| format!("skipped shader {hash}"))
             .or_else(|| make::missing(&p.host))
     };
@@ -732,7 +738,7 @@ pub fn save_pipeline_cache_within(limit: std::time::Duration) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(windows, feature = "diagnostics"))]
+    #[cfg(windows)]
     #[test]
     fn skip_hashes_accepts_full_hashes_only() {
         assert!(super::parse_skip_hashes(" , ").is_empty());
