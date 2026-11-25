@@ -1652,18 +1652,20 @@ impl State {
         // due on a Radeon RX 7800 XT, and the clothes of the characters
         // baked then stayed stained for the run.)
         let mut passes = 1u32;
-        while bake {
-            let due = HEAP_TEXTURES_QUEUE[1].load(Ordering::Relaxed);
-            let spent = began.elapsed().as_millis() as u64;
-            if due == 0 || spent >= budget.0 || passes >= 64 {
-                break;
-            }
-            let before = HEAP_TEXTURES.load(Ordering::Relaxed);
-            PASS_BUDGET.set(Some((budget.0 - spent, budget.1)));
-            self.heap_textures(list, heap, host);
-            passes += 1;
-            if HEAP_TEXTURES.load(Ordering::Relaxed) == before {
-                break;
+        if bake {
+            loop {
+                let due = HEAP_TEXTURES_QUEUE[1].load(Ordering::Relaxed);
+                let spent = began.elapsed().as_millis() as u64;
+                if due == 0 || spent >= budget.0 || passes >= 64 {
+                    break;
+                }
+                let before = HEAP_TEXTURES.load(Ordering::Relaxed);
+                PASS_BUDGET.set(Some((budget.0 - spent, budget.1)));
+                self.heap_textures(list, heap, host);
+                passes += 1;
+                if HEAP_TEXTURES.load(Ordering::Relaxed) == before {
+                    break;
+                }
             }
         }
         PASS_BUDGET.set(None);

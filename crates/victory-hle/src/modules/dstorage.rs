@@ -1123,6 +1123,8 @@ fn into_destination(
         first = format_args!("{:#x}", pages.first().copied().unwrap_or(0)),
         options = format_args!("{:#x}", request.options),
         unfilled = pages.contains(&0),
+        // every page known: then the host failed, not the list
+        known = super::xmem::pages_known(&pages, offset, len),
         waited_ms = waited.as_millis() as u64,
         "dstorage: a destination's physical pages could not be written (unknown page or a host failure); its request fails"
     );
