@@ -409,7 +409,7 @@ impl Host {
         }
         // SAFETY: the description points at live data.
         let pso = unsafe { self.device.CreateGraphicsPipelineState(&desc) };
-        pso.map_err(err)
+        pso.map_err(|e| self.explained(e))
     }
 
     /// A mesh pipeline from a mesh and a pixel shader (user data of the mesh
@@ -519,7 +519,7 @@ impl Host {
         };
         let device: ID3D12Device2 = self.device.cast().map_err(err)?;
         // SAFETY: the stream points at live data and outlives the call.
-        unsafe { device.CreatePipelineState(&desc) }.map_err(err)
+        unsafe { device.CreatePipelineState(&desc) }.map_err(|e| self.explained(e))
     }
 }
 
