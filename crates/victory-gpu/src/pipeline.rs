@@ -400,6 +400,14 @@ pub(crate) fn making() -> u64 {
     make::waiting()
 }
 
+/// Whether the title pipeline `this` has no host pipeline yet because it is
+/// not made yet (a draw or dispatch with it is then dropped for want of
+/// one being made, not for one that cannot be made).
+#[cfg(windows)]
+pub(crate) fn being_made(this: This) -> bool {
+    !this.is_null() && pipeline(this).host.pending()
+}
+
 /// Draws and dispatches dropped since the last [`take_drops`], by reason
 /// (diagnostics).
 #[cfg(all(windows, feature = "diagnostics"))]
@@ -434,11 +442,7 @@ fn parse_skip_hashes(value: &str) -> Vec<String> {
 /// (`VICTORY_SKIP_PIPELINES=39f0e9aeb156a61c`).
 #[cfg(windows)]
 fn skipped_shader(shaders: &[Arc<Shader>]) -> Option<&str> {
-    static HASHES: OnceLock<Vec<String>> = OnceLock::new();
-    let hashes = HASHES.get_or_init(|| {
-        let value = std::env::var("VICTORY_SKIP_PIPELINES").unwrap_or_default();
-        parse_skip_hashes(&value)
-    });
+    let hashes = skip_hashes();
     if hashes.is_empty() {
         return None;
     }
@@ -446,6 +450,16 @@ fn skipped_shader(shaders: &[Arc<Shader>]) -> Option<&str> {
         .iter()
         .find(|shader| hashes.contains(&shader.hash))
         .map(|shader| shader.hash.as_str())
+}
+
+/// The shader hashes `VICTORY_SKIP_PIPELINES` names.
+#[cfg(windows)]
+fn skip_hashes() -> &'static [String] {
+    static HASHES: OnceLock<Vec<String>> = OnceLock::new();
+    HASHES.get_or_init(|| {
+        let value = std::env::var("VICTORY_SKIP_PIPELINES").unwrap_or_default();
+        parse_skip_hashes(&value)
+    })
 }
 
 #[cfg(windows)]
@@ -736,6 +750,134 @@ pub fn save_pipeline_cache_within(limit: std::time::Duration) -> bool {
     library::save_within(limit)
 }
 
+#[cfg(windows)]
+pub use make::Warmed;
+
+/// Stage names as pipelines name them (`&'static` for [`Shader`]).
+#[cfg(windows)]
+const STAGE_NAMES: [&str; 8] = ["vertex", "pixel", "domain", "hull", "geometry", "compute", "amplification", "mesh"];
+
+/// A title pipeline an earlier run drew with or started early, as that run
+/// described it (the description file beside the pipeline library): for
+/// the warm-up (`victory warm`), which makes it into the library before a
+/// run, from the title's own shader containers and through the code a run
+/// makes it with, so under the name that run looks it up by.
+#[cfg(windows)]
+pub struct Described {
+    key: String,
+    /// Stage and whole content hash of each shader container.
+    shaders: Vec<(&'static str, [u8; 32])>,
+    /// The encoded graphics state (`host::GraphicsState::encode`); `None`
+    /// for a compute pipeline.
+    state: Option<String>,
+}
+
+#[cfg(windows)]
+impl Described {
+    /// The description `text` of the pipeline listed as `key`
+    /// (`make::Pending::description`); `None` for other text.
+    fn parse(key: &str, text: &str) -> Option<Described> {
+        let (shaders, state) = text.split_once('\t')?;
+        let shaders = (shaders.split(','))
+            .map(|s| {
+                let (stage, hash) = s.split_once('=')?;
+                let stage = STAGE_NAMES.iter().copied().find(|&n| n == stage)?;
+                if hash.len() != 64 {
+                    return None;
+                }
+                let mut full = [0u8; 32];
+                for (i, b) in full.iter_mut().enumerate() {
+                    *b = u8::from_str_radix(hash.get(2 * i..2 * i + 2)?, 16).ok()?;
+                }
+                Some((stage, full))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!shaders.is_empty()).then(|| Described {
+            key: key.to_owned(),
+            shaders,
+            state: (state != "-").then(|| state.to_owned()),
+        })
+    }
+
+    /// The key the run listed it by (its shaders and state, as that build
+    /// named them).
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The whole content hashes of its shader containers.
+    pub fn shaders(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.shaders.iter().map(|(_, hash)| hash)
+    }
+
+    /// Its shaders as a run's log names them.
+    pub fn label(&self) -> String {
+        let names: Vec<String> = (self.shaders.iter())
+            .map(|(stage, hash)| format!("{stage} {}", &blake3::Hash::from_bytes(*hash).to_hex()[..16]))
+            .collect();
+        format!("[{}]", names.join(", "))
+    }
+
+    /// The hash of its shader that `VICTORY_SKIP_PIPELINES` names, if any:
+    /// a run does not make it, so neither does the warm-up.
+    pub fn skipped(&self) -> Option<String> {
+        let hashes = skip_hashes();
+        self.shaders.iter().find_map(|(_, hash)| {
+            let short = blake3::Hash::from_bytes(*hash).to_hex()[..16].to_owned();
+            hashes.contains(&short).then_some(short)
+        })
+    }
+
+    /// Makes its host pipeline into the library from the containers
+    /// `container` finds by their whole content hash (as the title passes
+    /// them: the container's own bytes); why not, for a container not found
+    /// or a state that does not read.
+    pub fn warm<'a>(&self, container: impl Fn(&[u8; 32]) -> Option<&'a [u8]>) -> Result<Warmed, &'static str> {
+        let p = self.pending(container)?;
+        // This build names it otherwise (formats converted otherwise): the
+        // next run asks for it by the new key, so it is listed by that too.
+        if p.key() != self.key && library::wanted_early(&self.key) {
+            library::note_used(p.key());
+            library::note_description(p.key(), || p.description());
+        }
+        Ok(make::warm(&p))
+    }
+
+    /// What it is made from, as the title's creation of it would give it.
+    fn pending<'a>(&self, container: impl Fn(&[u8; 32]) -> Option<&'a [u8]>) -> Result<make::Pending, &'static str> {
+        let mut shaders = Vec::with_capacity(self.shaders.len());
+        for (stage, hash) in &self.shaders {
+            let bytes = container(hash).ok_or("a shader container not found in the title's files")?;
+            if blake3::hash(bytes).as_bytes() != hash {
+                return Err("a shader container whose bytes are not the ones described");
+            }
+            shaders.push(shader(stage, bytes));
+        }
+        let graphics = match &self.state {
+            Some(text) => Some(Box::new(host::GraphicsState::decode(text).ok_or("a graphics state that does not read")?)),
+            None => None,
+        };
+        Ok(make::Pending::new(shaders, graphics))
+    }
+}
+
+/// Every title pipeline earlier runs described ([`Described`]), from the
+/// folder [`use_pipeline_cache`] named.
+#[cfg(windows)]
+pub fn described() -> Vec<Described> {
+    library::descriptions()
+        .iter()
+        .filter_map(|(key, text)| Described::parse(key, text))
+        .collect()
+}
+
+/// Title pipelines listed for an early start, from the folder
+/// [`use_pipeline_cache`] named.
+#[cfg(windows)]
+pub fn early_listed() -> usize {
+    library::early_count()
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
@@ -852,6 +994,81 @@ mod tests {
                 (g.targets.NumRenderTargets, g.targets.RTFormats[0].0),
                 (1, 28)
             );
+        }
+    }
+
+    /// What a run describes of a pipeline reads back, with the containers
+    /// found by their hashes, as the same pipeline: the same key (so the
+    /// same shaders and state, and the same name in the library).
+    #[cfg(windows)]
+    #[test]
+    fn a_described_pipeline_reads_back_as_itself() {
+        use windows::Win32::Graphics::Direct3D12::*;
+        let (vs, ps) = ([7u8; 9], [5u8; 6]);
+        let names = [c"POSITION", c"TEXCOORD"];
+        // Formats the host converts (118: a console depth format) and one
+        // it keeps (2), in two slots.
+        let elements = [
+            D3D12_INPUT_ELEMENT_DESC {
+                SemanticName: windows::core::PCSTR(names[0].as_ptr().cast()),
+                SemanticIndex: 0,
+                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(2),
+                InputSlot: 0,
+                AlignedByteOffset: 0,
+                InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+            D3D12_INPUT_ELEMENT_DESC {
+                SemanticName: windows::core::PCSTR(names[1].as_ptr().cast()),
+                SemanticIndex: 3,
+                Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT(118),
+                InputSlot: 1,
+                AlignedByteOffset: D3D12_APPEND_ALIGNED_ELEMENT,
+                InputSlotClass: D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA,
+                InstanceDataStepRate: 1,
+            },
+        ];
+        let layout = D3D12_INPUT_LAYOUT_DESC {
+            pInputElementDescs: elements.as_ptr(),
+            NumElements: elements.len() as u32,
+        };
+        let mut stream = [0u8; 0x80];
+        let mut put = |at: usize, v: u64| stream[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        // Vertex and pixel shader, input layout, topology, depth format.
+        for (at, kind) in [(0x00, 1), (0x18, 2), (0x30, 12), (0x48, 14), (0x50, 16)] {
+            put(at, kind);
+        }
+        put(0x08, vs.as_ptr() as u64);
+        put(0x10, vs.len() as u64);
+        put(0x20, ps.as_ptr() as u64);
+        put(0x28, ps.len() as u64);
+        put(0x38, (&raw const layout) as u64);
+        put(0x48, 14 | 4 << 32);
+        put(0x50, 16 | 119 << 32);
+        let desc = StreamDesc {
+            size: 0x58,
+            stream: stream.as_ptr(),
+        };
+        let mut p = std::ptr::null();
+        assert_eq!(create_stream(std::ptr::null(), &desc, &PIPELINE_IIDS[0], &mut p), S_OK);
+        let host = &pipeline(p).host;
+        let text = host.description();
+        let described = Described::parse(host.key(), &text).expect("a description that reads");
+        assert_eq!(described.shaders().count(), 2);
+        let containers: HashMap<[u8; 32], Vec<u8>> =
+            [&vs[..], &ps[..]].map(|c| (*blake3::hash(c).as_bytes(), c.to_vec())).into_iter().collect();
+        let again = described.pending(|h| containers.get(h).map(Vec::as_slice)).expect("its containers");
+        assert_eq!(again.key(), host.key(), "the same pipeline, by the key a run lists it by");
+        assert_eq!(again.description(), text);
+        // A container that is not the one described is not taken for it.
+        assert!(described.pending(|_| Some(&[1u8, 2, 3][..])).is_err());
+        assert!(described.pending(|_| None).is_err());
+        // Compute: no state.
+        let compute = Described::parse(&"0".repeat(32), &format!("compute={}\t-", blake3::hash(&vs).to_hex())).unwrap();
+        assert!(compute.state.is_none());
+        assert_eq!(compute.label(), format!("[compute {}]", &blake3::hash(&vs).to_hex()[..16]));
+        for bad in ["", "-", "vertex=00\t-", "warp=	-", "vertex=zz\t-"] {
+            assert!(Described::parse(&"0".repeat(32), bad).is_none(), "{bad:?}");
         }
     }
 }

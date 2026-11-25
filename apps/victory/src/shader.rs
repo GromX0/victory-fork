@@ -19,11 +19,20 @@ pub(crate) enum Source<'a> {
 }
 
 impl Source<'_> {
-    /// The container bytes; `None` if a packed record is corrupt.
+    /// The container bytes, as far as the container's own size (as the
+    /// title passes them, so that their hash is the one a run names the
+    /// shader by); `None` if a packed record is corrupt. A container stored
+    /// as is used to run to the end of its file: hashed, it matched no
+    /// shader of a run, and the warm-up translated the whole rest of the
+    /// executable as each one.
     pub(crate) fn bytes(&self) -> Option<Cow<'_, [u8]>> {
         match self {
-            Source::Raw { data, .. } => Some(Cow::Borrowed(data)),
-            Source::Packed(r) => r.unpack().map(Cow::Owned),
+            Source::Raw { data, .. } => Some(Cow::Borrowed(own_size(data))),
+            Source::Packed(r) => r.unpack().map(|mut bytes| {
+                let size = own_size(&bytes).len();
+                bytes.truncate(size);
+                Cow::Owned(bytes)
+            }),
         }
     }
 
@@ -33,6 +42,15 @@ impl Source<'_> {
             Source::Packed(r) => format!("@{:#x} {}", r.offset, r.name.unwrap_or("?")),
         }
     }
+}
+
+/// A container's bytes up to the size its header gives (at 0x18); all of
+/// `data` if it gives none or more than there is.
+fn own_size(data: &[u8]) -> &[u8] {
+    let size = data
+        .get(0x18..0x1c)
+        .map_or(data.len(), |b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    &data[..size.min(data.len())]
 }
 
 /// The packed records of SGD5 data, and every container stored as is (the

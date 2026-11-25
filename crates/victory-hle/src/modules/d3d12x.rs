@@ -52,6 +52,13 @@ pub fn warm_shader(container: &[u8]) -> Result<bool, String> {
     }
 }
 
+/// For the pipeline warm-up (`victory warm`): the title pipelines earlier
+/// runs described, made into the pipeline library ahead of a run.
+#[cfg(windows)]
+pub use victory_gpu::pipeline::{
+    Described, Warmed, described as described_pipelines, early_listed, save_pipeline_cache_within,
+};
+
 /// Keeps the host's translations of the title's shaders in `dir` (a
 /// folder of the cache) across runs, and its compiled pipelines beside it
 /// (`pipelines`).

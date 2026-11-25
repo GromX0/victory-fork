@@ -66,6 +66,52 @@ impl Pending {
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         done.notify_all();
     }
+
+    /// What it is made from, as the warm-up reads it back
+    /// (`super::Described`): each shader's stage and whole content hash,
+    /// then a tab and the graphics state (`GraphicsState::encode`; `-` for
+    /// none).
+    pub(crate) fn description(&self) -> String {
+        let shaders: Vec<String> = (self.shaders.iter())
+            .map(|s| format!("{}={}", s.stage, blake3::hash(&s.container).to_hex()))
+            .collect();
+        let state = self.graphics.as_ref().map_or_else(|| "-".to_owned(), |g| g.encode());
+        format!("{}\t{state}", shaders.join(","))
+    }
+
+    /// What identifies it across runs (see [`Pending::new`]).
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// Whether its host pipeline is not made yet (queued, being made, or
+    /// not asked for).
+    pub(crate) fn pending(&self) -> bool {
+        self.made.get().is_none()
+    }
+}
+
+/// What making a pipeline ahead of a run came to ([`warm`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Warmed {
+    /// It was in the library already.
+    Loaded,
+    /// It was made, and stored in the library.
+    Made,
+    /// It has no host pipeline (a shader that does not translate, or the
+    /// host refused it): a run drops its draws too.
+    Refused,
+}
+
+/// Makes `p`'s host pipeline on this thread as a run's worker would, into
+/// the library (the warm-up), and lets it go.
+pub(crate) fn warm(p: &Pending) -> Warmed {
+    let _ = super::library::take_from_library();
+    match HostPipeline::new(&p.shaders, p.graphics.as_deref()) {
+        None => Warmed::Refused,
+        Some(_) if super::library::take_from_library() == Some(true) => Warmed::Loaded,
+        Some(_) => Warmed::Made,
+    }
 }
 
 /// Why a pipeline has no host pipeline (diagnostics): its shaders that do
@@ -119,9 +165,11 @@ pub(crate) fn waiting() -> u64 {
 /// queues it on first use.
 pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
     // A still-pending pipeline was requested by the title too. Prewarm it
-    // on the next launch, even if this run never got to use it.
+    // on the next launch, even if this run never got to use it, and keep
+    // what it is made from for the warm-up.
     if !p.used.load(Ordering::Relaxed) && !p.used.swap(true, Ordering::Relaxed) {
         super::library::note_used(&p.key);
+        super::library::note_description(&p.key, || p.description());
     }
     if p.made.get().is_none() {
         start(p, REQUESTED);
@@ -149,6 +197,8 @@ pub(crate) fn early(p: &Arc<Pending>) {
     }
     if !p.shaders.is_empty() && super::library::wanted_early(&p.key) {
         super::library::EARLY.fetch_add(1, Ordering::Relaxed);
+        // Listed by an earlier run, maybe before descriptions were kept.
+        super::library::note_description(&p.key, || p.description());
         start(p, EARLY);
     }
 }
