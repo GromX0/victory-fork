@@ -750,7 +750,7 @@ fn found(
     desc: &BuildDesc,
     geometry: &[Geometry],
     rehydrate: bool,
-    read_header: impl Fn(u64) -> Option<(u64, u64)>,
+    read_header: impl Fn(u64) -> Option<u64>,
 ) -> Found {
     let inputs = &desc.inputs;
     let prims = primitives(inputs, geometry);
@@ -818,9 +818,9 @@ fn found(
             by: SizedBy::Earlier,
         };
     }
-    if let Some(extent) = read_header(desc.dest) {
+    if let Some(bytes) = read_header(desc.dest) {
         return Found {
-            dest: Some(extent),
+            dest: Some((0, bytes)),
             scratch,
             by: SizedBy::Header,
         };
@@ -835,12 +835,13 @@ fn found(
     )
 }
 
-/// The structure header at title address `at`: its extent, if it holds a
-/// plausible one.
-fn header_at(at: u64) -> Option<(u64, u64)> {
+/// The structure header at title address `at`: the bytes from it the
+/// structure spans, if it holds a plausible one (nothing before it is the
+/// structure's: `victory_gpu::bvhguard::header_size`).
+fn header_at(at: u64) -> Option<u64> {
     let mut bytes = [0u8; 64];
     victory_gpu::bvhguard::read_title(at, &mut bytes)
-        .then(|| victory_gpu::bvhguard::header_extent(&bytes))
+        .then(|| victory_gpu::bvhguard::header_size(&bytes))
         .flatten()
 }
 
@@ -1808,7 +1809,7 @@ mod tests {
         }
     }
 
-    const NO_HEADER: fn(u64) -> Option<(u64, u64)> = |_| None;
+    const NO_HEADER: fn(u64) -> Option<u64> = |_| None;
 
     /// The tiers seen in run `20261125-130040`: bottom levels whose query
     /// does not match exactly (index format 53) but has the same level,
@@ -1856,11 +1857,11 @@ mod tests {
             (None, None, SizedBy::Nothing)
         );
         // A rehydration in place: its header.
-        let header = |at: u64| (at == 0x400).then_some((256, 4096));
+        let header = |at: u64| (at == 0x400).then_some(4096);
         let rehydrated = found(&state, &desc(0x400, inputs(1, 0x14, 25)), &[], true, header);
         assert_eq!(
             (rehydrated.dest, rehydrated.by),
-            (Some((256, 4096)), SizedBy::Header)
+            (Some((0, 4096)), SizedBy::Header)
         );
         // An update of a structure built before: its extent, and the
         // update's scratch.
@@ -2009,5 +2010,54 @@ mod check_tests {
         assert_eq!(class_of(&s), 2);
         s.top = true;
         assert_eq!(class_of(&s), 0);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod crash_tests {
+    use super::*;
+
+    /// Run `20261125-192940`: a rehydration in place at 0xcea500100 whose
+    /// header has 834,816 bytes from it and -28,096 at 0x38. The title's
+    /// pointer that held floats lay 0xe00 bytes before the header, in the
+    /// 1 MiB block before. The call's writes start at its header.
+    #[test]
+    fn a_rehydration_writes_from_its_header_on() {
+        let mut memory = vec![0u8; 0x1000];
+        let header = 0x800;
+        memory[header..header + 4].copy_from_slice(&(0x8000_0004u32).to_le_bytes());
+        memory[header + 4..header + 8].copy_from_slice(&(834_816u32 / 64 - 1).to_le_bytes());
+        memory[header + 0x38..header + 0x3c].copy_from_slice(&(-28_096i32).to_le_bytes());
+        let dest = memory.as_ptr() as u64 + header as u64;
+        let desc = BuildDesc {
+            dest,
+            inputs: Inputs {
+                kind: 1,
+                flags: 0x14,
+                count: 0,
+                layout: 0,
+                descs: 0,
+            },
+            source: dest,
+            scratch: 0,
+        };
+        let mut state = State::new();
+        let (mut writes, mut reads) = (Vec::new(), Vec::new());
+        // SAFETY: no geometry descriptions to read (count 0).
+        unsafe { note_desc(&mut state, &desc, true, None, &mut writes, &mut reads) };
+        assert_eq!(
+            writes,
+            vec![Named {
+                at: dest,
+                bytes: Some(834_816)
+            }]
+        );
+        let stray = dest - 0xe00 + 0x18;
+        assert!(
+            !writes
+                .iter()
+                .any(|w| w.at <= stray && stray < w.at + w.bytes.unwrap_or(0))
+        );
+        assert_eq!(state.structures[&dest].extent, Some((0, 834_816)));
     }
 }

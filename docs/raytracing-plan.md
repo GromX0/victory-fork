@@ -476,6 +476,38 @@ The original plan for this step:
 - Time the 64 traversal programs and the builder's dispatches separately in
   the frame line, so that cost is known per pass on the RX 9070.
 
+### The first builder-on run with the guard (`20261125-192940`)
+
+**What happened.** The builder ran (53 pipelines). About 1.5 s later the
+title faulted. The fault was in a function at title RVA 0x55ceb20 that
+reads `[rcx + rdx*8]`, with `rcx = 0x5f6951797f800000`. That address is
+not canonical: Windows reports it as a read of 0xffffffffffffffff. So the
+title read float data as a pointer (+inf in its low dword), as in the
+crash without the guard. Nothing read all-ones back.
+
+**Where the pointer was.** It is field +0x18 of an object at 0x6ea4ff300
+(caller at RVA 0x37c9f). Its twin `+0x6_0000_0000`, 0xcea4ff318, lay
+0xe00 bytes below the header of a rehydrated structure at 0xcea500100,
+whose key was 0x6ea500100. That is in the 1 MiB block before the
+structure's own.
+
+**Why the guard let it through.** The guard's range for that rehydration
+was the header's size plus 28,096 bytes before it, because the header's
+dword at 0x38 was read as a negative offset to parent pointers. It is
+not one, or not in this memory. So the guard let a store into another
+object's memory reach the title.
+
+**Fixes (this commit).**
+- Rehydration and update ranges start at the header
+  (`bvhguard::header_size`).
+- The second cause: `DispatchX` with flag 0x20 (`USE_THREAD_DIMENSIONS`,
+  counts in threads), which the builder uses, was dispatched as that many
+  groups. That is up to 64 times the threads, and the extra ones store past
+  their arrays. The host now dispatches the groups that hold the threads.
+  This is the host half of fork PR #646. Its translator half, masking the
+  extra lanes of a last partial group, is still to port. It re-keys the
+  shader cache.
+
 ## The first in-game test for the main session
 
 Build `agent/rt`, or cherry-pick its commits. Then run once with the current
