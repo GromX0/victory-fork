@@ -2108,7 +2108,7 @@ impl Drop for Deferred {
 ///    ([`late_blocked`]);
 /// 3. the next submission refreshes a range of a host copy that a flight's
 ///    shaders may write, and the title wrote a page of it since it was last
-///    copied ([`stale_under_flights`]): the refresh leaves such a range
+///    copied ([`stale_spans`]): the refresh leaves such a range
 ///    alone until the flight's writes are back, as it always did within a
 ///    submission;
 /// 4. a queue stands at a wait for a memory value that no flight's
@@ -3185,11 +3185,16 @@ mod fill_check {
 }
 
 /// With flights in the air, after the submission's write-watch asking:
-/// whether `runs` refresh a range of a host copy that a flight's shaders
-/// may write and that the title wrote since it was last copied. The
-/// refresh leaves ranges shaders are writing alone (`Shadow::update`), so
-/// the title's bytes there would reach the card a submission late.
-fn stale_under_flights(runs: &[&HostList]) -> bool {
+/// the spans of title memory (address, end) where `runs` refresh a range
+/// of a host copy that a flight's shaders may write and that the title
+/// wrote since it was last copied, and (with [`late_exact`]) the title's
+/// bytes cannot be put in beside the shaders'. The refresh leaves ranges
+/// shaders are writing alone (`Shadow::update`), so the title's bytes
+/// there would reach the card a submission late: the flights that
+/// declared writes there must land first. With `all` every span is looked
+/// at (and merged where it can be); without, the first such span ends the
+/// look, as a settle of every flight follows.
+fn stale_spans(runs: &[&HostList], all: bool) -> Vec<(usize, usize)> {
     use std::sync::Arc;
     // Per copy, the span of what is refreshed (a flush brings that much
     // up to date at most).
@@ -3218,9 +3223,64 @@ fn stale_under_flights(runs: &[&HostList]) -> bool {
         let mut runs_left = *RUNS.get_or_init(|| {
             std::env::var("VICTORY_MERGE_RUNS").ok().and_then(|v| v.trim().parse::<usize>().ok()).map_or(512, |n| n.clamp(1, 1 << 16))
         });
-        return spans.iter().any(|(shadow, from, to)| shadow.merge_under_writes(*from, *to - *from, &mut runs_left));
+        return first_or_all(&spans, all, |(shadow, from, to)| shadow.merge_under_writes(*from, *to - *from, &mut runs_left));
     }
-    spans.iter().any(|(shadow, from, to)| shadow.stale_under_writes(*from, *to - *from))
+    first_or_all(&spans, all, |(shadow, from, to)| shadow.stale_under_writes(*from, *to - *from))
+}
+
+/// The spans (address, end) of those of `spans` that `stale` says are
+/// stale, in order: all of them, or (without `all`) the first alone.
+fn first_or_all<T>(
+    spans: &[(T, usize, usize)],
+    all: bool,
+    mut stale: impl FnMut(&(T, usize, usize)) -> bool,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    for span in spans {
+        if stale(span) {
+            out.push((span.1, span.2));
+            if !all {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// `VICTORY_STALE_OVERLAP=1`: where the title changed memory that flights'
+/// shaders may be writing and the refresh cannot put its bytes in beside
+/// them ([`stale_spans`]: memory that is not write-watched, a missing
+/// snapshot, more changed runs than `VICTORY_MERGE_RUNS` for copies in the
+/// card's memory), the submitting thread waits until the flights that
+/// declared writes there have landed, not until everything in the air
+/// has. Off by default; only with the relay's second stage
+/// ([`relay_exact`]), which waits the same way for title memory read.
+///
+/// Landing is in order, so the wait also covers every flight ahead of
+/// those; the flights behind them stay in the air while the submission is
+/// prepared. Once they have landed their copy-back is in title memory and
+/// their ranges are free ([`crate::shadow::Shadow::copy_back_done`]), so
+/// the refresh of those spans is the plain one it is after a settle; the
+/// other spans were merged beside the flights' writes, as they are when no
+/// span is stale.
+///
+/// Run 20261125-130040's steady state: 0.9 such settles a frame, 9.6 ms
+/// of waiting (10.7 ms each, the most of any settle).
+pub(crate) fn stale_overlap() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| relay_exact() && switch_on(std::env::var("VICTORY_STALE_OVERLAP").ok().as_deref()))
+}
+
+/// Since the last frame-rate line, at the point of [`stale_overlap`]:
+/// settles of every flight and their microseconds; waits for the flights
+/// that declared the stale spans and their microseconds; flights still in
+/// the air after those waits.
+static STALE_WAITS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// Whether `spans` (address, end) touch none of `written` (in order,
+/// joined): the flights' declared writes no longer reach them.
+fn clear_of(written: &[(usize, usize)], spans: &[(usize, usize)]) -> bool {
+    !spans.iter().any(|&(from, to)| touches(written, from, to))
 }
 
 /// A fence signal on a queue ([`late`]): goes behind the flights in the
@@ -3613,6 +3673,18 @@ fn late_line(frames: f64) {
             h[2],
             h[3] / 1000.0,
             if heap_sync_card() { "on" } else { "off" },
+        );
+        let s: Vec<f64> = STALE_WAITS.iter().map(|s| s.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+        tracing::info!(
+            "for title memory changed under shader writes, per frame: {:.1} settles of every flight in the air, {:.1} ms; \
+             {:.1} waits for the flights that declared writes there, {:.1} ms, {:.1} flights left in the air after each \
+             (VICTORY_STALE_OVERLAP=1: {})",
+            s[0],
+            s[1] / 1000.0,
+            s[2],
+            s[3] / 1000.0,
+            if s[2] > 0.0 { s[4] / s[2] } else { 0.0 },
+            if stale_overlap() { "on" } else { "off" },
         );
     }
     if relay() {
@@ -5681,6 +5753,35 @@ impl Host {
         HEAP_SETTLES[at + 1].fetch_add(began.elapsed().as_micros() as u64, Ordering::Relaxed);
     }
 
+    /// Behind flights, before `runs` refresh their copies: where the title
+    /// changed memory a flight's shaders may be writing and the refresh
+    /// cannot put its bytes in beside them ([`stale_spans`]), every flight
+    /// is settled, or with [`stale_overlap`] the submitting thread waits
+    /// until the flights that declared writes there have landed. The time
+    /// that took, if either was needed. `submitted` is the submission
+    /// lock's value.
+    fn settle_for_stale(&self, submitted: &mut u64, runs: &[&HostList]) -> Option<std::time::Duration> {
+        let narrow = stale_overlap();
+        let spans = stale_spans(runs, narrow);
+        if spans.is_empty() {
+            return None;
+        }
+        let began = std::time::Instant::now();
+        let at = if narrow {
+            relay_wait(WHY_STALE, |line| clear_of(&line.written, &spans));
+            let left = line().line.iter().filter(|l| matches!(l, Late::Run(_))).count();
+            STALE_WAITS[4].fetch_add(left as u64, Ordering::Relaxed);
+            2
+        } else {
+            self.settle(submitted, WHY_STALE);
+            0
+        };
+        let took = began.elapsed();
+        STALE_WAITS[at].fetch_add(1, Ordering::Relaxed);
+        STALE_WAITS[at + 1].fetch_add(took.as_micros() as u64, Ordering::Relaxed);
+        Some(took)
+    }
+
     /// Waits until the card has run every submission sent so far
     /// (`submitted`, the submission lock's value: the last value signalled
     /// on the host's fence), without settling them: their landing goes on
@@ -5812,18 +5913,15 @@ impl Host {
             crate::watch::ask_once(&ranges);
             // Behind flights: the title wrote memory that a flight's shaders
             // may write too, and this submission refreshes it. The flights
-            // are settled, and the asking made again: the copy-back wrote
-            // title memory, which other copies of it must see.
-            if behind && stale_under_flights(runs) {
-                let settling = std::time::Instant::now();
-                self.settle(&mut submitted, WHY_STALE);
-                settled += settling.elapsed();
+            // are settled (or those that declared writes there have landed,
+            // `stale_overlap`), and the asking made again: the copy-back
+            // wrote title memory, which other copies of it must see.
+            if behind && let Some(took) = self.settle_for_stale(&mut submitted, runs) {
+                settled += took;
                 crate::watch::ask_once(&ranges);
             }
-        } else if behind && stale_under_flights(runs) {
-            let settling = std::time::Instant::now();
-            self.settle(&mut submitted, WHY_STALE);
-            settled += settling.elapsed();
+        } else if behind && let Some(took) = self.settle_for_stale(&mut submitted, runs) {
+            settled += took;
         }
         for list in runs {
             list.run_deferred(&mut batch);
@@ -9602,5 +9700,78 @@ mod heap_sync_tests {
         host.settle_for_heaps(&mut submitted);
         drop(submitted);
         assert!(HEAP_SETTLES[0].load(Ordering::Relaxed) > before);
+    }
+}
+
+#[cfg(test)]
+mod stale_overlap_tests {
+    use super::*;
+
+    /// Without `all` the first stale span alone is given (a settle of
+    /// everything follows) and the look stops there; with it every span is
+    /// looked at, in order, so each can be merged or waited for.
+    #[test]
+    fn stale_spans_are_the_first_or_all_of_them() {
+        let spans = [('a', 0x1000, 0x2000), ('b', 0x3000, 0x4000), ('c', 0x5000, 0x6000), ('d', 0x7000, 0x8000)];
+        let stale = |s: &(char, usize, usize)| s.0 == 'b' || s.0 == 'd';
+        let mut looked = Vec::new();
+        let first = first_or_all(&spans, false, |s| {
+            looked.push(s.0);
+            stale(s)
+        });
+        assert_eq!(first, [(0x3000, 0x4000)]);
+        assert_eq!(looked, ['a', 'b'], "the look stops at the first");
+        looked.clear();
+        let all = first_or_all(&spans, true, |s| {
+            looked.push(s.0);
+            stale(s)
+        });
+        assert_eq!(all, [(0x3000, 0x4000), (0x7000, 0x8000)]);
+        assert_eq!(looked, ['a', 'b', 'c', 'd'], "every span is looked at (and merged where it can be)");
+        assert!(first_or_all(&spans, true, |_| false).is_empty());
+    }
+
+    /// Spans are clear of the flights' declared writes when none touches
+    /// them; ends are exclusive.
+    #[test]
+    fn spans_are_clear_of_writes_that_do_not_touch_them() {
+        let written = [(0x1000, 0x2000), (0x8000, 0x9000)];
+        assert!(clear_of(&written, &[(0x2000, 0x3000), (0x5000, 0x8000)]));
+        assert!(!clear_of(&written, &[(0x2000, 0x3000), (0x1fff, 0x2000)]));
+        assert!(!clear_of(&written, &[(0x0, 0x10_0000)]));
+        assert!(clear_of(&[], &[(0x0, 0x10_0000)]));
+        assert!(clear_of(&written, &[]));
+    }
+
+    /// The narrow wait returns at once for spans no flight declared writes
+    /// in, however much is in the air, and for spans one did, only once
+    /// that flight's landing has taken its ranges out of the line.
+    #[test]
+    fn the_wait_ends_when_the_flights_that_declared_the_spans_have_landed() {
+        // The line is the relay's; nothing in this crate's tests sends
+        // flights ahead (the relay and `late` are off in them).
+        let kept = std::mem::replace(&mut line().written, vec![(0x1000, 0x2000), (0x8000, 0x9000)]);
+        let started = std::time::Instant::now();
+        relay_wait(WHY_STALE, |line| clear_of(&line.written, &[(0x3000, 0x4000)]));
+        assert!(started.elapsed() < std::time::Duration::from_millis(50), "no flight declared writes there");
+        let landing = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            // The landing of the flight that declared [0x1000, 0x2000).
+            line().written = vec![(0x8000, 0x9000)];
+            LINE_LANDED.notify_all();
+        });
+        let started = std::time::Instant::now();
+        relay_wait(WHY_STALE, |line| clear_of(&line.written, &[(0x1800, 0x1900)]));
+        assert!(started.elapsed() >= std::time::Duration::from_millis(90), "it waited for that flight's landing");
+        assert_eq!(line().written, [(0x8000, 0x9000)], "the other flight is still in the air");
+        landing.join().expect("the landing thread");
+        line().written = kept;
+    }
+
+    /// The switch needs the relay's second stage, which waits the same way
+    /// for title memory read.
+    #[test]
+    fn the_switch_needs_the_exact_relay() {
+        assert!(!stale_overlap() || relay_exact());
     }
 }
