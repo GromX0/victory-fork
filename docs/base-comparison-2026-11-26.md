@@ -146,3 +146,23 @@ Kept as they are: belobug 81ebb7bd (`D:\dev\wt-belobug`, exe
 `builds\81ebb7bdc9-diag`) as the comparison point; GromX0
 int/harvest-test (ours, de15fee7 + notes) as the fallback. Our own
 fixes are ported to the new base one at a time, each measured.
+
+## Reference material
+
+- `D:\victory-scratch\reference\powerpyx-prologue-1-ps5.jpg` (not in the
+  repository): a 1280x720 screenshot from PowerPyx's prologue guide
+  (https://www.powerpyx.com/gta-6-prologue-walkthrough/), Lucia's cell at
+  the start of the prologue. Its prompts are PlayStation's ("Hold L2"),
+  so it is the PS5 version, not Series X: qualitative evidence of colour
+  and lighting character only, not a pixel oracle. Shows the photos and
+  papers on the cell walls in ordinary colours (white, yellow), a warm,
+  dim, low-sun interior.
+- Comparison `D:\victory-scratch\captures\pair-cell-reference.png`:
+  reference | combined b7fb278a ray tracing on (base-rt-look 1559) |
+  belobug 81ebb7bd (bb-look 2040). Camera angles differ (the reference
+  faces the window wall, the builds the door wall), so only gross
+  differences count: the builds' cell is lit with sun patches and reads
+  cooler and higher in contrast than the reference's warm interior
+  (unconfirmed: the walls differ). The purple papers of ours and of the
+  builder-off combined build are confirmed wrong by the reference.
+- No Series X reference of the same build (930.048.020) is available yet.
