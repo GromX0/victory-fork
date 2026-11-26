@@ -410,7 +410,7 @@ fn gpr(context: &mut CONTEXT, n: u8) -> &mut u64 {
 }
 
 /// The status flags `cmp a, b` leaves (CF, PF, AF, ZF, SF, OF) as `EFLAGS` bits.
-fn cmp_flags(a: u64, b: u64) -> u32 {
+pub(crate) fn cmp_flags(a: u64, b: u64) -> u32 {
     let r = a.wrapping_sub(b);
     u32::from(a < b)
         | u32::from((r as u8).count_ones().is_multiple_of(2)) << 2
@@ -419,7 +419,7 @@ fn cmp_flags(a: u64, b: u64) -> u32 {
         | ((r >> 63) as u32) << 7
         | ((((a ^ b) & (a ^ r)) >> 63) as u32) << 11
 }
-const CMP_FLAGS: u32 = 0x8d5;
+pub(crate) const CMP_FLAGS: u32 = 0x8d5;
 
 /// SSE4a's `extrq`/`insertq` (register forms, the only ones there are) on
 /// the saved XMM registers; returns the instruction's length.
@@ -775,26 +775,115 @@ mod tests {
         EXCEPTION_RECORD, RtlCaptureContext, RtlCaptureStackBackTrace,
     };
 
+    /// What [`capture_frames`] saw: our [`unwind`], then the system's walk.
+    type Captured = (Vec<u64>, Vec<usize>);
+
+    /// A frame we expect [`unwind`] to report: the helper it is in, and the
+    /// helper's name for the message.
+    type Expected = (&'static str, fn() -> Captured);
+
+    /// The runtime function entry start covering `at`: the image base the
+    /// lookup writes, plus the entry's `BeginAddress`. Asking the system for
+    /// both sides of the comparison means a thunk or an incremental-link jump
+    /// is not mistaken for a different function.
+    fn entry_start_at(at: u64) -> Option<u64> {
+        let mut image = 0;
+        // SAFETY: looks up the function table entry covering `at`; nothing
+        // keeps a reference to the entry past this call.
+        let entry = unsafe { RtlLookupFunctionEntry(at, &mut image, null_mut()) };
+        if entry.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null entry belongs to `image`, which the lookup wrote,
+        // and `BeginAddress` is an offset into that image.
+        Some(image + u64::from(unsafe { (*entry).BeginAddress }))
+    }
+
     #[test]
-    #[inline(never)]
     fn unwinds_like_the_system_walk() {
-        // SAFETY: zeroed CONTEXT is valid; both calls write our buffers.
-        let (frames, walked) = unsafe {
-            // `RtlCaptureContext` wants it 16-byte aligned too.
+        // Asking the system's own walk whether the stack looks right is not
+        // reliable: on Windows 10 x64 debug builds `RtlCaptureStackBackTrace`
+        // returns no frames about half the time. The frames above us are
+        // known instead (see `level_a`), so check those first.
+        let (frames, walked) = level_a();
+        // Frame 0 is in `capture_frames`, which took the context; then its
+        // callers in call order, each named by its runtime function entry.
+        let helpers: [Expected; 4] = [
+            ("capture_frames", capture_frames),
+            ("level_c", level_c),
+            ("level_b", level_b),
+            ("level_a", level_a),
+        ];
+        assert!(frames.len() >= helpers.len(), "{frames:?}");
+        for (i, (name, helper)) in helpers.iter().enumerate() {
+            let want = entry_start_at(*helper as usize as u64)
+                .unwrap_or_else(|| panic!("no unwind data for {name}"));
+            let got = entry_start_at(frames[i])
+                .unwrap_or_else(|| panic!("no unwind data for frame {i} at {:#x}", frames[i]));
+            assert_eq!(got, want, "frame {i} should be {name}: {frames:?}");
+        }
+        // A walk that repeats an address is not a walk.
+        let mut distinct = frames[..helpers.len()].to_vec();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), helpers.len(), "repeated: {frames:?}");
+        // Where the system's walk does return frames, it must still agree with
+        // ours: frame 0 differs (both are in `capture_frames`, at different
+        // call sites), and the callers above are the same.
+        if walked.len() >= helpers.len() {
+            assert!(frames.len() >= walked.len(), "{frames:?} vs {walked:?}");
+            let ours: Vec<usize> = frames[1..walked.len()]
+                .iter()
+                .map(|&f| f as usize)
+                .collect();
+            assert_eq!(ours.as_slice(), &walked[1..]);
+        }
+    }
+
+    /// The frames of this call, both ways: our [`unwind`], and the system's
+    /// walk, which Windows 10 can come up empty on.
+    #[inline(never)]
+    fn capture_frames() -> Captured {
+        // SAFETY: a zeroed CONTEXT is valid and both calls write buffers of
+        // ours; `RtlCaptureContext` wants the context 16-byte aligned too.
+        unsafe {
             let mut context = Aligned16(std::mem::zeroed());
             RtlCaptureContext(&mut context.0);
             let mut walked = [null_mut(); 8];
             let n = RtlCaptureStackBackTrace(0, 8, walked.as_mut_ptr(), null_mut());
-            (unwind(context.0), walked[..usize::from(n)].to_vec())
-        };
-        // Frame 0 differs (two call sites in this function); callers agree.
-        assert!(walked.len() >= 4, "{walked:?}");
-        let ours: Vec<_> = frames[1..walked.len()]
-            .iter()
-            .map(|&f| f as usize)
-            .collect();
-        let system: Vec<_> = walked[1..].iter().map(|&f| f as usize).collect();
-        assert_eq!(ours, system);
+            let frames = unwind(context.0);
+            let walked = walked[..usize::from(n)]
+                .iter()
+                .map(|&f| f as usize)
+                .collect();
+            (frames, walked)
+        }
+    }
+
+    /// `level_a` → `level_b` → `level_c` → [`capture_frames`]: three known
+    /// callers above the capture. `black_box` after each call keeps it from
+    /// becoming a tail call, which would erase the caller's frame.
+    #[inline(never)]
+    fn level_a() -> Captured {
+        let captured = level_b();
+        std::hint::black_box(&captured);
+        captured
+    }
+
+    /// See [`level_a`].
+    #[inline(never)]
+    fn level_b() -> Captured {
+        let captured = level_c();
+        std::hint::black_box(&captured);
+        captured
+    }
+
+    /// See [`level_a`].
+    #[inline(never)]
+    fn level_c() -> Captured {
+        let captured = capture_frames();
+        std::hint::black_box(&captured);
+        captured
     }
 
     #[test]
@@ -1214,124 +1303,6 @@ mod tests {
         let code = [0x0f, 0x01, 0xfc, 0x48, 0x83, 0xc0, 0x20, 0x4c, 0x39, 0xd0, 0x72, 0xf4];
         assert!(emulate_in(&code, 0, &mut context));
         assert_eq!(context.Rip, 3);
-        assert_eq!(zeroed(&mem), [false, true, false]);
-    }
-
-    #[test]
-    fn emulated_clzero_loop_stops_when_the_limit_is_on_a_line_boundary() {
-        #[repr(align(64))]
-        struct Lines([u8; 256]);
-        // clzero; add rax, 0x40; cmp rax, r10; jb, with r10 exactly two lines
-        // on: the loop ends when rax reaches the limit (`>=`, not `>`).
-        let mut mem = Lines([0xff; 256]);
-        let start = mem.0.as_mut_ptr() as u64;
-        // SAFETY: an all-zero context is valid.
-        let mut context: CONTEXT = unsafe { std::mem::zeroed() };
-        context.Rax = start;
-        context.R10 = start + 128;
-        let code = [
-            0x0f, 0x01, 0xfc, 0x48, 0x83, 0xc0, 0x40, 0x4c, 0x39, 0xd0, 0x72, 0xf4,
-        ];
-        assert!(emulate_in(&code, 0, &mut context));
-        assert_eq!((context.Rip, context.Rax), (12, start + 128));
-        assert_eq!(
-            context.EFlags & CMP_FLAGS,
-            native_compare(start + 128, start + 128)
-        );
-        let zeroed: Vec<bool> = (0..4).map(|i| mem.0[i * 64] == 0).collect();
-        assert_eq!(zeroed, [true, true, false, false]);
-    }
-
-    #[test]
-    fn emulated_clzero_second_loop_with_extended_registers() {
-        #[repr(align(64))]
-        struct Lines([u8; 256]);
-        // mov rax, r9; add r9, 0x40; clzero; cmp r9, r12; jb. `a` = r9 needs
-        // REX.R in the mov and REX.B in the add and in the cmp; `b` = r12
-        // needs REX.R in the cmp.
-        let mut mem = Lines([0xff; 256]);
-        let start = mem.0.as_mut_ptr() as u64;
-        // SAFETY: an all-zero context is valid.
-        let mut context: CONTEXT = unsafe { std::mem::zeroed() };
-        context.Rax = start;
-        context.R9 = start + 64;
-        context.R12 = start + 192;
-        let code = [
-            0x4c, 0x89, 0xc8, 0x49, 0x83, 0xc1, 0x40, 0x0f, 0x01, 0xfc, 0x4d, 0x39, 0xe1, 0x72,
-            0xf1,
-        ];
-        assert!(emulate_in(&code, 7, &mut context));
-        assert_eq!(
-            (context.Rip, context.Rax, context.R9),
-            (15, start + 128, start + 192)
-        );
-        assert_eq!(
-            context.EFlags & CMP_FLAGS,
-            native_compare(start + 192, start + 192)
-        );
-        let zeroed: Vec<bool> = (0..4).map(|i| mem.0[i * 64] == 0).collect();
-        assert_eq!(zeroed, [true, true, true, false]);
-        // Every `a` in r9..r15 (r12 as the limit, so skip it as `a`).
-        for a in [9_u8, 10, 11, 13, 14, 15] {
-            let mut mem = Lines([0xff; 256]);
-            let start = mem.0.as_mut_ptr() as u64;
-            // SAFETY: an all-zero context is valid.
-            let mut context: CONTEXT = unsafe { std::mem::zeroed() };
-            context.Rax = start;
-            *gpr(&mut context, a) = start + 64;
-            context.R12 = start + 192;
-            let n = a & 7;
-            let code = [
-                0x4c,
-                0x89,
-                0xc0 | n << 3,
-                0x49,
-                0x83,
-                0xc0 | n,
-                0x40,
-                0x0f,
-                0x01,
-                0xfc,
-                0x4d,
-                0x39,
-                0xe0 | n,
-                0x72,
-                0xf1,
-            ];
-            assert!(emulate_in(&code, 7, &mut context), "r{a}");
-            assert_eq!(context.Rip, 15, "r{a}");
-            assert_eq!(*gpr(&mut context, a), start + 192, "r{a}");
-            assert_eq!(context.Rax, start + 128, "r{a}");
-            let zeroed: Vec<bool> = (0..4).map(|i| mem.0[i * 64] == 0).collect();
-            assert_eq!(zeroed, [true, true, true, false], "r{a}");
-        }
-    }
-
-    #[test]
-    fn emulated_clzero_loops_with_rax_as_the_limit_are_one_line() {
-        #[repr(align(64))]
-        struct Lines([u8; 192]);
-        let zeroed = |l: &Lines| [l.0[0] == 0, l.0[64] == 0, l.0[128] == 0];
-        // mov rax, rdx; add rdx, 0x40; clzero; cmp rdx, rax; jb: the limit
-        // would be the line just zeroed, not a loop: one line, the next
-        // instruction, flags untouched.
-        let mut mem = Lines([0xff; 192]);
-        let start = mem.0.as_mut_ptr() as u64;
-        // SAFETY: an all-zero context is valid.
-        let mut context: CONTEXT = unsafe { std::mem::zeroed() };
-        context.Rax = start + 64;
-        context.Rdx = start + 128;
-        context.EFlags = 0x202;
-        let code = [
-            0x48, 0x89, 0xd0, 0x48, 0x83, 0xc2, 0x40, 0x0f, 0x01, 0xfc, 0x48, 0x39, 0xc2, 0x72,
-            0xf1,
-        ];
-        assert!(emulate_in(&code, 7, &mut context));
-        assert_eq!(
-            (context.Rip, context.Rax, context.Rdx),
-            (10, start + 64, start + 128)
-        );
-        assert_eq!(context.EFlags, 0x202);
         assert_eq!(zeroed(&mem), [false, true, false]);
     }
 

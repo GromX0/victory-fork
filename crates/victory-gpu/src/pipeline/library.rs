@@ -57,11 +57,14 @@ use windows::core::{HSTRING, Interface, PCWSTR};
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Keeps the pipeline library and the early list in `dir` from now on,
-/// saved also on the ways out that do not end the title ([`save_at_exits`]).
+/// Keeps the pipeline library and the early list in `dir` from now on.
 pub fn use_pipeline_cache(dir: PathBuf) {
     let _ = DIR.set(dir);
-    save_at_exits();
+}
+
+/// The folder the library is kept in.
+pub(super) fn folder() -> Option<PathBuf> {
+    DIR.get().cloned()
 }
 
 /// Host pipelines created, loaded from the library, and title pipelines
@@ -437,19 +440,18 @@ const LIBRARY_FILE: &str = "host-pipelines.bin";
 const NEXT_FILE: &str = "host-pipelines.next";
 const EARLY_FILE: &str = "early-pipelines.txt";
 /// Title pipelines listed for an early start, at most.
-const EARLY_MAX: usize = 8192;
+const EARLY_MAX: usize = 100_000;
 
 fn library() -> Option<&'static Library> {
     static LIBRARY: OnceLock<Option<Library>> = OnceLock::new();
     LIBRARY
         .get_or_init(|| {
+            let _opening = crate::timeline::span("pipeline: open the host pipeline library");
             let device = crate::host::host()?.device.cast::<ID3D12Device1>().ok()?;
             let blob = DIR.get().map_or(Blob::None, |d| Blob::of(d));
             let library = open(&device, blob);
             if library.is_none() {
                 tracing::warn!("no host pipeline library: pipelines are not kept");
-            } else {
-                start_saver();
             }
             library
         })
@@ -518,6 +520,10 @@ pub(crate) fn pipeline(
     load: impl FnOnce(&ID3D12PipelineLibrary1, PCWSTR) -> windows::core::Result<ID3D12PipelineState>,
     create: impl FnOnce() -> windows::core::Result<ID3D12PipelineState>,
 ) -> windows::core::Result<ID3D12PipelineState> {
+    let create = || {
+        let _creating = crate::timeline::span("pipeline: create a PSO in the driver");
+        create()
+    };
     let wide = HSTRING::from(name);
     let Some(library) = library() else {
         MADE.fetch_add(1, Ordering::Relaxed);
@@ -525,9 +531,11 @@ pub(crate) fn pipeline(
     };
     let began = std::time::Instant::now();
     let loaded = {
+        let mut loading = crate::timeline::span("pipeline: acquire library load guards");
         let _all = one_call();
         let _one = same_name(name);
         let _call = call("load", name);
+        loading.next("pipeline: load a PSO from the driver library");
         load(&library.library, PCWSTR(wide.as_ptr()))
     };
     // The load read the library's file (see `trim`).
@@ -557,9 +565,11 @@ pub(crate) fn pipeline(
             began.elapsed().as_secs_f64() * 1e3
         )
     });
+    let mut storing = crate::timeline::span("pipeline: acquire library store guards");
     let _all = one_call();
     let _stores = library.saving.read().unwrap_or_else(|e| e.into_inner());
     let _call = call("store", name);
+    storing.next("pipeline: store a PSO in the driver library");
     // SAFETY: a live pipeline; a name already stored (a description that
     // differs) is refused, which leaves the library as it was.
     if unsafe { library.library.StorePipeline(PCWSTR(wide.as_ptr()), &pso) }.is_ok() {
@@ -568,50 +578,23 @@ pub(crate) fn pipeline(
     Ok(pso)
 }
 
-/// One save at a time, from serialising the library into its temporary
-/// file to the renames. Two saves could overlap there: one renamed the
-/// temporary file over the library while the other had just truncated it
-/// and was serialising into it (a worker's save and the one at the end of
-/// the run, or two workers' when serialising took longer than
-/// `SAVE_EVERY`). The next start then found the second save's bytes in
-/// part, which the host rejects: it started an empty library and made
-/// every pipeline again.
-static SAVE_FILE: Mutex<()> = Mutex::new(());
-
-/// When a save last started (`now`, or after `SAVE_EVERY`).
-static LAST_SAVE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-
 /// Writes the library and the early list if pipelines were added since the
-/// last save and `SAVE_EVERY` has passed (or `now`). Without `now` it gives
-/// way to a save under way; with `now` it waits for it, then saves what
-/// was added since.
-///
-/// Whether the library on disk now holds what was added: false only when a
-/// save was wanted and failed (the host device gone, the disk refusing).
-/// It said "saved" at a failure of the host GPU whose save had been
-/// refused for a removed device, the run's pipelines lost.
-pub(crate) fn save(now: bool) -> bool {
+/// last save and `SAVE_EVERY` has passed (or `now`).
+pub(crate) fn save(now: bool) {
+    static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     const SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(20);
-    let (Some(dir), Some(library)) = (DIR.get(), library()) else { return true };
-    let _one = if now {
-        SAVE_FILE.lock().unwrap_or_else(|e| e.into_inner())
-    } else {
-        match SAVE_FILE.try_lock() {
-            Ok(held) => held,
-            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return true,
-        }
-    };
+    let (Some(dir), Some(library)) = (DIR.get(), library()) else { return };
     {
-        let mut last = LAST_SAVE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
         if !now && last.is_some_and(|t| t.elapsed() < SAVE_EVERY) {
-            return true;
+            return;
         }
         *last = Some(std::time::Instant::now());
     }
+    let _saving = crate::timeline::span("pipeline: save the library and early list");
     if let Err(e) = std::fs::create_dir_all(dir) {
         tracing::warn!(error = %e, "host pipeline library not saved");
-        return false;
+        return;
     }
     let tmp = dir.join(LIBRARY_FILE).with_extension("tmp");
     // The bytes of the library written to `tmp`; 0 when no pipeline was
@@ -624,7 +607,7 @@ pub(crate) fn save(now: bool) -> bool {
         let _alone = library.saving.write().unwrap_or_else(|e| e.into_inner());
         let added = library.added.load(Ordering::Relaxed);
         if !USED_CHANGED.swap(false, Ordering::Relaxed) && added == 0 {
-            return true;
+            return;
         }
         if added == 0 {
             0
@@ -632,17 +615,20 @@ pub(crate) fn save(now: bool) -> bool {
             // SAFETY: a plain query.
             let size = unsafe { library.library.GetSerializedSize() };
             let _call = call("serialise", "the whole library");
+            let _writing = crate::timeline::span("pipeline: serialize the library to disk");
             if let Err(e) = serialise(&library.library, &tmp, size) {
                 tracing::warn!(error = %e, "host pipeline library not serialised");
                 let _ = std::fs::remove_file(&tmp);
-                return false;
+                return;
             }
             library.added.store(0, Ordering::Relaxed);
             SAVED.store(size as u64, Ordering::Relaxed);
             size
         }
     };
-    let used: Vec<String> = USED.lock().unwrap_or_else(|e| e.into_inner()).iter().flatten().cloned().collect();
+    // Through `used`: a process that asked for none yet (`victory shaders`)
+    // must not write the earlier runs' list over with nothing.
+    let used: Vec<String> = used().iter().flatten().cloned().collect();
     let library_written = if bytes > 0 { replace_library(dir, &tmp) } else { Ok(()) };
     if bytes > 0 && library_written.is_ok() {
         // In place unless the system refused and the new one waits beside it.
@@ -658,130 +644,21 @@ pub(crate) fn save(now: bool) -> bool {
             )
         });
     }
+    let slow: Vec<String> = slow_ones().iter().flatten().map(|(key, ms)| format!("{key} {ms}")).collect();
     let written = library_written
+        .and_then(|()| write_atomically(&dir.join(SLOW_FILE), slow.join("\n").as_bytes()))
         .and_then(|()| write_atomically(&dir.join(EARLY_FILE), used.join("\n").as_bytes()));
     match written {
-        Ok(()) => {
-            tracing::info!(
-                bytes,
-                early = used.len(),
-                made = MADE.load(Ordering::Relaxed),
-                loaded = LOADED.load(Ordering::Relaxed),
-                started_early = EARLY.load(Ordering::Relaxed),
-                "host pipeline library saved"
-            );
-            true
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "host pipeline library not saved");
-            false
-        }
+        Ok(()) => tracing::info!(
+            bytes,
+            early = used.len(),
+            made = MADE.load(Ordering::Relaxed),
+            loaded = LOADED.load(Ordering::Relaxed),
+            started_early = EARLY.load(Ordering::Relaxed),
+            "host pipeline library saved"
+        ),
+        Err(e) => tracing::warn!(error = %e, "host pipeline library not saved"),
     }
-}
-
-/// `VICTORY_PIPELINE_SAVE_EVERY`: seconds between the saves of a thread of
-/// its own (60; 0: no such thread). The workers save only after making a
-/// pipeline (at most every 20 s), so what they made in the 20 s before
-/// they ran out of work waited for the end of the run, and a run that
-/// crashed or was ended without that save lost it: the next run made
-/// thousands of pipelines again, minutes of "being made". The thread also
-/// saves at once when [`SAVE_AFTER`] pipelines were added. It is none of
-/// the title's threads, and a save is written beside the library and
-/// renamed over it, so no frame waits for it and a save cut short leaves
-/// the library on disk as it was.
-fn save_every() -> Option<std::time::Duration> {
-    static EVERY: OnceLock<u64> = OnceLock::new();
-    let secs = *EVERY.get_or_init(|| {
-        std::env::var("VICTORY_PIPELINE_SAVE_EVERY")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(60)
-    });
-    (secs > 0).then(|| std::time::Duration::from_secs(secs))
-}
-
-/// Pipelines added since the last save that make the saving thread save
-/// before its time.
-const SAVE_AFTER: u64 = 256;
-
-/// Starts the thread of [`save_every`], once.
-fn start_saver() {
-    static STARTED: std::sync::Once = std::sync::Once::new();
-    let Some(every) = save_every() else { return };
-    STARTED.call_once(|| {
-        const LOOK: std::time::Duration = std::time::Duration::from_secs(5);
-        let spawned = std::thread::Builder::new().name("victory-pipeline-save".into()).spawn(move || {
-            loop {
-                std::thread::sleep(LOOK);
-                let Some(library) = library() else { return };
-                let added = library.added.load(Ordering::Relaxed);
-                if added == 0 && !USED_CHANGED.load(Ordering::Relaxed) {
-                    continue;
-                }
-                let due = LAST_SAVE
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .is_none_or(|t| t.elapsed() >= every);
-                if due || added >= SAVE_AFTER {
-                    save(true);
-                }
-            }
-        });
-        match spawned {
-            Ok(_) => tracing::info!(
-                every_s = every.as_secs(),
-                after = SAVE_AFTER,
-                "pipeline library saved by a thread of its own (VICTORY_PIPELINE_SAVE_EVERY)"
-            ),
-            Err(e) => tracing::warn!(error = %e, "no thread to save the pipeline library"),
-        }
-    });
-}
-
-/// Saves now as [`save`] does, on a thread of its own, waiting `limit` at
-/// most: for the ways out of the process that do not save otherwise (a
-/// failure of the host GPU, the title's own exit, a panic, the console
-/// closed). A save that cannot finish in time (a lock the ending thread
-/// holds, a slow disk) is left behind: the file on disk stays the library
-/// saved last. Whether it finished.
-pub(crate) fn save_within(limit: std::time::Duration) -> bool {
-    if DIR.get().is_none() {
-        return true;
-    }
-    let (sent, done) = std::sync::mpsc::channel();
-    let spawned = std::thread::Builder::new().name("victory-pipeline-save-exit".into()).spawn(move || {
-        let _ = sent.send(save(true));
-    });
-    spawned.is_ok() && done.recv_timeout(limit).unwrap_or(false)
-}
-
-/// Saves before the process ends on a panic or a closed console (its
-/// window closed, Ctrl+C): a panic hook in front of the earlier one, and a
-/// console handler that saves and leaves the ending to the next handler.
-/// Once.
-fn save_at_exits() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        static IN_HOOK: AtomicBool = AtomicBool::new(false);
-        let earlier = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            // Not again for a panic of the save itself.
-            if !IN_HOOK.swap(true, Ordering::SeqCst) {
-                let saved = save_within(std::time::Duration::from_secs(10));
-                tracing::info!(saved, "pipeline library saved at a panic");
-                IN_HOOK.store(false, Ordering::SeqCst);
-            }
-            earlier(info);
-        }));
-        unsafe extern "system" fn on_console(_kind: u32) -> windows_sys::core::BOOL {
-            // Windows ends the process 5 s after its console is closed.
-            let saved = save_within(std::time::Duration::from_secs(4));
-            tracing::info!(saved, "pipeline library saved as the console ends the process");
-            0 // the next handler: the default one ends the process
-        }
-        // SAFETY: a handler of ours, for the life of the process.
-        unsafe { windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_console), 1) };
-    });
 }
 
 /// Writes the library's `size` serialised bytes to the file `tmp`: through
@@ -814,11 +691,64 @@ fn replace_library(dir: &std::path::Path, tmp: &std::path::Path) -> std::io::Res
 }
 
 /// Writes `bytes` to a temporary file beside `path`, then renames it over
-/// `path`: a reader never sees a part.
+/// `path`: a reader never sees a part. Serialised so concurrent worker and
+/// shutdown saves do not race on the same staging file or target rename.
 fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    use std::sync::atomic::AtomicU64;
+    static WRITING: Mutex<()> = Mutex::new(());
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let _guard = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp-{}-{n}", std::process::id()));
+    let tmp = path.with_file_name(name);
+    let res = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// How long each title pipeline that took long to make took, in ms (beside
+/// the early list; a key may be there more than once).
+const SLOW_FILE: &str = "slow-pipelines.txt";
+/// A pipeline that takes this long is one ([`slow`]).
+pub(crate) const SLOW_MS: u64 = 1000;
+static SLOW: Mutex<Option<std::collections::HashMap<String, u64>>> = Mutex::new(None);
+
+fn slow_ones() -> std::sync::MutexGuard<'static, Option<std::collections::HashMap<String, u64>>> {
+    let mut slow = SLOW.lock().unwrap_or_else(|e| e.into_inner());
+    if slow.is_none() {
+        let listed = DIR.get().and_then(|d| std::fs::read_to_string(d.join(SLOW_FILE)).ok()).unwrap_or_default();
+        *slow = Some(
+            listed
+                .lines()
+                .filter_map(|l| l.split_once(' '))
+                .filter_map(|(key, ms)| Some((key.to_owned(), ms.parse().ok()?)))
+                .collect(),
+        );
+    }
+    slow
+}
+
+/// Whether making the title pipeline with `key` took [`SLOW_MS`] in this or
+/// an earlier run.
+pub(crate) fn slow(key: &str) -> bool {
+    slow_ones().as_ref().is_some_and(|s| s.contains_key(key))
+}
+
+/// The title pipeline with `key` took `ms` to make.
+pub(crate) fn note_time(key: &str, ms: u64) {
+    if ms < SLOW_MS {
+        return;
+    }
+    let mut slow = slow_ones();
+    let known = slow.get_or_insert_default().entry(key.to_owned()).or_insert(0);
+    if ms > *known {
+        *known = ms;
+        // With the next save of the early list.
+        USED_CHANGED.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Title pipeline keys requested by draws or dispatches (this run and the last).
@@ -840,7 +770,15 @@ fn used() -> std::sync::MutexGuard<'static, Option<HashSet<String>>> {
 }
 
 /// Whether the title pipeline with `key` was requested in this or an earlier run.
+///
+/// `VICTORY_EARLY_ALL=1`: every title pipeline is started at creation,
+/// requested before or not, so that the driver's own cache holds it for
+/// later runs.
 pub(crate) fn wanted_early(key: &str) -> bool {
+    static ALL: OnceLock<bool> = OnceLock::new();
+    if *ALL.get_or_init(|| std::env::var_os("VICTORY_EARLY_ALL").is_some_and(|v| v == "1")) {
+        return true;
+    }
     used().as_ref().is_some_and(|s| s.contains(key))
 }
 
@@ -980,5 +918,28 @@ mod tests {
             pattern(page * 4096, &mut expected);
             assert!(bytes == &expected[..], "page {page} of the replaced library no longer reads as the old file");
         }
+    }
+
+    #[test]
+    fn concurrent_write_atomically_never_fails_or_truncates() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("host-pipelines.bin");
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                let target = target.clone();
+                std::thread::spawn(move || {
+                    let payload = vec![b'a' + t as u8; 4096];
+                    for _ in 0..30 {
+                        write_atomically(&target, &payload).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let final_bytes = std::fs::read(&target).unwrap();
+        assert_eq!(final_bytes.len(), 4096);
+        assert!(final_bytes.iter().all(|&b| b == final_bytes[0]));
     }
 }

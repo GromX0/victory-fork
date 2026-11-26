@@ -569,21 +569,9 @@ impl Module {
             }
             w.record(3, &r);
         }
-        // 5 (`VICTORY_DENORM`): the entry's float mode, `"fp32-denorm-mode"="<mode>"`
-        let groups = if let Some(mode) = denorm_mode() {
-            let mut r = vec![5, 0xFFFF_FFFF, 4];
-            r.extend(b"fp32-denorm-mode".iter().map(|&c| u64::from(c)));
-            r.push(0);
-            r.extend(mode.bytes().map(u64::from));
-            r.push(0);
-            w.record(3, &r);
-            5
-        } else {
-            4
-        };
         w.exit();
         w.enter(PARAMATTR_BLOCK, 3);
-        for id in 1..=groups {
+        for id in 1..=4 {
             w.record(2, &[id]);
         }
         w.exit();
@@ -649,11 +637,7 @@ impl Module {
         for f in &self.funcs {
             // [type, cc, isproto, linkage, paramattr, align, section,
             // visibility, gc, unnamed_addr, prologue, dllstorage, comdat, prefix]
-            let attr = match f.attr {
-                Some(a) => a as u64,
-                None if f.body && denorm_mode().is_some() => 5,
-                None => 0,
-            };
+            let attr = f.attr.map_or(0, |a| a as u64);
             w.record(
                 8,
                 &[
@@ -743,7 +727,7 @@ impl Module {
             let blk = &self.blocks[b];
             if let (Some(Term::Br(h)), true, [p]) = (
                 blk.term,
-                blk.phis.is_empty() && blk.body.is_empty(),
+                blk.phis.iter().all(|&i| !live[i as usize]) && blk.body.is_empty(),
                 &preds[b][..],
             ) && pos[h] < pos[b]
                 && !succs(*p).contains(&h)
@@ -914,19 +898,6 @@ impl Module {
 }
 
 const MODULE_BLOCK: u64 = 8;
-/// The entry function's `fp32-denorm-mode` that `VICTORY_DENORM` names (`ftz`, `preserve`,
-/// `any`); none by default, which leaves it to the host. (`ftz` made a triangle-edge pattern on
-/// AMD: something the title computes needs its denormals.)
-pub fn denorm_mode() -> Option<&'static str> {
-    static MODE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    MODE.get_or_init(|| {
-        std::env::var("VICTORY_DENORM")
-            .ok()
-            .filter(|v| matches!(v.as_str(), "any" | "preserve" | "ftz"))
-    })
-    .as_deref()
-}
-
 const PARAMATTR_BLOCK: u64 = 9;
 const PARAMATTR_GROUP_BLOCK: u64 = 10;
 const CONSTANTS_BLOCK: u64 = 11;
@@ -1223,6 +1194,45 @@ mod tests {
         assert!(live[ids(read)] && live[ids(sum)]);
         assert!(!live[ids(unread)] && !live[ids(cyc_a)] && !live[ids(cyc_b)]);
         assert_eq!(live, live_by_passes(&m));
+    }
+
+    #[test]
+    fn empty_latch_with_dead_phis_is_folded() {
+        // Two identical loops except one has an unread phi in its empty latch;
+        // both must fold the latch and emit identical bitcode.
+        let build = |with_dead_phi: bool| {
+            let mut m = Module::default();
+            let i32t = m.int(32);
+            let void = m.void();
+            let fty = m.func_ty(void, vec![i32t]);
+            let f = m.function("sink", fty, Some(Attr::NoUnwind), false);
+            let main_ty = m.func_ty(void, vec![]);
+            m.function("main", main_ty, None, true);
+            let (entry, head, body, latch, exit) = (
+                m.new_block(),
+                m.new_block(),
+                m.new_block(),
+                m.new_block(),
+                m.new_block(),
+            );
+            let (z, one, ten) = (m.i32(0), m.i32(1), m.i32(10));
+            m.terminate(entry, Term::Br(head));
+            let i = m.phi(head, i32t);
+            m.terminate(head, Term::Br(body));
+            let next = m.bin(body, Bin::Add, i, one);
+            let cond = m.cmp(body, pred::IULT, next, ten);
+            m.terminate(body, Term::CondBr(cond, latch, exit));
+            if with_dead_phi {
+                let dead = m.phi(latch, i32t);
+                m.set_phi(dead, vec![(next, body)]);
+            }
+            m.terminate(latch, Term::Br(head));
+            m.set_phi(i, vec![(z, entry), (next, latch)]);
+            let _ = m.call(exit, f, vec![next]);
+            m.terminate(exit, Term::Ret);
+            m.write()
+        };
+        assert_eq!(build(false), build(true));
     }
 
     #[test]
