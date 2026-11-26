@@ -1679,6 +1679,72 @@ fn words<const N: usize>(desc: *const [u32; N]) -> Option<[u32; N]> {
     (!desc.is_null()).then(|| unsafe { desc.read_unaligned() })
 }
 
+/// A shader resource view's description with the words no view reads set to
+/// 0: the padding before its 8-byte-aligned union (word 3) and the union's
+/// words past the members of the view's dimension. The title's descriptions
+/// carry whatever its stack held there, so views alike looked different:
+/// 2,019,719 shapes of placed views in 15 idle minutes of open world, their
+/// most varied word (49,668 values in 69,052) that padding (ow-idle1,
+/// hf-measure-census). Unknown dimensions keep every word.
+fn clean_srv(mut d: [u32; 10]) -> [u32; 10] {
+    d[3] = 0;
+    // Words of each dimension's member, from word 4: buffer (first element,
+    // count, stride, flags), 1D, 1D array, 2D, 2D array, 2D multisample,
+    // its array, 3D, cube, cube array, ray-tracing structure (its address).
+    let used = match d[1] {
+        1 => 5,
+        2 => 3,
+        3 => 5,
+        4 => 4,
+        5 => 6,
+        6 => 1,
+        7 => 2,
+        8 => 3,
+        9 => 3,
+        10 => 5,
+        11 => 2,
+        _ => 6,
+    };
+    d[4 + used..].fill(0);
+    d
+}
+
+/// As [`clean_srv`], for an unordered access view (its union begins at
+/// word 2: the buffer's first element, count, stride, counter offset and
+/// flags take words 2 to 8, word 9 is padding).
+fn clean_uav(mut d: [u32; 10]) -> [u32; 10] {
+    let used = match d[1] {
+        1 => 7,
+        2 => 1,
+        3 => 3,
+        4 => 2,
+        5 => 4,
+        6 => 1,
+        7 => 2,
+        8 => 3,
+        _ => 8,
+    };
+    d[2 + used..].fill(0);
+    d
+}
+
+/// A resource description's padding set to 0: after its dimension (word 1,
+/// before the 8-byte alignment) and at its end (word 13). In the shapes of
+/// placed views they had 3,259 and 2,792 values.
+fn clean_resource(mut r: [u32; 14]) -> [u32; 14] {
+    (r[1], r[13]) = (0, 0);
+    r
+}
+
+/// A placed view's description cleaned: its first ten words are the view's
+/// own ([`clean_srv`], [`clean_uav`]); the address and the console's fields
+/// after them stay as they are.
+fn clean_placed(unordered: bool, mut d: [u32; 16]) -> [u32; 16] {
+    let view: [u32; 10] = d[..10].try_into().unwrap_or_default();
+    d[..10].copy_from_slice(&if unordered { clean_uav(view) } else { clean_srv(view) });
+    d
+}
+
 /// Device method.
 pub(crate) extern "system" fn create_cbv(_: This, desc: *const [u32; 4], handle: u64) {
     if let Some([lo, hi, size, _]) = words(desc) {
@@ -1694,7 +1760,7 @@ pub(crate) extern "system" fn create_srv(
     desc: *const [u32; 10],
     handle: u64,
 ) {
-    record(handle, View::Shader(resource as usize, words(desc)));
+    record(handle, View::Shader(resource as usize, words(desc).map(clean_srv)));
 }
 
 /// Device method.
@@ -1705,7 +1771,7 @@ pub(crate) extern "system" fn create_uav(
     desc: *const [u32; 10],
     handle: u64,
 ) {
-    let view = View::Unordered(resource as usize, counter as usize, words(desc));
+    let view = View::Unordered(resource as usize, counter as usize, words(desc).map(clean_uav));
     record(handle, view);
 }
 
@@ -1719,7 +1785,7 @@ pub(crate) extern "system" fn create_placed_srv(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
-        record(handle, View::Placed(false, resource, desc));
+        record(handle, View::Placed(false, clean_resource(resource), clean_placed(false, desc)));
     }
 }
 
@@ -1730,7 +1796,7 @@ pub(crate) extern "system" fn create_placed_uav(
     handle: u64,
 ) {
     if let (Some(resource), Some(desc)) = (words(resource), words(desc)) {
-        record(handle, View::Placed(true, resource, desc));
+        record(handle, View::Placed(true, clean_resource(resource), clean_placed(true, desc)));
     }
 }
 
@@ -1939,6 +2005,55 @@ static FUNCTIONS: Table<24> = {
 };
 
 #[cfg(test)]
+mod clean_tests {
+    use super::*;
+
+    /// The two placed views the shape census printed (ow-idle1): a raw buffer
+    /// of 17 dwords and a structured buffer of one 312-byte element, each with
+    /// stack bytes in its padding.
+    #[test]
+    fn padding_and_unused_union_words_are_cleared() {
+        let raw = [0x27, 1, 0x1688, 0x25b7_0b30, 0, 0, 0x11, 0, 1, 0xd];
+        assert_eq!(clean_srv(raw), [0x27, 1, 0x1688, 0, 0, 0, 0x11, 0, 1, 0]);
+        let structured = [0, 1, 0x1688, 0x70, 0, 0, 1, 0x138, 0, 0x5a5a];
+        assert_eq!(clean_srv(structured), [0, 1, 0x1688, 0, 0, 0, 1, 0x138, 0, 0]);
+        // A 2D texture: most detailed mip, mip levels, plane, clamp; the rest
+        // of the union is not the view's.
+        let texture = [98, 4, 0x1688, 7, 2, 8, 0, 0, 0xdead, 0xbeef];
+        assert_eq!(clean_srv(texture), [98, 4, 0x1688, 0, 2, 8, 0, 0, 0, 0]);
+        // A ray-tracing structure keeps its address (words 4 and 5).
+        let structure = [0, 11, 0x1688, 9, 0x1234_5600, 0x42, 3, 3, 3, 3];
+        assert_eq!(clean_srv(structure), [0, 11, 0x1688, 0, 0x1234_5600, 0x42, 0, 0, 0, 0]);
+        // An unknown dimension keeps its union.
+        let unknown = [1, 99, 2, 3, 4, 5, 6, 7, 8, 9];
+        assert_eq!(clean_srv(unknown), [1, 99, 2, 0, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn unordered_views_keep_their_members() {
+        // Buffer: first element (2, 3), count, stride, counter offset (6, 7),
+        // flags; word 9 is padding.
+        let buffer = [0x29, 1, 10, 0, 64, 16, 128, 0, 1, 0x77];
+        assert_eq!(clean_uav(buffer), [0x29, 1, 10, 0, 64, 16, 128, 0, 1, 0]);
+        // 2D texture array: mip, first slice, size, plane.
+        let array = [28, 5, 1, 2, 6, 0, 0x11, 0x22, 0x33, 0x44];
+        assert_eq!(clean_uav(array), [28, 5, 1, 2, 6, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn resources_and_placed_views_lose_only_padding() {
+        let resource = [1, 0xabc, 0, 0, 0x138, 0, 1, 0x1_0001, 0, 1, 0, 1, 0, 0xdef];
+        assert_eq!(clean_resource(resource), [1, 0, 0, 0, 0x138, 0, 1, 0x1_0001, 0, 1, 0, 1, 0, 0]);
+        let mut placed = [0u32; 16];
+        placed[..10].copy_from_slice(&[0x27, 1, 0x1688, 0x25b7_0b30, 0, 0, 0x11, 0, 1, 0xd]);
+        placed[10..].copy_from_slice(&[0x1000, 0xb, 5, 6, 7, 8]);
+        let clean = clean_placed(false, placed);
+        assert_eq!(clean[..10], [0x27, 1, 0x1688, 0, 0, 0, 0x11, 0, 1, 0]);
+        assert_eq!(clean[10..], [0x1000, 0xb, 5, 6, 7, 8]);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::object::{S_OK, slot};
@@ -2129,13 +2244,15 @@ mod tests {
         // A resource description and a view no other test uses.
         let resource: [u32; 14] = std::array::from_fn(|k| 0x5ee0_0000 + k as u32);
         let mut desc: [u32; 16] = std::array::from_fn(|k| 0x7a70_0000 + k as u32);
+        // As the views keep them: padding and unused words cleared.
+        let clean = clean_resource(resource);
         let mine = |v: &View| match v {
             View::Constant(address, _) => (0x6_0000_0000..0x6_1000_0000).contains(address),
-            View::Placed(_, r, _) => *r == resource,
+            View::Placed(_, r, _) => *r == clean,
             _ => false,
         };
         let entries = || VIEWS.read().unwrap().list.iter().filter(|(v, _)| mine(v)).count();
-        let shapes = || VIEWS.read().unwrap().shapes.iter().filter(|s| s.1 == resource).count();
+        let shapes = || VIEWS.read().unwrap().shapes.iter().filter(|s| s.1 == clean).count();
         for n in 0..20_000u64 {
             let address = 0x6_0000_0000 + n * 0x100;
             create_cbv(null, &[address as u32, (address >> 32) as u32, 512, 0], at);
@@ -2143,18 +2260,18 @@ mod tests {
             let placed = 0xd_4940_0000 + n * 0x1_0000;
             (desc[10], desc[11]) = (placed as u32, (placed >> 32) as u32);
             create_placed_srv(null, &resource, &desc, at);
-            assert_eq!(view(at), Some(View::Placed(false, resource, desc)));
+            assert_eq!(view(at), Some(View::Placed(false, clean, clean_placed(false, desc))));
         }
         assert_eq!(entries(), 0, "no table entries");
         assert_eq!(shapes(), 1, "one shape for 20,000 placed views");
         // The same shape, unordered: another shape.
         create_placed_uav(null, &resource, &desc, at);
-        assert_eq!(view(at), Some(View::Placed(true, resource, desc)));
+        assert_eq!(view(at), Some(View::Placed(true, clean, clean_placed(true, desc))));
         assert_eq!(shapes(), 2);
         // Placed memory past 1 TiB (not title memory) is a table entry.
         (desc[10], desc[11]) = (0, 0x100);
         create_placed_srv(null, &resource, &desc, at);
-        assert_eq!(view(at), Some(View::Placed(false, resource, desc)));
+        assert_eq!(view(at), Some(View::Placed(false, clean, clean_placed(false, desc))));
         assert_eq!(entries(), 1);
         // A record's words are the same for the same view (the host knows
         // a slot's view by them), and differ with the address.
