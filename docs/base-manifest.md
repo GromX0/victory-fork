@@ -12,12 +12,12 @@ console-parity roadmap (`Victory_Console_Parity_Roadmap_2026-11-26.md`).
 | Upstream pins | avatarmanz/VIctory-7900XTX `2de99801`; Belobug/VIctory-Belobug-AMD rx9070xt `81ebb7bdc9b7ca6ec2f3169973f50be77c7c803c` (cherry-picked, magenta filter in ambient.rs left out) |
 | Build | `cargo build --locked --profile diag -p victory --features diagnostics`, toolchain 1.98.1 (rust-toolchain.toml) |
 | Executable | `target\diag\victory.exe`, SHA-256 `11A7DFC4F2E84DCF9AABB4FE94FA52B9947BD2DF7FBD564135802223C974E716`; kept copy `D:\victory-runs\builds\b7fb278a91-diag\` |
-| Working tree | clean apart from untracked `tools\fork-run.ps1` (copy of GromX0 int/harvest-test de15fee7's harness) and git-ignored `victory.toml` |
-| Game | `D:\GTA6\game_scarlett_master.exe`, SHA-256 prefix `E95020B2FA4A721D`, title 7952987A, version 930.048.020-vb_sub_story |
+| Working tree | clean apart from git-ignored `victory.toml`; `tools\fork-run.ps1` (the harness of GromX0 int/harvest-test de15fee7) committed later, docs and tools only |
+| Game | `<game_dir>\<title>.exe`, SHA-256 prefix `E95020B2FA4A721D`, title 7952987A, version 930.048.020-vb_sub_story |
 
 ## Configuration
 
-- `victory.toml`: game_dir `D:\GTA6`, cache_dir `D:\victory-data\avatar\cache`
+- `victory.toml`: game_dir `<game_dir>`, cache_dir `D:\victory-data\avatar\cache`
   (shared with the avatar checkout: same translator), data_dir
   `D:\victory-data\avatar\data` (a copy of GromX0's save data made 26 Nov).
 - Switch files in `D:\victory-runs\envs\`: `base-play.env` (AvatarManz

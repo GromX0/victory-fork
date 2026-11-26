@@ -1,12 +1,65 @@
-# VIctory on an RX 7900 XTX
+# VIctory on an RX 9070 (branch `base/avatar-rdna4`)
 
 A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
 that runs an Xbox Series title natively on Windows from files the user supplies.
 
+**This branch is the best build measured so far on an AMD RX 9070.** It is
+[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)
+`2de99801` with the RX 9070 changes of
+[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)
+`81ebb7bd` cherry-picked (`b7fb278a`). Those changes are a guard that
+catches the AMD shader compiler's crashes and leaves those pipelines out, VRAM
+eviction, and a keep-shown guard. Belobug's magenta filter was left out on
+purpose, because it hides a defect instead of fixing it.
+
+## Where this branch stands (2026-11-26)
+
+One machine: Windows 11, Ryzen 7 9800X3D, 32 GB RAM, Radeon RX 9070 16 GB
+(driver 32.0.32029.2010), page file 32-64 GB. Series X profile (4K output
+drawn at 1440p), no FSR, no frame generation. The scene is the opening
+cutscene and the first interior, 420 s per run, with warm caches.
+
+| Build | Median frame (5-s averages) | p90 of those averages |
+|---|---|---|
+| **This branch, ray tracing off** | **46.1 ms (21.7 fps)** | 70.5 ms |
+| This branch, ray tracing on (`VICTORY_BVH_BUILDER=1`) | 86.2 ms (11.6 fps) | 282.6 ms |
+| Belobug `81ebb7bd` (kept as the comparison point) | 47.5 ms (21.1 fps) | 97.0 ms |
+| Our previous line (`int/harvest-test`) | 148.2 ms (6.7 fps) | 198.4 ms |
+
+These are sampled 5-second averages in one scene. They are **not** sustained,
+console-equivalent performance, because the fast builds still:
+
+- leave out 37 compute pipelines the AMD compiler crashes on;
+- add a replacement ambient light (`VICTORY_AMBIENT=0.8`);
+- show newly streamed textures later.
+
+Compared with Series X footage of the same scenes, what is still wrong:
+
+- Some posters and papers render **purple**, with ray tracing off **and on**.
+- Shadowed areas are dark or black where the console shows warm bounced
+  light.
+- With ray tracing on, a cell wall was missing in one shot.
+- One device loss (`DXGI_ERROR_DRIVER_INTERNAL_ERROR`) happened during a
+  cold-cache warm-up. Repeated cold and warm starts are being run to settle
+  whether this build is stable.
+
+The details and the evidence:
+
+- [docs/base-manifest.md](docs/base-manifest.md): exact commits, hashes,
+  switches and machine.
+- [docs/base-comparison-2026-11-26.md](docs/base-comparison-2026-11-26.md):
+  builds compared, captures, Series X reference.
+- [docs/experiments.md](docs/experiments.md): every experiment, including
+  the failed ones.
+
+The rest of this README is AvatarManz's, with their measurements on an RX
+7900 XTX.
+
 ## The goal
 
 **The Series X version at 4K output (drawn at 1440p) with ray tracing on,
-looking the way it does on the Xbox**, on an AMD RX 7900 XTX first.
+looking the way it does on the Xbox**: on an AMD RX 7900 XTX first upstream,
+on an RX 9070 on this branch.
 
 In this order:
 
@@ -27,7 +80,7 @@ ray tracing off stay available.
 copy of the game. It is not affiliated with or endorsed by the game's developer
 or publisher.
 
-## Where it stands (2026-11-26)
+## Where it stands upstream (AvatarManz, 2026-11-26)
 
 Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
 RX 7900 XTX, renderer patches 1, 2, 5, 6 and 7 on. Runs of 270 s in a city
@@ -98,12 +151,20 @@ model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
 tools, and your own dump of the title.
 
 ```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
+git clone -b base/avatar-rdna4 https://github.com/GromX0/victory-fork
+cd victory-fork
 copy victory.example.toml victory.toml      # then set your paths, outside this folder
 cargo build --locked --profile diag -p victory --features diagnostics
 scripts\play.ps1 -Exe <path of your copy's executable>
 ```
+
+With 32 GB of RAM, give Windows a page file of 32-64 GB. A run's commit
+reaches 60-68 GB here.
+
+`tools\fork-run.ps1` is the measuring harness used for the figures above. It
+takes the switches from an env file (`-EnvFile`), clears every other
+`VICTORY_*` variable, and records the switches in effect, the commit peak and
+the frame lines of each run.
 
 `scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
 something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
@@ -160,8 +221,11 @@ commits taken from elsewhere name the commit and its author.
   this one started from, and the people whose pull requests it carries.
 - **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
   cube gradients, sparse textures.
+- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**:
+  the renderer patches and the rest of the tree this branch is built on.
 - **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
-  the ambient light idea, pipeline workers, and work by romainhedouin.
+  the ambient light idea, pipeline workers, work by romainhedouin, and the
+  RX 9070 compiler guard and VRAM changes on this branch.
 - **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
 - **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
   every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's

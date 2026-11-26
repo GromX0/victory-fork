@@ -2,7 +2,7 @@
 
 Driver 32.0.32029.2010, Windows 11, page file C: 32-64 GB (commit ceiling
 ~95 GB; Windows restarted 26 Nov 17:16 before these runs). Game
-`D:\GTA6\game_scarlett_master.exe`, Series X profile (4K output drawn at
+`<game_dir>\<title>.exe`, Series X profile (4K output drawn at
 1440p), no FSR, no frame generation.
 
 ## Method
@@ -80,7 +80,7 @@ Contact sheets of the presented frames:
 - ours: `D:\victory-scratch\captures\sheet-ours.png` (diag capture `rainbow`, 3ad44676)
 - belobug: `D:\victory-scratch\captures\sheet-belobug.png` (diag capture `bb-look`)
 
-Same shot, Lucia at the cell window: ours shows a bright **magenta panel
+Same shot, the main character at the cell window: ours shows a bright **magenta panel
 on the wall** right of the window (the known AMD purple defect); belobug
 shows ordinary posters there. Belobug's interiors are brighter (its
 ambient light). Faces, hair and walls comparable. Belobug progressed
@@ -152,7 +152,7 @@ fixes are ported to the new base one at a time, each measured.
 
 - `D:\victory-scratch\reference\powerpyx-prologue-1-ps5.jpg` (not in the
   repository): a 1280x720 screenshot from PowerPyx's prologue guide
-  (https://www.powerpyx.com/gta-6-prologue-walkthrough/), Lucia's cell at
+  (powerpyx.com, its prologue walkthrough), the main character's cell at
   the start of the prologue. Its prompts are PlayStation's ("Hold L2"),
   so it is the PS5 version, not Series X: qualitative evidence of colour
   and lighting character only, not a pixel oracle. Shows the photos and
@@ -172,7 +172,7 @@ fixes are ported to the new base one at a time, each measured.
 
 ## Series X reference (YouTube walkthrough)
 
-Source: BlitzZzon, "GTA 6 Walkthrough Part 1 - Prologue Mission | Xbox
+Source: BlitzZzon, "Walkthrough Part 1 - Prologue Mission | Xbox
 Series X 4K | No Commentary", https://www.youtube.com/watch?v=N0uepQQ0Lvo
 (1,026 s). Frames were drawn from the 854x480 stream the browser was
 served, not the 4K master: compression softens detail, so the reference
