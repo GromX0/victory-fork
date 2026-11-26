@@ -1679,6 +1679,13 @@ fn words<const N: usize>(desc: *const [u32; N]) -> Option<[u32; N]> {
     (!desc.is_null()).then(|| unsafe { desc.read_unaligned() })
 }
 
+/// Whether the words of view descriptions no view reads are cleared
+/// (`VICTORY_VIEW_CLEAN=0`: kept as the title passes them, as before).
+fn view_clean() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_VIEW_CLEAN").is_none_or(|v| v != "0"))
+}
+
 /// A shader resource view's description with the words no view reads set to
 /// 0: the padding before its 8-byte-aligned union (word 3) and the union's
 /// words past the members of the view's dimension. The title's descriptions
@@ -1687,6 +1694,9 @@ fn words<const N: usize>(desc: *const [u32; N]) -> Option<[u32; N]> {
 /// most varied word (49,668 values in 69,052) that padding (ow-idle1,
 /// hf-measure-census). Unknown dimensions keep every word.
 fn clean_srv(mut d: [u32; 10]) -> [u32; 10] {
+    if !view_clean() {
+        return d;
+    }
     d[3] = 0;
     // Words of each dimension's member, from word 4: buffer (first element,
     // count, stride, flags), 1D, 1D array, 2D, 2D array, 2D multisample,
@@ -1713,6 +1723,9 @@ fn clean_srv(mut d: [u32; 10]) -> [u32; 10] {
 /// word 2: the buffer's first element, count, stride, counter offset and
 /// flags take words 2 to 8, word 9 is padding).
 fn clean_uav(mut d: [u32; 10]) -> [u32; 10] {
+    if !view_clean() {
+        return d;
+    }
     let used = match d[1] {
         1 => 7,
         2 => 1,
@@ -1732,6 +1745,9 @@ fn clean_uav(mut d: [u32; 10]) -> [u32; 10] {
 /// before the 8-byte alignment) and at its end (word 13). In the shapes of
 /// placed views they had 3,259 and 2,792 values.
 fn clean_resource(mut r: [u32; 14]) -> [u32; 14] {
+    if !view_clean() {
+        return r;
+    }
     (r[1], r[13]) = (0, 0);
     r
 }
