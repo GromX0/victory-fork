@@ -1122,17 +1122,24 @@ static VIEWS: std::sync::RwLock<Views> = std::sync::RwLock::new(Views {
 pub(crate) static RECYCLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// After how many frames unused a table entry of a view of placed memory is
-/// let go (`VICTORY_VIEW_RECYCLE_FRAMES`, 900; 0: never, as before). Such
-/// views have no resource object whose release frees them: once the shapes
-/// were full (4,194,304 of them, after 25 minutes of open world, the title
-/// putting buffer views at ever other element offsets) each became an entry
-/// kept for the run: 12.7 million, 5.7 GB, ~560,000 more a minute (session2).
-/// An entry let go takes a new generation, so a record the title still holds
-/// of it names nothing (a null view), never the view made there next.
+/// let go (`VICTORY_VIEW_RECYCLE_FRAMES`; 0, the default: never). Such views
+/// have no resource object whose release frees them: once the shapes were
+/// full (4,194,304 of them, after 25 minutes of open world, the title putting
+/// buffer views at ever other element offsets) each became an entry kept for
+/// the run: 12.7 million, 5.7 GB, ~560,000 more a minute (session2). An entry
+/// let go takes a new generation, so a record the title still holds of it
+/// names nothing (a null view), never the view made there next.
+///
+/// Off by default: with 900 on the opening route (shapes capped at 100,000 to
+/// make them overflow) the entries fell from 4.73 to 1.81 million and our
+/// heap from 4,318 to 2,795 MB, but records looked up after their entry was
+/// let go rose from 40.0 to 46.4 million: the title comes back to views
+/// unused for 900 frames, and those name nothing. Not on by default until
+/// that is shown not to change the picture.
 fn recycle_frames() -> u32 {
     static FRAMES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *FRAMES.get_or_init(|| {
-        std::env::var("VICTORY_VIEW_RECYCLE_FRAMES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(900)
+        std::env::var("VICTORY_VIEW_RECYCLE_FRAMES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
     })
 }
 
