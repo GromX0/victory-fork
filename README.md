@@ -1,241 +1,153 @@
-# VIctory on an RX 9070 (branch `base/avatar-rdna4`)
+<div align="center">
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
+# victory-fork
 
-**This branch is the best build measured so far on an AMD RX 9070.** It is
-[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)
-`2de99801` with the RX 9070 changes of
-[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)
-`81ebb7bd` cherry-picked (`b7fb278a`). Those changes are a guard that
-catches the AMD shader compiler's crashes and leaves those pipelines out, VRAM
-eviction, and a keep-shown guard. Belobug's magenta filter was left out on
-purpose, because it hides a defect instead of fixing it.
+**An Xbox Series X title on a Radeon RX 9070, aiming to look and play the way
+it does on the console.**
 
-## Where this branch stands (2026-11-26)
+A fork of [VIctory](https://github.com/Marvisak/VIctory), the compatibility
+layer that runs an Xbox Series title natively on Windows from files you supply.
 
-One machine: Windows 11, Ryzen 7 9800X3D, 32 GB RAM, Radeon RX 9070 16 GB
-(driver 32.0.32029.2010), page file 32-64 GB. Series X profile (4K output
-drawn at 1440p), no FSR, no frame generation. The scene is the opening
-cutscene and the first interior, 420 s per run, with warm caches.
+[![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
+![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%2F11-0078D6)
+![Tested on: Radeon RX 9070](https://img.shields.io/badge/tested%20on-Radeon%20RX%209070-ED1C24)
+![Status: about 21 fps sampled, not 30 yet](https://img.shields.io/badge/status-~21%20fps%20sampled%2C%20not%2030%20yet-orange)
 
-| Build | Median frame (5-s averages) | p90 of those averages |
-|---|---|---|
-| **This branch, ray tracing off** | **46.1 ms (21.7 fps)** | 70.5 ms |
-| This branch, ray tracing on (`VICTORY_BVH_BUILDER=1`) | 86.2 ms (11.6 fps) | 282.6 ms |
-| Belobug `81ebb7bd` (kept as the comparison point) | 47.5 ms (21.1 fps) | 97.0 ms |
-| Our previous line (`int/harvest-test`) | 148.2 ms (6.7 fps) | 198.4 ms |
+</div>
 
-These are sampled 5-second averages in one scene. They are **not** sustained,
-console-equivalent performance, because the fast builds still:
-
-- leave out 37 compute pipelines the AMD compiler crashes on;
-- add a replacement ambient light (`VICTORY_AMBIENT=0.8`);
-- show newly streamed textures later.
-
-Compared with Series X footage of the same scenes, what is still wrong:
-
-- Some posters and papers render **purple**, with ray tracing off **and on**.
-- Shadowed areas are dark or black where the console shows warm bounced
-  light.
-- With ray tracing on, a cell wall was missing in one shot.
-- One device loss (`DXGI_ERROR_DRIVER_INTERNAL_ERROR`) happened during a
-  cold-cache warm-up. Repeated cold and warm starts are being run to settle
-  whether this build is stable.
-
-The details and the evidence:
-
-- [docs/base-manifest.md](docs/base-manifest.md): exact commits, hashes,
-  switches and machine.
-- [docs/base-comparison-2026-11-26.md](docs/base-comparison-2026-11-26.md):
-  builds compared, captures, Series X reference.
-- [docs/experiments.md](docs/experiments.md): every experiment, including
-  the failed ones.
-
-The rest of this README is AvatarManz's, with their measurements on an RX
-7900 XTX.
+> [!IMPORTANT]
+> **This repository contains no game files, code or assets.** You need your
+> own copy of the game. It is not affiliated with or endorsed by the game's
+> developer or publisher.
 
 ## The goal
 
-**The Series X version at 4K output (drawn at 1440p) with ray tracing on,
-looking the way it does on the Xbox**: on an AMD RX 7900 XTX first upstream,
-on an RX 9070 on this branch.
+The Series X version, on a PC, as it is on the console:
 
-In this order:
+- **The same picture**: the Series X profile (4K output drawn at 1440p), the
+  title's own ray-traced lighting, full-detail textures, no colours or dark
+  areas the console does not have.
+- **A sustained 30 fps** at those settings, natively. Frame generation,
+  skipped rendering work or hidden defects do not count.
+- **Responsive controls and reliable saves**, in 30-minute sessions and longer.
 
-1. **A correct picture.** Textures and models reach full detail and stay there
-   (no pop-in or pop-out, no flickering trees), and ray-traced lighting is right:
-   not too dark, not too bright, no flicker.
-2. **Then the frame rate:** 30 fps or more with ray tracing on, then as high a
-   frame rate and as low frame times as the PC allows.
-3. **Then smaller PCs:** 32 GB (later 16 GB) of RAM and smaller cards.
+## Where it stands (26 November 2026)
 
-The way there is **porting, not emulating**: patching the title's renderer so it
-behaves the way a PC renderer does, rather than having the layer watch and copy
-the console's shared memory every frame. Shaders are translated ahead of time
-into a versioned store that is kept between builds. The Series S profile and
-ray tracing off stay available.
+My test PC: Ryzen 7 9800X3D, 32 GB RAM, Radeon RX 9070 16 GB (driver
+32.0.32029.2010), Windows 11, page file 32-64 GB. Series X profile, no FSR,
+no frame generation. The scene is the opening cutscene and the first
+interior, 420-second runs with warm caches, all measured with the same
+harness (`tools/fork-run.ps1`).
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's developer
-or publisher.
+| Build | Median frame | p90 |
+|---|---|---|
+| **This build, ray tracing off** | **46.1 ms (21.7 fps)** | 70.5 ms |
+| This build, ray tracing on | 86.2 ms (11.6 fps) | 282.6 ms |
+| Belobug's RX 9070 fork (comparison point) | 47.5 ms (21.1 fps) | 97.0 ms |
+| My previous line (`int/harvest-test`) | 148.2 ms (6.7 fps) | 198.4 ms |
 
-## Where it stands upstream (AvatarManz, 2026-11-26)
+These are sampled 5-second averages from one scene. They are **not yet
+sustained console-equivalent performance**: this build still leaves out 37
+compute pipelines the AMD shader compiler crashes on, uses a replacement
+ambient light (`VICTORY_AMBIENT=0.8`), and shows newly streamed textures
+later.
 
-Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, renderer patches 1, 2, 5, 6 and 7 on. Runs of 270 s in a city
-street: standing still, then walking and turning the camera.
+Against Series X footage of the same scenes:
 
-| Version | Standing | Walking | RAM |
-|---|---|---|---|
-| **Series X, 4K drawn at 1440p, ray tracing on (the goal)** | 99 ms (10 fps) | ~110 ms (9 fps) | 45 GB |
-| Series X, 4K drawn at 1440p, ray tracing off | 49 ms (20 fps) | ~62 ms (16 fps) | 45 GB |
-| Series X, 1080p output, ray tracing off | 40 ms (25 fps) | ~43 ms (23 fps) | 42 GB |
-| Series S, ray tracing off | 43 ms (23 fps) | ~64 ms (16 fps) | 37 GB |
+- Some papers and posters render **purple**, with ray tracing off and on.
+- Shadowed areas are dark where the console shows warm bounced light.
+- With ray tracing on, a wall was missing in one shot.
 
-Known problems with ray tracing on, being worked on now: lighting flickers and
-swings between too dark and too bright even when nothing moves; dark rooms and
-backgrounds; models and textures stay at their lowest detail for a long time
-while the title streams (worst in the intro); trees flicker.
+## What I'm working on
 
-Earlier measurements with ray tracing off:
+Stage by stage, each with an evidence gate before the next:
 
-| | |
+| Stage | Status |
 |---|---|
-| City street, Series S profile, renderer patches 1, 2, 5, 6 and 7 on | about 45 ms a frame (about 22 fps, 44.9 ms in run merge-5) |
-| Same, patches 1, 2, 5 and 6 | 45.6 ms, p95 47 ms |
-| Same, patches 1, 2 and 5 | 47.3 ms (about 21 fps), p95 49 ms |
-| Series X profile, patches 1+2 | about 53 ms (about 19 fps) |
-| Same scene before the patches | 57-75 ms (13-17 fps) |
-| Shaders the title uses that translate | all of them (25,790 of 25,985; the rest are unused geometry shaders) |
-| Memory | about 30 GB of private memory, 10.5 GB of VRAM: **64 GB of RAM recommended** for now |
+| 0. Pin the baseline | Done: commits, hashes, switches and machine in [docs/base-manifest.md](docs/base-manifest.md). Still to do: more routes and per-frame timing. |
+| 1. Startup and shader-compiler stability | **In progress.** I'm running repeated cold and warm starts with full GPU crash breadcrumbs. One device loss was seen once in a cold warm-up. My previous line's translation of the 37 shaders the AMD compiler crashes on compiles 35 of them. In the one I diffed, the difference is this build's AMD-specific float forms (`VICTORY_RDNA_FLOAT`); with them off, the translations match. Next I'll test whether the pipelines then compile. |
+| 2. Memory | A run's commit reaches 60-68 GB, so 32 GB needs a large page file for now. |
+| 3. Picture correctness | The purple and the missing bounced light: compared with Series X footage, cause being narrowed down. |
+| 4. CPU frame time | The frame is CPU-bound. Median parts of a 46 ms frame: submission preparation 38.7 ms, copy-back 22.8 ms, GPU wait 0.8 ms. |
+| 5. GPU and ray tracing | Ray tracing works on the RX 9070 but costs about 40 ms a frame. |
+| 6. Frame pacing | After 4 and 5. |
+| 7. Acceptance | 30-minute sessions on three routes at 30 fps, matching the Series X picture. |
 
-It started at 280 ms a frame in the same scenes three days earlier. What sets
-the frame now is the one thread that submits the title's work to the card
-(about 40 ms); the card itself needs about 36 ms and now waits about 7 ms a frame with nothing queued.
+The evidence for each step, including what didn't work:
 
-### Renderer patches (off by default while they are tested)
+- [docs/experiments.md](docs/experiments.md): every experiment and its result.
+- [docs/base-comparison-2026-11-26.md](docs/base-comparison-2026-11-26.md):
+  the builds compared, the captures and the Series X reference.
 
-| Switch | What it does |
-|---|---|
-| `VICTORY_PORT_CONSTANTS=1` | The title's 174 MB constants heap is read by the card where the title writes it: no uploads, no fills |
-| `VICTORY_PORT_DESCRIPTORS=1` | The title's descriptor-table stores are patched (byte-checked) to report the slots they write, instead of a scan of ~600,000 slots a frame |
-| `VICTORY_PORT_CBV=1` | Translated shaders read constant buffers in place as raw bytes (~22,000 fills a frame to none; -4.7 ms) |
-| `VICTORY_PORT_GUARD=1` | The write guards' lock is shared by faults and refreshes, with a claim per 64 KiB block; the submission's planning runs beside it (title threads' waits 29 ms to ~2 ms a frame; -2 ms) |
-| `VICTORY_PORT_JOURNAL=1` | The heaps' records are asked for at the title's submit, and the journal's notes are split into 64 parts with locks of their own (the submit thread's waits ~5 ms + 1 ms to ~0.3 ms; -1 to -3 ms) |
-
-### Other switches
-
-| Switch | What it does |
-|---|---|
-| `--console series-s` | The Series S profile: 1080p output, about 5 ms faster, a softer picture |
-| `VICTORY_OUTPUT=1920x1080` | The title renders to that output size itself (Series X profile; about 16 ms less card time) |
-| `VICTORY_FRAME_INTERVAL_MS=16.667` | Lets the title go above 30 fps (menus and videos reach 60; the game's clock stays right) |
-| `VICTORY_AMBIENT_SETTLE` | How fast light settles after walking indoors (on by default, `250,3`; `0` turns it off) |
-| `VICTORY_TEXTURE_STORE=1` | Converted textures kept between runs (about 8 ms a frame for now: off) |
-
-What is known to be wrong:
-
-- Trees, signs and far objects flicker in the distance in some places.
-- Lighting is too bright or too dark after walking indoors, until the title has
-  run for a while; rooms with little direct light are too dark without `-RayTracing`.
-- Textures of what just came into view appear late while the title streams.
-- The first run of a new build stutters while the driver makes pipelines
-  (`victory warm` makes them ahead).
-- Recording a frame in the world makes the title's own watchdog end it.
-
-## How to run it
+## Build and run
 
 You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
 model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
 tools, and your own dump of the title.
 
 ```powershell
-git clone -b base/avatar-rdna4 https://github.com/GromX0/victory-fork
+git clone https://github.com/GromX0/victory-fork
 cd victory-fork
 copy victory.example.toml victory.toml      # then set your paths, outside this folder
 cargo build --locked --profile diag -p victory --features diagnostics
 scripts\play.ps1 -Exe <path of your copy's executable>
 ```
 
-With 32 GB of RAM, give Windows a page file of 32-64 GB. A run's commit
-reaches 60-68 GB here.
+- `-RayTracing` turns the title's ray-traced lighting on (`VICTORY_BVH_BUILDER=1`).
+- `-Safe` leaves out the newest, faster paths: try it first when something
+  is wrong.
+- With 32 GB of RAM, set a page file of 32-64 GB.
 
-`tools\fork-run.ps1` is the measuring harness used for the figures above. It
-takes the switches from an env file (`-EnvFile`), clears every other
-`VICTORY_*` variable, and records the switches in effect, the commit peak and
-the frame lines of each run.
-
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
-
-On a hybrid-graphics PC, the runtime and offline pipeline checks prefer a
-high-performance adapter with Shader Model 6.6. The runtime logs its adapter
-name, PCI vendor and device IDs, and dedicated VRAM. Set
-`VICTORY_D3D12_ADAPTER` to a zero-based DXGI index or part of the adapter's
-name to select it explicitly. With the launcher, pass
-`-More @{VICTORY_D3D12_ADAPTER='NVIDIA'}`.
-
-Before the first run, ahead of time (both can be stopped and go on later):
+Before the first run, do these once (both can be stopped and resumed):
 
 ```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+target\diag\victory.exe shaders <the shader archives>   # translates every shader, minutes
+target\diag\victory.exe warm --used                     # pipelines earlier runs drew with
 ```
 
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
+To measure a run the way the table above was measured, use
+`tools\fork-run.ps1 -GameExe <exe> -NoBuild -Diag -Seconds 420 -Keys start
+-EnvFile <switches.env>`. It clears every other `VICTORY_*` variable and
+records, for each run, the switches in effect, the commit peak and the frame
+times.
 
-## What is different here
+## What's in this build
 
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
+- **Renderer patches** (`VICTORY_PORT_*`): the title's constants heap,
+  descriptor tables and constant buffers are read where the title writes
+  them, instead of being copied every frame.
+- **Submission on threads of its own**: list calls are recorded on the
+  title's threads and translated by eight worker threads; submissions are
+  prepared in parallel and joined.
+- **Copy-back beside the write guards**: what shaders wrote returns to title
+  memory by the dwords that changed, on its own thread.
+- **Textures on their own copy queue**, shown only once uploaded.
+- **RX 9070 support**: a guard that survives the AMD shader compiler's
+  crashes and leaves those pipelines out, VRAM eviction, and a keep-shown
+  guard.
+- **Measuring and comparison tools**: the run harness with env files, the
+  stability screen, and side-by-side captures against Series X footage.
 
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
+Every `VICTORY_...` switch is described in a comment where it is read. The
+upstream write-up of the renderer work and its RX 7900 XTX measurements is
+in [docs/README-avatarmanz.md](docs/README-avatarmanz.md).
 
 ## Credits
 
-This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
+This fork builds on other people's work, and the history keeps every
+author:
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: the loader, the runtime services, the Direct3D 12 back end and
-  the shader recompiler.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
-  cube gradients, sparse textures.
-- **[avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)**:
-  the renderer patches and the rest of the tree this branch is built on.
-- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
-  the ambient light idea, pipeline workers, work by romainhedouin, and the
-  RX 9070 compiler guard and VRAM changes on this branch.
-- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
-- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
-  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
-  reads into title memory.
-- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
-  title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+- [VIctory](https://github.com/Marvisak/VIctory) by Marvisak and contributors:
+  the loader, runtime, Direct3D 12 back end and shader recompiler.
+- [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX):
+  the renderer patches and threaded submission this build is based on.
+- [Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD):
+  the RX 9070 compiler guard and VRAM changes.
+- [fxceless/victory-fork](https://github.com/fxceless/victory-fork),
+  [DexNom/VIctory](https://github.com/DexNom/VIctory) and the others named in
+  [docs/README-avatarmanz.md](docs/README-avatarmanz.md).
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
+GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE). The one file it does
+not cover is named in [docs/asset-policy.md](docs/asset-policy.md).
