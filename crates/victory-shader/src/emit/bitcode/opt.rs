@@ -695,6 +695,23 @@ impl Module {
     }
 
     /// What kind of instruction `i` is for merging.
+    /// Whether `i` makes a descriptor handle. [`REUSE`] gives such a call
+    /// the result of an earlier one of the same block only, not of a block
+    /// above it: with handles made in one block and used in the blocks below
+    /// it, AMD's compiler (amdxc64.dll 32.0.32029.2010, +0x861b9f) crashed
+    /// on 37 of the title's compute programs, and with every pass but this
+    /// one f018c205b5199d39 still did; made again in each block (as before
+    /// this pass, and as our earlier translator did) they compile.
+    fn makes_handle(&self, i: u32) -> bool {
+        let Op::Call(f, _) = &self.insts[i as usize].op else {
+            return false;
+        };
+        matches!(
+            &*self.funcs[*f as usize].name,
+            "dx.op.createHandleFromHeap" | "dx.op.annotateHandle" | "dx.op.createHandle" | "dx.op.createHandleFromBinding"
+        )
+    }
+
     fn class(&self, effects: &[Effect], i: u32) -> Effect {
         match &self.insts[i as usize].op {
             Op::Bin(..)
@@ -801,6 +818,10 @@ impl Module {
         let mut known: HashMap<Key, V> = HashMap::new();
         // The reads of the block being walked since its last store.
         let mut read: HashMap<Key, V> = HashMap::new();
+        // The descriptor handles the block being walked has made: one made
+        // again in a later block is not given the earlier one's (see
+        // `makes_handle`).
+        let mut handles: HashMap<Key, V> = HashMap::new();
         let mut facts = Facts::default();
         let (yes, no) = (self.bool(true), self.bool(false));
         enum Step {
@@ -841,6 +862,7 @@ impl Module {
                 None => v,
             };
             read.clear();
+            handles.clear();
             // Two joins of the same values from the same blocks are one.
             if passes & REUSE != 0 && self.blocks[b].phis.len() > 1 {
                 let mut joins: HashMap<Vec<(usize, V)>, V> = HashMap::new();
@@ -896,6 +918,17 @@ impl Module {
                 }
                 let class = self.class(&effects, i);
                 if passes & REUSE != 0
+                    && class == Effect::Pure
+                    && self.makes_handle(i)
+                    && let Some(key) = self.key(i)
+                {
+                    if let Some(&first) = handles.get(&key) {
+                        repl[i as usize] = Some(first);
+                        changed = true;
+                        continue;
+                    }
+                    handles.insert(key, V::Inst(i));
+                } else if passes & REUSE != 0
                     && class == Effect::Pure
                     && let Some(key) = self.key(i)
                 {
