@@ -771,15 +771,33 @@ fn used() -> std::sync::MutexGuard<'static, Option<HashSet<String>>> {
 
 /// Whether the title pipeline with `key` was requested in this or an earlier run.
 ///
-/// `VICTORY_EARLY_ALL=1`: every title pipeline is started at creation,
-/// requested before or not, so that the driver's own cache holds it for
-/// later runs.
+/// Every title pipeline is started at creation, requested before or not,
+/// on a cache without an early list (the first run on it) or with
+/// `VICTORY_EARLY_ALL=1`; `=0` never. A first run otherwise drops the
+/// title's draws while their pipelines are made as it loads, and some of
+/// that work is done once: every character's face, neck and arms were
+/// missing for the run (stab-cold3, coldkeepbad); started at creation, they
+/// were there (coldearlyonly). Later runs start what earlier ones used (their
+/// faces were there): starting all of them held ~4.5 GB more by five minutes
+/// and kept growing (84,252 started, 72,223 made in session2).
 pub(crate) fn wanted_early(key: &str) -> bool {
     static ALL: OnceLock<bool> = OnceLock::new();
-    if *ALL.get_or_init(|| std::env::var_os("VICTORY_EARLY_ALL").is_some_and(|v| v == "1")) {
-        return true;
-    }
-    used().as_ref().is_some_and(|s| s.contains(key))
+    let all = *ALL.get_or_init(|| {
+        let asked = std::env::var("VICTORY_EARLY_ALL").ok();
+        let first_run = used().as_ref().is_none_or(HashSet::is_empty);
+        let all = match asked.as_deref() {
+            Some("1") => true,
+            Some("0") => false,
+            _ => first_run,
+        };
+        tracing::info!(
+            all,
+            first_run,
+            "title pipelines started at creation: all of them on a cache without an early list, else those earlier runs used (VICTORY_EARLY_ALL=1: all, 0: those)"
+        );
+        all
+    });
+    all || used().as_ref().is_some_and(|s| s.contains(key))
 }
 
 /// A draw or dispatch requested the title pipeline with `key`.
