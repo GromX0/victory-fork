@@ -41,22 +41,38 @@ harness (`tools/fork-run.ps1`).
 
 | Build | Median frame | p90 |
 |---|---|---|
-| **This build, ray tracing off** | **46.1 ms (21.7 fps)** | 70.5 ms |
-| This build, ray tracing on | 86.2 ms (11.6 fps) | 282.6 ms |
-| Belobug's RX 9070 fork (comparison point) | 47.5 ms (21.1 fps) | 97.0 ms |
+| **This build, ray tracing off, all compute work run** | **65.1 ms (15.4 fps)** | 272.9 ms |
+| The pinned base before the shader fix (37 compute pipelines left out) | 46.1 ms (21.7 fps) | 70.5 ms |
+| The pinned base, ray tracing on | 86.2 ms (11.6 fps) | 282.6 ms |
+| Belobug's RX 9070 fork (comparison point, 35 left out) | 47.5 ms (21.1 fps) | 97.0 ms |
 | My previous line (`int/harvest-test`) | 148.2 ms (6.7 fps) | 198.4 ms |
 
-These are sampled 5-second averages from one scene. They are **not yet
-sustained console-equivalent performance**: this build still leaves out 37
-compute pipelines the AMD shader compiler crashes on, uses a replacement
-ambient light (`VICTORY_AMBIENT=0.8`), and shows newly streamed textures
-later.
+These are sampled 5-second averages from one scene. The earlier 21 fps
+figures were partly bought by leaving out 37 compute pipelines the AMD
+shader compiler crashed on. This build fixes that crash and runs them, which
+costs about 45 ms a frame in the heaviest scenes. Still **not
+console-equivalent**: it uses a replacement ambient light
+(`VICTORY_AMBIENT=0.8`) and shows newly streamed textures later.
 
-Against Series X footage of the same scenes:
+**First open-world session** (43 minutes, played with a controller from the
+start screen through the prologue into the open world; 0 device losses, 0
+crashes):
 
-- Some papers and posters render **purple**, with ray tracing off and on.
-- Shadowed areas are dark where the console shows warm bounced light.
-- With ray tracing on, a wall was missing in one shot.
+| Draws per frame | Median frame | p90 |
+|---|---|---|
+| 3-6k (prologue interiors) | 56.5 ms (17.7 fps) | 121 ms |
+| 6-9k | 86.0 ms (11.6 fps) | 189 ms |
+| 9k+ (open world) | 177.5 ms (5.6 fps) | 285 ms |
+
+Against Series X footage, and in the open world:
+
+- Foliage renders **purple/magenta** almost everywhere outdoors. Papers and
+  posters indoors too, with ray tracing off and on.
+- Some frames wash out white-blue and smear (temporal accumulation or
+  exposure).
+- Nights and interiors are far too dark where the console shows bounced
+  light.
+- Memory: the process reached 52 GB and the system's commit 82 GB.
 
 ## What I'm working on
 
@@ -65,10 +81,10 @@ Stage by stage, each with an evidence gate before the next:
 | Stage | Status |
 |---|---|
 | 0. Pin the baseline | Done: commits, hashes, switches and machine in [docs/base-manifest.md](docs/base-manifest.md). Still to do: more routes and per-frame timing. |
-| 1. Startup and shader-compiler stability | **In progress.** I'm running repeated cold and warm starts with full GPU crash breadcrumbs. One device loss was seen once in a cold warm-up. My previous line's translation of the 37 shaders the AMD compiler crashes on compiles 35 of them. In the one I diffed, most of the difference is this build's AMD-specific float forms (`VICTORY_RDNA_FLOAT`). With them off, its float operations match mine and only small differences remain (fewer buffer loads and index clamps). Next I'll test whether the pipelines then compile. |
-| 2. Memory | A run's commit reaches 60-68 GB, so 32 GB needs a large page file for now. |
-| 3. Picture correctness | The purple and the missing bounced light: compared with Series X footage, cause being narrowed down. |
-| 4. CPU frame time | The frame is CPU-bound. Median parts of a 46 ms frame: submission preparation 38.7 ms, copy-back 22.8 ms, GPU wait 0.8 ms. |
+| 1. Startup and shader-compiler stability | **Mostly done.** 6 of 6 cold and warm starts and a 43-minute session without a device loss. The AMD compiler crash on 37 compute shaders is fixed at its cause: one clean-up pass in the shader translator reused descriptor handles across blocks; offline 35 of 35 now compile, and a cold start has 0 crashes (32 before). Faces missing after a cold start are fixed by compiling pipelines when the game creates them (`VICTORY_EARLY_ALL=1`). **Open:** the title crashed at start-up (frame 0) in 2 of 5 boots of the fixed build; being counted against the previous build. |
+| 2. Memory | Commit peaked at 82 GB in the open world (process 52 GB); 32 GB of RAM needs a large page file. Next stage. |
+| 3. Picture correctness | Purple foliage and papers, smeared washed-out frames, missing bounced light: first inventory from the open world in [docs/experiments.md](docs/experiments.md). |
+| 4. CPU frame time | Prologue: CPU-bound (submission preparation ~39-45 ms, copy-back ~20 ms). Open world at 9k+ draws: 177 ms a frame, most of it not yet accounted for. |
 | 5. GPU and ray tracing | Ray tracing works on the RX 9070 but costs about 40 ms a frame. |
 | 6. Frame pacing | After 4 and 5. |
 | 7. Acceptance | 30-minute sessions on three routes at 30 fps, matching the Series X picture. |
