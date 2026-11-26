@@ -121,9 +121,10 @@ Captures (diagnostics, presented frames, every 8th world frame):
   belobug. So belobug's clean wall is its magenta filter at work, not a
   fix. Its own comment: "Magenta ... is what the probes' memory held,
   not light".
-- Hypothesis (not yet proven): the purple is the lighting reading probe
-  memory that the title's ray tracing fills; with the builder off it
-  holds whatever was there. With the builder on, no purple was seen in
+- Hypothesis (falsified later the same day, see "Series X reference":
+  purple papers in the builder-on frame 1503): the purple is the
+  lighting reading probe memory that the title's ray tracing fills; with
+  the builder off it holds whatever was there. With the builder on, no purple was seen in
   this run's thumbnails, but the shots differ (it progressed into the
   corridor, mess hall and cell block); the papers are not in view.
 - Builder on, frame 1463: sun shafts and yard lighting plausible, but
@@ -146,3 +147,73 @@ Kept as they are: belobug 81ebb7bd (`D:\dev\wt-belobug`, exe
 `builds\81ebb7bdc9-diag`) as the comparison point; GromX0
 int/harvest-test (ours, de15fee7 + notes) as the fallback. Our own
 fixes are ported to the new base one at a time, each measured.
+
+## Reference material
+
+- `D:\victory-scratch\reference\powerpyx-prologue-1-ps5.jpg` (not in the
+  repository): a 1280x720 screenshot from PowerPyx's prologue guide
+  (https://www.powerpyx.com/gta-6-prologue-walkthrough/), Lucia's cell at
+  the start of the prologue. Its prompts are PlayStation's ("Hold L2"),
+  so it is the PS5 version, not Series X: qualitative evidence of colour
+  and lighting character only, not a pixel oracle. Shows the photos and
+  papers on the cell walls in ordinary colours (white, yellow), a warm,
+  dim, low-sun interior.
+- Comparison `D:\victory-scratch\captures\pair-cell-reference.png`:
+  reference | combined b7fb278a ray tracing on (base-rt-look 1559) |
+  belobug 81ebb7bd (bb-look 2040). Camera angles differ (the reference
+  faces the window wall, the builds the door wall), so only gross
+  differences count: the builds' cell is lit with sun patches and reads
+  cooler and higher in contrast than the reference's warm interior
+  (unconfirmed: the walls differ). The purple papers of ours and of the
+  builder-off combined build are confirmed wrong by the reference.
+- A Series X reference (below) replaces this as the main reference; the
+  game version shown in it is not known, so it is still not a reference
+  of the same build (930.048.020).
+
+## Series X reference (YouTube walkthrough)
+
+Source: BlitzZzon, "GTA 6 Walkthrough Part 1 - Prologue Mission | Xbox
+Series X 4K | No Commentary", https://www.youtube.com/watch?v=N0uepQQ0Lvo
+(1,026 s). Frames were drawn from the 854x480 stream the browser was
+served, not the 4K master: compression softens detail, so the reference
+supports colour and lighting checks, not pixel comparisons.
+
+- Frames (not in the repository), `D:\victory-scratch\reference\`:
+  `xsx-blitzzzon-N0uepQQ0Lvo-404s-window.png`, `-412s-window-back.png`,
+  `-450s-cellblock.png`, `-418-458s-sheet.png`.
+- Grids, `D:\victory-scratch\captures\`:
+  - `xsx-window-grid.png`: Series X 412 s | ours (rainbow 1884) |
+    combined RT off (base-look 1753) / combined RT on (base-rt-look 1503)
+    | belobug (bb-look 1944) | Series X 404 s.
+  - `xsx-cellblock-grid.png`: Series X 450 s | combined RT on
+    (base-rt-look 1623) | belobug (bb-look 2088) | combined RT on (1543).
+
+Findings:
+
+1. **Papers beside the window.** On Series X they are beige and white
+   with dark writing. They are purple in ours, in the combined build with
+   RT off, and in the combined build **with RT on** (1503: purple papers
+   and a purple-blue glow on the bunk). Belobug's are pale, because of its
+   magenta filter. This falsifies, for this build, the hypothesis that the
+   purple is probe memory filled by the title's ray tracing: the builder
+   running does not remove it.
+2. **Bounce light is missing in all PC builds.** On Series X the
+   shadowed side of the window shot is lit warm orange by bounced sun:
+   bunk frame, wall and papers. In every PC build that side is dark navy
+   or black. In the cell block, Series X shows soft fill in the bunk
+   shadows, while the combined RT-on frame 1543 has near-black bedding.
+   Belobug's AMBIENT=0.8 lifts the dark areas, but not with the warm
+   bounced colour.
+3. **Comparable at this resolution:** the exterior through the window,
+   faces, hair, the cell-block walls and their colour, and the lit
+   fluorescent ceiling panels.
+4. **Not judged:** sun patches on the cell-block walls appear in the
+   builds' frames but not in the Series X frame at 450 s. That is a
+   different moment and camera.
+
+Hypothesis (Stage 3, not yet tested): the purple and the unlit shadowed
+areas are one defect in the indirect diffuse light. Where it reads
+garbage it shows purple; where it reads nothing it shows black. The test
+is to find the pass that writes the indirect light for the window-shot
+bunk area and compare its inputs with what the title expects. It waits
+until Stage 1 per the roadmap.
