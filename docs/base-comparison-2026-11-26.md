@@ -102,3 +102,47 @@ same shot for all three builds, and the combined build's capture.
    target: 2560x1440 RGBA16F written by their indirect draws). The
    belobug commit's magenta filter (left out of combined) hides it.
 6. Glowing eyes (ours, frame 1721 of `rainbow`).
+
+## Update: ray tracing on, matched-shot captures, decision
+
+Combined build with the game's own BVH builder on (`envs/base-rt.env` =
+base-play + VICTORY_BVH_BUILDER=1; run base-rt): 438 s, time limit, no
+device loss, no compiler crashes (warm), commit peak 67.8 GB. Median of
+world lines 86.2 ms (11.6 fps), p90 282.6 ms (frames with up to 186 ms
+on the card). Draws dropped a frame: 1 (the ~380 of the builder-off runs
+are mostly the builder's own passes, skipped on purpose).
+
+Captures (diagnostics, presented frames, every 8th world frame):
+`base-look` (builder off) and `base-rt-look` (builder on), sheets
+`sheet-base.png`, `sheet-base-rt.png`; pair `pair-window-ours-belobug.png`.
+
+- Wall papers beside the cell window: purple in ours AND in the combined
+  build with the builder off (magenta filter left out); white in
+  belobug. So belobug's clean wall is its magenta filter at work, not a
+  fix. Its own comment: "Magenta ... is what the probes' memory held,
+  not light".
+- Hypothesis (not yet proven): the purple is the lighting reading probe
+  memory that the title's ray tracing fills; with the builder off it
+  holds whatever was there. With the builder on, no purple was seen in
+  this run's thumbnails, but the shots differ (it progressed into the
+  corridor, mess hall and cell block); the papers are not in view.
+- Builder on, frame 1463: sun shafts and yard lighting plausible, but
+  the cell's walls are missing (the window frame stands in the open
+  yard), the defect KLBF lists ("sky where the wall should be").
+
+## Base decision (2026-11-26)
+
+New working base: **base/avatar-rdna4** (AvatarManz 2de99801 + Belobug
+81ebb7bd's RX 9070 compiler guard and VRAM changes, magenta filter left
+out). Reasons, all measured here: 2.5-3x ours by draw band with the
+builder off; the only build where the title's ray tracing runs on this
+card (11.6 fps median, faster than ours with rays forced to miss); the
+picture matches belobug's except the purple it masks. Conditions before
+calling it stable: the device loss in its warm-up (DRIVER_INTERNAL_ERROR
+3.5 min in, after 34 compiler crashes caught in-process) must be
+explained or not recur in repeated runs.
+
+Kept as they are: belobug 81ebb7bd (`D:\dev\wt-belobug`, exe
+`builds\81ebb7bdc9-diag`) as the comparison point; GromX0
+int/harvest-test (ours, de15fee7 + notes) as the fallback. Our own
+fixes are ported to the new base one at a time, each measured.
