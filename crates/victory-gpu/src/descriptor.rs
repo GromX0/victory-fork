@@ -1304,6 +1304,42 @@ fn views_write() -> std::sync::RwLockWriteGuard<'static, Views> {
     VIEWS.write().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Diagnostics: which words tell the shapes of placed views apart. For each
+/// word of a shape (the unordered flag; the resource's 14; the view's 14,
+/// without its address), the distinct values among a sample of up to
+/// 65,536 shapes; then the newest shape. A word that is a kind of texture or
+/// buffer has few values; one that differs per view has as many as the sample.
+#[cfg(all(windows, feature = "diagnostics"))]
+pub(crate) fn shapes_census() -> Option<String> {
+    let views = views_read();
+    let n = views.shapes.len();
+    if n < 1000 {
+        return None;
+    }
+    let step = (n / 65_536).max(1);
+    let mut sets: Vec<std::collections::HashSet<u32>> = vec![std::collections::HashSet::new(); 29];
+    let mut sampled = 0usize;
+    for (unordered, resource, rest) in views.shapes.iter().step_by(step) {
+        sets[0].insert(u32::from(*unordered));
+        for (k, w) in resource.iter().enumerate() {
+            sets[1 + k].insert(*w);
+        }
+        for (k, w) in rest.iter().enumerate() {
+            sets[15 + k].insert(*w);
+        }
+        sampled += 1;
+    }
+    let count = |r: std::ops::Range<usize>| sets[r].iter().map(|s| s.len().to_string()).collect::<Vec<_>>().join(" ");
+    let (u, r, x) = &views.shapes[n - 1];
+    Some(format!(
+        "{n} kept; distinct values per word among {sampled} sampled: unordered {} | resource {} | view 0-9 {} | view 12-15 {}; the newest: {u} {r:x?} {x:x?}",
+        sets[0].len(),
+        count(1..15),
+        count(15..25),
+        count(25..29)
+    ))
+}
+
 /// For the memory line: the distinct views kept ([`Views`]), those of them
 /// free for reuse, and the bytes the table and its index hold for them (an
 /// estimate: an entry of the table, and one of the index with its share of

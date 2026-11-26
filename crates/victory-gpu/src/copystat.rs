@@ -1007,6 +1007,18 @@ fn log_memory() {
         mb(kept[6]),
         big_blocks(),
     );
+    // Once a minute (every 12th line): which words tell the shapes of placed
+    // views apart (Stage 2: they filled their 4,194,304 numbers in 25
+    // minutes of open world, after which each view is a table entry kept
+    // for the run).
+    {
+        static TURN: AtomicU64 = AtomicU64::new(0);
+        if TURN.fetch_add(1, Relaxed) % 12 == 0
+            && let Some(text) = crate::descriptor::shapes_census()
+        {
+            tracing::info!("shapes of placed views: {text}");
+        }
+    }
     // Round 3: whether windows hold the same memory more than once (they
     // can, once they are cut finer than 4 MiB), and how many host lists
     // the title made and never used.
