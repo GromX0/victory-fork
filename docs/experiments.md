@@ -115,6 +115,30 @@ Next single action: cold start keeping warm-bad.txt (all else in the pipelines f
 | 11-26 | 1465c1f2 (25ad7ce1 exe copy, same binary) | session1: user-played, base-play.env + VICTORY_EARLY_ALL=1, handlefix cache | Stage 1 gate part 2 | title crashed at boot again, **same address** victory-image+0x2215c35 (write 0x0). The layer's crash report: "Game State: System Init, Frame: 0"; the exception follows the D3D12 device's creation by ~0.1 s (log order), in a title thread (stack: +0x2215c35 <- +0x2215eca <- KERNEL32 thread start); rbx, rbp, r12-r15 = 0. None of the 37 newly run pipelines had bound (they first bind ~46 s in) | open Stage 1 item: a start-up race, 2 boots in 4 of this build, none in dozens of boots of earlier builds. Not yet attributed. Next: short boots of this and the previous build, counted |
 | 11-26 | 1465c1f2 (25ad7ce1 copy) | session2: user-played with a controller from the start screen into the open world, base-play.env + VICTORY_EARLY_ALL=1, handlefix cache, 45 min limit | Stage 1 gate part 2: 30 minutes without the known failure | **2625 s (43.75 min, stopped by the user), 0 device losses, 0 title crashes**, 4 compiler crashes (all at 20:45:34-45, start-up: EARLY_ALL compiles every created pipeline; new shaders, caught), commit peak 82.3 GB (process 52 GB private at the end; 0.6-3.5 GB left to commit at times while the page file grew to 45 GB+). By draw band: 3-6k 56.5 ms (17.7 fps, p90 121), 6-9k 86.0 ms (11.6 fps, p90 189), 9k+ 177.5 ms (5.6 fps, p90 285; prep 58.4 + copy back 20.2: most of the frame is elsewhere). 52 screenshots: `D:\victory-scratch\session2-shots`, sheet `captures\session2-sheet.png` | gate part 2 passed for the device loss. Not passed as a whole: the boot crash (2 of 5 boots of this build) is a start-up failure. The user found it unplayable in the open world (below) |
 
+```text
+Stage / blocker: 1, the title crashes at start-up (victory-image+0x2215c35, frame 0)
+Baseline commit + executable hash: 1465c1f2 (fixed translator) vs 9dfbe7c6 (before it)
+Scene, route, settings, cache state: boot-count.ps1: 6 boots each, alternating, 45 s, base-play.env, handlefix cache
+Observed evidence: 1465c1f2 1 crash in 6 (3 in 11 with the earlier runs), 9dfbe7c6 0 in 6 (0 in 9). Same time from launch
+  to device creation (0.16-0.33 s) and same device set-up (~0.32 s) in crashed and clean boots; one clean boot of
+  9dfbe7c6 took 6.8 s to set up the device. Minidump of the crash (cdb, WinDbg 'winget install Microsoft.WinDbg'):
+  - the faulting instruction is `mov dword ptr [0],0`: a deliberate crash by the title's WATCHDOG thread, which
+    sleeps 1 s a round, checks heartbeat timestamps against a limit, and counts down 30 rounds without progress;
+  - nothing was logged for ~30 s before it (exception printed right after "crash tracing on"; process exit 32 s in;
+    breakpad report at +31 s): the start-up STALLED right after the D3D12 device creation began;
+  - thread 43 at the crash: our host device creation (D3D12Core!D3D12CoreGetLayeredDeviceSize) inside AMD's shader
+    compiler initialisation (amdxc64!GetSettingsBlobsAll -> OpenShimInterface -> boost serialisation of its settings);
+    every other thread of ours was idle.
+  AMD's own compiled-shader cache %LOCALAPPDATA%\AMD\DxcCache: 9,265 MB in 124 files (grown by today's compiles).
+Hypothesis and falsification test: not tested yet. Candidates: AMD's cache size or state makes the compiler's
+  initialisation take >30 s at times; the fixed build only correlates through cache state (3/11 vs 0/9, not significant)
+One change: none
+Keep, revert or investigate: diagnosed as a driver-side stall during device creation that the title's watchdog turns
+  into a crash; not our translator's output. Mitigation that holds whatever the cause: create the host D3D12 device
+  before the title starts, so a driver stall delays the start instead of tripping the title's watchdog
+Next single action: that mitigation, then count boots again
+```
+
 ### Stage 3 defect inventory from session2 (open world, first look)
 
 1. Purple/magenta foliage almost everywhere, day and night (the papers' defect, far
