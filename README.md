@@ -17,6 +17,24 @@ an Xbox Series title running natively on Windows, from files you supply.**
 > own copy of the game. Not affiliated with or endorsed by the game's
 > developer or publisher.
 
+> [!TIP]
+> **Current best build (2026-11-26): branch
+> [`base/avatar-rdna4`](https://github.com/GromX0/victory-fork/tree/base/avatar-rdna4).**
+> It is [avatarmanz/VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)
+> with Belobug's RX 9070 compiler guard. On the RX 9070 it measures **about
+> 46 ms a frame (about 21 fps)** in the opening scenes with ray tracing off,
+> and about 86 ms (11-12 fps) with the title's ray tracing on. That is about
+> 3x this branch's 148 ms, measured the same way.
+>
+> These are sampled 5-second averages, not sustained console-equivalent
+> performance. That build still leaves out 37 pipelines the AMD compiler
+> crashes on, adds a replacement ambient light, renders some papers purple,
+> and lacks bounced light in shadowed areas. Its README and `docs/` give the
+> measurements, the Series X comparison and the open problems.
+>
+> Our own line, with the findings and the experiment log, is on
+> [`int/harvest-test`](https://github.com/GromX0/victory-fork/tree/int/harvest-test).
+
 > [!NOTE]
 > **Is it NVIDIA-only? No.** Most community testing so far was on NVIDIA,
 > but this fork runs on AMD: on a Radeon RX 9070 it loads into the world,
