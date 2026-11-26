@@ -25,6 +25,33 @@ extern "system" fn create_device(
     device::create(adapter, parameters, iid, out)
 }
 
+/// Makes the host D3D12 device before the title runs (`VICTORY_HOST_EARLY=0`:
+/// at the title's first use of it, as before). Made on a title thread, its
+/// creation counted against the title's watchdog, which crashes the title on
+/// purpose after 30 s without progress (`mov dword ptr [0],0` at
+/// victory-image+0x2215c35, at start-up): AMD's compiler set-up inside the
+/// device creation (amdxc64 GetSettingsBlobsAll) stalled that long in about
+/// one boot in four. Made here, such a stall only delays the start.
+pub fn make_host_early() {
+    #[cfg(windows)]
+    {
+        if std::env::var_os("VICTORY_HOST_EARLY").is_some_and(|v| v == "0") {
+            return;
+        }
+        victory_gpu::resource::use_allocator(super::xmem::XMemAlloc, super::xmem::XMemFree);
+        victory_gpu::resource::use_page_mapper(super::xmem::map_alias);
+        victory_gpu::resource::use_many_page_mapper(super::xmem::map_aliases);
+        victory_gpu::on_failure(host_gpu_failed);
+        let began = std::time::Instant::now();
+        let made = victory_gpu::make_host();
+        tracing::info!(
+            made,
+            ms = began.elapsed().as_millis() as u64,
+            "host D3D12 device made before the title starts (VICTORY_HOST_EARLY=0: at its first use)"
+        );
+    }
+}
+
 /// A host GPU failure ends the run like a crash: reported to the crash log,
 /// then the process ends as the console ends a title.
 #[cfg(windows)]

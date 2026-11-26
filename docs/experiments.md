@@ -139,6 +139,38 @@ Keep, revert or investigate: diagnosed as a driver-side stall during device crea
 Next single action: that mitigation, then count boots again
 ```
 
+| Date | Build | Change / switches | Hypothesis | Result | Decision |
+| --- | --- | --- | --- | --- | --- |
+| 11-26 | 1465c1f2 + host device made before the title starts (VICTORY_HOST_EARLY, on; exe F35295901371ED9A) | boot-count.ps1, 10 boots, same cache and switches | a driver stall in device creation no longer reaches the title's watchdog | **10 of 10 boots clean** (before: 1 in 6 this way, 3 in 11 in all); device made in 290-391 ms before the title's first code; boots reach the logo frames as before. No boot stalled this time, so the change has not met an actual stall yet (0 in 10 by chance at the old rate: ~6%) | keep (on by default); watch for long "device made before the title starts" times |
+
+## Stage 2: memory (first accounting, from existing counters)
+
+The layer's `copystat` lines already give: process private commit and working set, the PC's free
+memory and commit left; host copies of title memory (alive, MB; of them windows outside buffers);
+snapshot buffers; texture staging; host textures alive; cumulative upload, shared and card buffers
+made; host copies never let go (render targets and written resources). session2 (43 min, open
+world), every ~5 min:
+
+| Time | Private | Host copies | Host textures | Never let go | Shared buffers made (cum.) | Private - host copies |
+| --- | --- | --- | --- | --- | --- | --- |
+| 20:50 | 41.0 GB | 4.7 GB | 6.5 GB | 3.1 GB | 18,018 / 8.6 GB | 36.3 GB |
+| 21:01 | 47.6 | 5.1 | 6.3 | 3.4 | 56,286 / 28.8 GB | 42.4 |
+| 21:12 | 48.1 | 5.4 | 7.3 | 3.6 | 96,814 / 39.0 GB | 42.7 |
+| 21:28 | 55.1 | 6.1 | 6.5 | 3.7 | 126,759 / 57.6 GB | 49.0 |
+
+- Private commit grows ~0.4 GB a minute for the whole session (not bounded); the accounted
+  categories stay flat (host copies 4.7-7.2 GB, never-let-go 3.1-3.7 GB). **~37-43 GB of private
+  commit is in no category the layer reports** (residual, not forced into a total). Shared
+  buffers alive are not reported (only made).
+- Same route, same point, with and without VICTORY_EARLY_ALL=1 (coldkeepbad vs coldearlyonly):
+  private 31.8 vs 37.4 GB at 120 s, 32.1 (flat) vs 40.1 GB (growing) at 280 s. **Compiling every
+  pipeline at creation costs ~8 GB by 5 min and keeps growing** as the title creates pipelines:
+  the likely driver of session2's climb (EARLY_ALL was on). The cold-start face fix and memory
+  are in tension: to be resolved here (EARLY_ALL for the first, cold run only, or bounded).
+- Next: report shared buffers alive and the host pipelines made (count, and private commit
+  before/after a batch of compiles) in the memory line; a repeat of one route to separate
+  cache growth from leaks.
+
 ### Stage 3 defect inventory from session2 (open world, first look)
 
 1. Purple/magenta foliage almost everywhere, day and night (the papers' defect, far

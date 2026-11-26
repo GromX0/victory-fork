@@ -233,6 +233,9 @@ pub fn run(
     victory_hle::runtime::set_title_dll_loader(Box::new(move |file| {
         late.load(file, show).map_err(|e| format!("{e:#}"))
     }));
+    // The host device before any title code: a slow creation then delays the
+    // start instead of counting against the title's watchdog.
+    victory_hle::modules::d3d12x::make_host_early();
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
     let code = main

@@ -111,6 +111,13 @@ mod texback;
 #[cfg(windows)]
 pub use host::on_failure;
 
+/// Makes the host D3D12 device now if it is not made yet (otherwise it is
+/// made at its first use); whether there is one.
+#[cfg(windows)]
+pub fn make_host() -> bool {
+    host::host().is_some()
+}
+
 /// Whether `switch` is on now, if it is one of those `VICTORY_AB` turns on and
 /// off while the title runs (`ab`).
 #[cfg(all(windows, feature = "diagnostics"))]
