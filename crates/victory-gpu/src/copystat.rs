@@ -1013,7 +1013,7 @@ fn log_memory() {
     // for the run).
     {
         static TURN: AtomicU64 = AtomicU64::new(0);
-        if TURN.fetch_add(1, Relaxed) % 12 == 0
+        if TURN.fetch_add(1, Relaxed).is_multiple_of(12)
             && let Some(text) = crate::descriptor::shapes_census()
         {
             tracing::info!("shapes of placed views: {text}");

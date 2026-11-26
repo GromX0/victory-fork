@@ -182,6 +182,27 @@ world), every ~5 min:
 - Kept shader containers 189 MB and translations 790 MB: small.
 - Next: the VRAM spill and the lists first (largest, demonstrated); then EARLY_ALL first-run only.
 
+Correction and attribution (same session, more lines read):
+
+- The pipelines: EARLY_ALL started 84,252 and made 72,223 by 21:04. By whole runs it adds ~4.5 GB
+  on the opening route (40.6 vs 36.0 GB private at the end, coldearlyonly vs coldkeepbad); the
+  per-pipeline figure from session2's first half mixed in the open world's streaming.
+- The host lists are flat (2,170 -> 2,230 alive); "private bytes grew 12 GB while lists were
+  made" counts what other threads allocated meanwhile.
+- **Our own heap** (the counting allocator) grew 2.5 -> 9.2 GB over the session, and **the view
+  table "distinct views kept" 9,619 entries 119 MB -> 12,256,904 entries 5,721 MB, 0 free**: the
+  shapes of placed views filled their 4,194,304 numbers at ~21:10, after which every view of
+  placed memory became a table entry kept for the run (12.7 million by 21:29).
+- Shape census (e7d6152f, opening route, hf-measure-census, 897,671 shapes after 7 min, ~150,000
+  a minute): of the 29 words of a shape, **the buffer view's FirstElement (view word 3) has 49,668
+  distinct values in 69,052 sampled**; then view word 9 (4,084), resource width (3,962), resource
+  words 1 and 13 (3,259, 2,792). The title makes buffer views at ever other element offsets.
+  Folding the offset into the address is not neutral: a placed buffer view's host copy is found
+  by its base address and width (`buffer_extent`), so each offset would become a buffer of its own.
+- Fix (6c88940d): table entries of views of placed memory unused for 900 frames are let go under
+  a new generation (a record still held names nothing, never the next view there), 8 looked at
+  per new entry. A/B on the opening route with the shapes capped at 100,000 to make them overflow.
+
 ### Stage 3 defect inventory from session2 (open world, first look)
 
 1. Purple/magenta foliage almost everywhere, day and night (the papers' defect, far
