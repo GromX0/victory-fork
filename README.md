@@ -65,7 +65,7 @@ Stage by stage, each with an evidence gate before the next:
 | Stage | Status |
 |---|---|
 | 0. Pin the baseline | Done: commits, hashes, switches and machine in [docs/base-manifest.md](docs/base-manifest.md). Still to do: more routes and per-frame timing. |
-| 1. Startup and shader-compiler stability | **In progress.** I'm running repeated cold and warm starts with full GPU crash breadcrumbs. One device loss was seen once in a cold warm-up. My previous line's translation of the 37 shaders the AMD compiler crashes on compiles 35 of them. In the one I diffed, the difference is this build's AMD-specific float forms (`VICTORY_RDNA_FLOAT`); with them off, the translations match. Next I'll test whether the pipelines then compile. |
+| 1. Startup and shader-compiler stability | **In progress.** I'm running repeated cold and warm starts with full GPU crash breadcrumbs. One device loss was seen once in a cold warm-up. My previous line's translation of the 37 shaders the AMD compiler crashes on compiles 35 of them. In the one I diffed, most of the difference is this build's AMD-specific float forms (`VICTORY_RDNA_FLOAT`). With them off, its float operations match mine and only small differences remain (fewer buffer loads and index clamps). Next I'll test whether the pipelines then compile. |
 | 2. Memory | A run's commit reaches 60-68 GB, so 32 GB needs a large page file for now. |
 | 3. Picture correctness | The purple and the missing bounced light: compared with Series X footage, cause being narrowed down. |
 | 4. CPU frame time | The frame is CPU-bound. Median parts of a 46 ms frame: submission preparation 38.7 ms, copy-back 22.8 ms, GPU wait 0.8 ms. |
