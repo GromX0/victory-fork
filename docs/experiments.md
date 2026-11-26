@@ -203,6 +203,10 @@ Correction and attribution (same session, more lines read):
   a new generation (a record still held names nothing, never the next view there), 8 looked at
   per new entry. A/B on the opening route with the shapes capped at 100,000 to make them overflow.
 
+| Date | Build | Change / switches | Hypothesis | Result | Decision |
+| --- | --- | --- | --- | --- | --- |
+| 11-26 | 6c88940d | recyc-off (VICTORY_VIEW_RECYCLE_FRAMES=0) vs recyc-on (900), both VICTORY_VIEW_SHAPES_MAX=100000, opening route, 420 s | letting go of unused placed entries bounds the table without changing what draws read | table 4.73 M entries (0 free) vs **1.81 M** (484 k free, 4.35 M let go); our heap 4,318 vs **2,795 MB**; private 36.5 vs 34.6 GB; 0 losses, 0 crashes both. But records looked up after their entry was let go: 40.0 M vs **46.4 M** (+16%): the title comes back to views unused for 900 frames, and those resolve to null views | memory part works; **off by default** (174ff6f4) until the picture is shown unchanged (captures, longer age, or a scheme that keeps entries a record may still name) |
+
 ### Stage 3 defect inventory from session2 (open world, first look)
 
 1. Purple/magenta foliage almost everywhere, day and night (the papers' defect, far
