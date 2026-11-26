@@ -167,9 +167,20 @@ world), every ~5 min:
   pipeline at creation costs ~8 GB by 5 min and keeps growing** as the title creates pipelines:
   the likely driver of session2's climb (EARLY_ALL was on). The cold-start face fix and memory
   are in tension: to be resolved here (EARLY_ALL for the first, cold run only, or bounded).
-- Next: report shared buffers alive and the host pipelines made (count, and private commit
-  before/after a batch of compiles) in the memory line; a repeat of one route to separate
-  cache growth from leaks.
+- Shared buffers are the host copies of title memory; their live figure is in the line (host
+  copies alive, 5-7 GB), so they retire. Title memory is committed per physical page once and
+  kept while the title owns it (xmem `commit`/`unmap`), as on the console: bounded by its asks
+  (~63 GB asked, mostly reservations, all at boot).
+- **Graphics memory over budget, spilling into system memory** (`memory of textures` line):
+  the card 14.6-15.4 GB in use against a budget of 13.5-13.7 GB from 20:50 on, and **10.4-12.9 GB
+  of the PC's memory shared with the card in use** (1.7 GB at the start). Textures are let go and
+  made again all the time: 685,185 let go (71 GB), 294,797 made again (32.6 GB), 28,309 passes
+  that made none for lack of room. GPU residency churn, which the Stage 2 gate names; it also
+  costs frame time. The spill counts against the PC's commit.
+- **Host command lists**: 5,737 made by the host (14 ever reset), and "private bytes grew 12,183 MB
+  while lists were made" (10,591 MB at 21:07): lists and their allocators pile up.
+- Kept shader containers 189 MB and translations 790 MB: small.
+- Next: the VRAM spill and the lists first (largest, demonstrated); then EARLY_ALL first-run only.
 
 ### Stage 3 defect inventory from session2 (open world, first look)
 
