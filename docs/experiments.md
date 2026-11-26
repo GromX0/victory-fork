@@ -206,6 +206,15 @@ Correction and attribution (same session, more lines read):
 | Date | Build | Change / switches | Hypothesis | Result | Decision |
 | --- | --- | --- | --- | --- | --- |
 | 11-26 | 6c88940d | recyc-off (VICTORY_VIEW_RECYCLE_FRAMES=0) vs recyc-on (900), both VICTORY_VIEW_SHAPES_MAX=100000, opening route, 420 s | letting go of unused placed entries bounds the table without changing what draws read | table 4.73 M entries (0 free) vs **1.81 M** (484 k free, 4.35 M let go); our heap 4,318 vs **2,795 MB**; private 36.5 vs 34.6 GB; 0 losses, 0 crashes both. But records looked up after their entry was let go: 40.0 M vs **46.4 M** (+16%): the title comes back to views unused for 900 frames, and those resolve to null views | memory part works; **off by default** (174ff6f4) until the picture is shown unchanged (captures, longer age, or a scheme that keeps entries a record may still name) |
+| 11-26 | 12a52593 | VICTORY_EARLY_ALL unset = automatic: all pipelines started at creation only on a cache without an early list. autocold (combined-cold, pipelines folder removed but the bad list kept, base-stab.env) then autowarm (same cache, base-play.env), 300 s each | first runs keep their faces, later runs drop the memory cost | autocold: `all=true first_run=true` (early list 0), 74,312 made of 84,249 started, faces present (22:41); private 36.1 GB at 202 s. autowarm: `all=false first_run=false` (early list 1,978), 8 made, 2,000 started early; private **31.1 GB** at 204 s, 33.1 at 283 s (cold: 36.3). 0 losses, 0 crashes both | keep: first run 3-5 GB more, every later run lean |
+
+**Route note (26 Nov, 22:37 on):** the save folder `D:\victory-data\avatar\data` now holds the user's
+open-world autosave from session2, so `-Keys start` (Enter at the start screen) continues it: runs
+from autocold on start in the open world (at home), not at the prologue. Runs before and after are
+not comparable. Saves are now frozen in `D:\victory-data\snapshots\{prologue,openworld}` and
+`ab-run.ps1 -Save <name>` restores one into `D:\victory-data\scripted\data` before each run (the
+user's own save folder untouched). victory.toml's cache_dir is `D:\victory-data\handlefix\cache`
+(translator 2, no stale bad list) since the handle fix.
 
 ### Stage 3 defect inventory from session2 (open world, first look)
 
