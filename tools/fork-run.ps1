@@ -75,7 +75,15 @@ param(
     # will allow (-CommitCeilingGB; 0: RAM plus the page files' largest size,
     # worked out at the start).
     [double]$CommitCeilingGB = 0,
-    [double]$CommitMarginGB = 2
+    [double]$CommitMarginGB = 2,
+    # The run's switches from a file, one KEY=VALUE a line (# comments, blank
+    # lines ignored), added to -SetEnv (which wins on a clash). Every other
+    # VICTORY_* in this shell is cleared for the run (only the folder paths
+    # stay), so a comparison's switches are exactly the file's.
+    [string]$EnvFile = '',
+    # Short name of what the run measures (the scene or checkpoint), kept in
+    # run.json beside the switches.
+    [string]$Scene = 'opening (new-game cutscene from the start screen)'
 )
 $ErrorActionPreference = 'Stop'
 $repo = (git -C $PSScriptRoot rev-parse --show-toplevel).Trim()
@@ -170,17 +178,32 @@ Copy-Item -Force $exe $kept
 $null = Invoke-Logged "`"$exe`" config" (Join-Path $run 'config.txt')
 
 # --- The run.
-# Switches left over in this shell that press keys or save frames would make
-# the run unlike normal play: clear them unless this run asks for them with
-# -SetEnv (the same list as scripts\play.ps1, from Zettrox/ztrx).
-$cleared = @()
-foreach ($v in 'VICTORY_KEYS', 'VICTORY_CAPTURE', 'VICTORY_CAPTURE_FRAMES', 'VICTORY_DUMP_TARGETS') {
-    if (-not $SetEnv.ContainsKey($v) -and (Test-Path "env:$v")) { Remove-Item "env:$v"; $cleared += $v }
+# Its switches are exactly -EnvFile's and -SetEnv's: every other VICTORY_*
+# left over in this shell is cleared (a reused shell otherwise carried one
+# run's switches into the next, unseen); only the folder paths stay.
+if ($EnvFile) {
+    foreach ($line in Get-Content -LiteralPath $EnvFile) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith('#')) { continue }
+        $kv = $t.Split('=', 2)
+        if ($kv.Count -ne 2) { throw "not KEY=VALUE in $EnvFile`: $t" }
+        if (-not $SetEnv.ContainsKey($kv[0].Trim())) { $SetEnv[$kv[0].Trim()] = $kv[1].Trim() }
+    }
 }
-if ($cleared) { Write-Host "cleared for this run: $($cleared -join ', ')" }
+$paths = 'VICTORY_CONFIG', 'VICTORY_GAME_DIR', 'VICTORY_CACHE_DIR', 'VICTORY_DATA_DIR'
+$cleared = @()
+foreach ($e in @(Get-ChildItem env: | Where-Object { $_.Name -like 'VICTORY_*' -and $_.Name -notin $paths })) {
+    if (-not $SetEnv.ContainsKey($e.Name)) { Remove-Item "env:$($e.Name)"; $cleared += "$($e.Name)=$($e.Value)" }
+}
+if ($cleared) { Write-Host "cleared for this run: $(($cleared | ForEach-Object { $_.Split('=')[0] }) -join ', ')" }
 $facts['cleared_env'] = $cleared
 foreach ($k in $SetEnv.Keys) { Set-Item -Path "env:$k" -Value $SetEnv[$k] }
 if (-not $env:VICTORY_LOG) { $env:VICTORY_LOG = 'info' }
+# What the run actually has, after the overrides (run.json's victory_env is
+# the shell's before them).
+$facts['effective_env'] = @(Get-ChildItem env: | Where-Object Name -like 'VICTORY_*' | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" })
+$facts['env_file'] = $EnvFile
+$facts['scene'] = $Scene
 $log = Join-Path $run 'victory.log'
 $err = Join-Path $run 'victory.err.log'
 # --- The system's commit (what Windows promised processes, against its limit
