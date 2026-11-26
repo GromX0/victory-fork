@@ -27,10 +27,10 @@ approximation: rooms are lit and bounce light is flat.
 
 ### The builder is a C++ class with standard D3D12 inputs
 
-`victory inspect --exports --imports D:\GTA6\XboxBvhBuilder.dll` lists 12
+`victory inspect --exports --imports <game_dir>\XboxBvhBuilder.dll` lists 12
 exports. They are methods of `class XboxBvhBuilder`. Its imports are only the
 CRT, `D3D12SerializeVersionedRootSignature` and `XMemVirtualQuery`. The
-title (`game_scarlett_master.exe`) imports 7 of the 12:
+title (`<title>.exe`) imports 7 of the 12:
 
 | export (undecorated) | RVA | what the DLL's code does |
 |---|---|---|
@@ -69,7 +69,7 @@ were "in title memory alone": built ready by the title's models.
 
 ### The traversal is the console compiler's lowering of RayQuery
 
-`victory shader-info --disasm D:\GTA6\shaders.rpf` decodes 26,503 containers.
+`victory shader-info --disasm <game_dir>\shaders.rpf` decodes 26,503 containers.
 None carries DXIL bitcode: "with LLVM bitcode 0". So the HLSL RayQuery
 source is gone, and only GFX10 code is left. **64 programs** use the node
 test, with **716 sites** in all (638 `image_bvh64_intersect_ray`, 78
@@ -514,7 +514,7 @@ Build `agent/rt`, or cherry-pick its commits. Then run once with the current
 defaults (builder off, rays miss) plus the trace:
 
 ```
-pwsh tools\fork-run.ps1 -GameExe 'D:\GTA6\game_scarlett_master.exe' -OutDir 'D:\victory-runs' -Label bvh-trace -Seconds 300 -SetEnv @{ VICTORY_BVH_TRACE = '1' }
+pwsh tools\fork-run.ps1 -GameExe '<game_dir>\<title>.exe' -OutDir 'D:\victory-runs' -Label bvh-trace -Seconds 300 -SetEnv @{ VICTORY_BVH_TRACE = '1' }
 ```
 
 This is the switch set of `20261125-112150-levels-rtmiss` (levels on demand and
