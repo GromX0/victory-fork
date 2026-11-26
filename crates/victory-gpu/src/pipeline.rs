@@ -429,6 +429,9 @@ struct Pipeline {
     /// One of the ray-tracing structure builder's ([`Builder`]).
     #[cfg(windows)]
     builder: bool,
+    /// One of the title's skin and decoration bake ([`bake_waits`]).
+    #[cfg(windows)]
+    bake: bool,
 }
 const _: () = assert!(offset_of!(Pipeline, packet) == 0x10);
 
@@ -464,7 +467,53 @@ pub(crate) fn host_pipeline<'a>(this: This) -> Option<&'a host::HostPipeline> {
     if this.is_null() {
         return None;
     }
-    make::ready(&pipeline(this).host)
+    let p = pipeline(this);
+    if p.bake && bake_waits() {
+        wait_for_bake(p);
+    }
+    make::ready(&p.host)
+}
+
+/// Whether a draw of the title's skin and decoration bake waits for its
+/// pipeline however long it takes (`VICTORY_BAKE_WAIT=0`: as any other
+/// draw, dropped once the frame's budget is spent). The title bakes its
+/// characters' skin into textures of its own once, while it loads (see
+/// `draw::BAKE_PIXEL_SHADERS`); a bake draw dropped because its pipeline
+/// was still being made bakes nothing for the rest of the run. After a
+/// cold start every character's face, neck and arms were missing (eyes,
+/// teeth, hair and clothes drawn), with or without the compiler's crashes
+/// and with a 20 s budget a frame; never after a warm one, where the
+/// pipeline is there from the start (runs stab-cold3, coldwait, coldkeepbad).
+#[cfg(windows)]
+fn bake_waits() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_BAKE_WAIT").is_none_or(|v| v != "0"))
+}
+
+/// Makes the bake pipeline of `p` now if it is not made yet (on this
+/// thread, or waiting for the worker making it).
+#[cfg(windows)]
+fn wait_for_bake(p: &Pipeline) {
+    static WAITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let began = std::time::Instant::now();
+    let made = make::now(&p.host);
+    let ms = began.elapsed().as_millis() as u64;
+    if ms > 0 && WAITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+        tracing::info!(
+            ms,
+            made,
+            shaders = ?p.shaders,
+            "a draw of the title's skin and decoration bake waited for its pipeline (VICTORY_BAKE_WAIT=0: dropped while it is being made)"
+        );
+    }
+}
+
+/// Whether `shaders` are those of a draw of the title's skin and decoration bake.
+#[cfg(windows)]
+fn of_bake(shaders: &[Arc<Shader>]) -> bool {
+    shaders
+        .iter()
+        .any(|s| s.stage == "pixel" && crate::draw::BAKE_PIXEL_SHADERS.contains(&s.hash.as_str()))
 }
 
 /// Host pipelines queued and not made yet.
@@ -583,6 +632,8 @@ fn hand_out(
     #[cfg(windows)]
     let builder = of_builder(&shaders);
     #[cfg(windows)]
+    let bake = of_bake(&shaders);
+    #[cfg(windows)]
     if builder {
         // Another stage: the group is looked at again at its next dispatch.
         let mut b = BUILDER.lock().unwrap_or_else(|e| e.into_inner());
@@ -596,6 +647,8 @@ fn hand_out(
         host,
         #[cfg(windows)]
         builder,
+        #[cfg(windows)]
+        bake,
         shaders,
         bound: std::sync::atomic::AtomicBool::new(false),
     });

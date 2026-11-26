@@ -66,3 +66,35 @@ Next single action: offline --pipelines on the 35 containers, default bits vs VI
 
 Files: `D:\victory-scratch\dxil-diff\` (containers in `crashers-cdxil`, DXIL in `combined`,
 `combined-rdna0`, `ours`, disassembly `off-*-f018.ll`).
+
+```text
+Stage / blocker: 1, gate part 1: 3 cold + 3 warm starts without the known failure (the device loss)
+Baseline commit + executable hash: b7fb278a code, exe 11A7DFC4F2E84DCF in all six runs (later commits are docs only)
+Scene, route, settings, cache state: opening and cell, 420 s, base-play.env + VICTORY_D3D12_DRED=1 (base-stab.env); cold = D:\victory-data\combined-cold with its pipelines folder removed (translated shaders kept), warm = the cache the cold run just filled
+Observed evidence (stage1-screen.ps1, D:\victory-runs\stage1-screen.txt):
+  cold1 438 s, 32 compiler crashes caught, 0 device losses, commit peak 68.8 GB
+  warm1 437 s,  1, 0, 63.7 GB
+  cold2 439 s, 32, 0, 68.7 GB
+  warm2 438 s,  1, 0, 62.0 GB
+  cold3 437 s, 32, 0, 69.3 GB
+  warm3 438 s,  3, 0, 65.6 GB
+Hypothesis and falsification test: the base-warmup loss recurs in ordinary cold or warm starts -> a loss in any of six
+One change: none
+Before / after measurements: 0 losses in 6 (with base-coldrepro: 0 in 7 since the one loss)
+Rendering and gameplay checks: NEW DEFECT, seen by the user in cold3 (19:29, gameplay in the cell block): faces, necks and arms of every character invisible (wall shows through); hair, eyes, mouths, clothes drawn. Not in warm3 at the same scene (faces seen 19:36-19:39). No graphics pipeline refused, no shader failed to translate; 0 pipelines being made at the time. Cold3 dropped 599 draws/frame "being made" during the load (19:27:31), warm runs at most 42
+Memory / stability effects: commit peak 62-69 GB (cold runs ~69)
+Keep, revert or investigate: gate part 1 passed for the device loss (still unexplained, rare); part 2, a 30-minute session, not run yet. The cold-start face defect blocks calling cold starts good
+Next single action: cold start with VICTORY_PIPELINE_WAIT_MS=20000 (draws wait for their pipeline instead of being dropped after 500 ms a frame): faces present = a one-time dispatch or draw lost while its pipeline compiled
+```
+
+```text
+Stage / blocker: 1 (and 3), faces, necks and arms invisible after a cold start; fine after a warm one
+Baseline commit + executable hash: b7fb278a, 11A7DFC4F2E84DCF
+Scene, route, settings, cache state: as stab-cold3, + VICTORY_PIPELINE_WAIT_MS=20000 (cold-wait.ps1, run coldwait)
+Hypothesis and falsification test: a draw or one-time dispatch is dropped while its pipeline compiles and its result never comes -> with a 20 s budget per frame faces render; missing = not supported
+One change: VICTORY_PIPELINE_WAIT_MS 500 -> 20000
+Before / after measurements: 436 s, 32 compiler crashes, 0 losses, commit peak 67.1 GB. The budget took effect ("wait budget per frame millis=20000") but did not cover the load: 1269.5 draws/frame dropped "being made" at 19:42:46, then 0.1-5/frame
+Rendering and gameplay checks: faces still missing (19:46, intake cutscene: eyes and teeth float, no skin), including on a character loaded after the compiles had finished (0 being made)
+Keep, revert or investigate: not supported, though not a clean falsification (drops at the load remained). A character loaded later, also faceless, argues against a one-time loss at the load. Remaining difference between cold and warm: in cold runs the compiler crashes 32 times inside the process (threads parked); in warm runs those pipelines are skipped without being tried
+Next single action: cold start keeping warm-bad.txt (all else in the pipelines folder removed): cold compiles without compiler crashes. Faces present = the in-process crashes cause it
+```
