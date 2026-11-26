@@ -1096,6 +1096,11 @@ struct Views {
     /// The shapes of views of placed memory, and where each is.
     shapes: Vec<Shape>,
     shape_index: std::collections::BTreeMap<Shape, u32>,
+    /// The frame each entry was last written or looked up in (its low 32
+    /// bits), and where the next look for unused entries begins
+    /// ([`recycle_frames`]).
+    seen: Vec<std::sync::atomic::AtomicU32>,
+    cursor: usize,
 }
 
 /// Read far more often than written: every slot a draw reads through a
@@ -1109,7 +1114,45 @@ static VIEWS: std::sync::RwLock<Views> = std::sync::RwLock::new(Views {
     free: Vec::new(),
     shapes: Vec::new(),
     shape_index: std::collections::BTreeMap::new(),
+    seen: Vec::new(),
+    cursor: 0,
 });
+
+/// Entries of views of placed memory let go since the start ([`recycle_frames`]).
+pub(crate) static RECYCLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// After how many frames unused a table entry of a view of placed memory is
+/// let go (`VICTORY_VIEW_RECYCLE_FRAMES`, 900; 0: never, as before). Such
+/// views have no resource object whose release frees them: once the shapes
+/// were full (4,194,304 of them, after 25 minutes of open world, the title
+/// putting buffer views at ever other element offsets) each became an entry
+/// kept for the run: 12.7 million, 5.7 GB, ~560,000 more a minute (session2).
+/// An entry let go takes a new generation, so a record the title still holds
+/// of it names nothing (a null view), never the view made there next.
+fn recycle_frames() -> u32 {
+    static FRAMES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *FRAMES.get_or_init(|| {
+        std::env::var("VICTORY_VIEW_RECYCLE_FRAMES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(900)
+    })
+}
+
+/// Records looked up whose entry had a newer generation (a view released or
+/// let go since): they name nothing.
+pub(crate) static STALE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The shapes kept at most: all [`SHAPES`] numbers a record has
+/// (`VICTORY_VIEW_SHAPES_MAX=<n>`, fewer: for tests of what happens once
+/// they are full, which took 25 minutes of open world).
+fn shapes_max() -> usize {
+    static MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("VICTORY_VIEW_SHAPES_MAX").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(SHAPES).min(SHAPES)
+    })
+}
+
+/// Entries looked at for each new entry of a view of placed memory: faster
+/// than they are made, so the unused ones are let go as the table grows.
+const RECYCLE_LOOKS: usize = 8;
 pub(crate) const VIEW_TAG: u32 = u32::from_le_bytes(*b"vVIE");
 
 /// A record is the tag and two words, `i` and `generation` (the host keeps
@@ -1208,7 +1251,7 @@ impl Views {
         if let Some(&at) = self.shape_index.get(&shape) {
             return Some(at);
         }
-        if self.shapes.len() >= SHAPES {
+        if self.shapes.len() >= shapes_max() {
             return None;
         }
         let at = self.shapes.len() as u32;
@@ -1232,7 +1275,43 @@ impl Views {
     /// The record words of `view` as a table entry, if it has one.
     fn entry_of(&self, view: &View) -> Option<[u32; 2]> {
         let &i = self.index.get(view)?;
+        self.touch(i);
         Some([i, self.list[i as usize].1])
+    }
+
+    /// Entry `i` is in use this frame.
+    fn touch(&self, i: u32) {
+        if let Some(seen) = self.seen.get(i as usize) {
+            seen.store(crate::frame::current() as u32, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Lets go of up to [`RECYCLE_LOOKS`] entries of views of placed memory
+    /// unused for [`recycle_frames`] frames, from where the last look ended.
+    fn recycle(&mut self) {
+        let frames = recycle_frames();
+        if frames == 0 || self.list.is_empty() {
+            return;
+        }
+        let now = crate::frame::current() as u32;
+        for _ in 0..RECYCLE_LOOKS.min(self.list.len()) {
+            let i = self.cursor % self.list.len();
+            self.cursor = i + 1;
+            let (view, generation) = &self.list[i];
+            if !matches!(view, View::Placed(..)) {
+                continue;
+            }
+            let seen = self.seen.get(i).map_or(now, |s| s.load(std::sync::atomic::Ordering::Relaxed));
+            if now.wrapping_sub(seen) < frames || self.index.get(view) != Some(&(i as u32)) {
+                continue;
+            }
+            let (view, generation) = (view.clone(), *generation);
+            self.index.remove(&view);
+            // (Below the bits that say a record is no table entry.)
+            self.list[i].1 = ((generation + 1) & GENERATIONS).max(1);
+            self.free.push(i as u32);
+            RECYCLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// The record words of `view` as a table entry: its entry (a new or a
@@ -1241,13 +1320,21 @@ impl Views {
         let i = match self.index.get(&view) {
             Some(&i) => i,
             None => {
+                if matches!(view, View::Placed(..)) {
+                    self.recycle();
+                }
+                let now = crate::frame::current() as u32;
                 let i = match self.free.pop() {
                     Some(i) => {
                         self.list[i as usize].0 = view.clone();
+                        if let Some(seen) = self.seen.get(i as usize) {
+                            seen.store(now, std::sync::atomic::Ordering::Relaxed);
+                        }
                         i
                     }
                     None => {
                         self.list.push((view.clone(), 1));
+                        self.seen.push(std::sync::atomic::AtomicU32::new(now));
                         self.list.len() as u32 - 1
                     }
                 };
@@ -1331,8 +1418,15 @@ pub(crate) fn shapes_census() -> Option<String> {
     }
     let count = |r: std::ops::Range<usize>| sets[r].iter().map(|s| s.len().to_string()).collect::<Vec<_>>().join(" ");
     let (u, r, x) = &views.shapes[n - 1];
+    let placed = views.list.iter().filter(|(v, _)| matches!(v, View::Placed(..))).count();
+    let relaxed = std::sync::atomic::Ordering::Relaxed;
     Some(format!(
-        "{n} kept; distinct values per word among {sampled} sampled: unordered {} | resource {} | view 0-9 {} | view 12-15 {}; the newest: {u} {r:x?} {x:x?}",
+        "table entries {} ({} views of placed memory, {} free); placed entries let go so far {}, stale records looked up {}; {n} kept; distinct values per word among {sampled} sampled: unordered {} | resource {} | view 0-9 {} | view 12-15 {}; the newest: {u} {r:x?} {x:x?}",
+        views.list.len(),
+        placed,
+        views.free.len(),
+        RECYCLED.load(relaxed),
+        STALE.load(relaxed),
         sets[0].len(),
         count(1..15),
         count(15..25),
@@ -1536,7 +1630,12 @@ fn view_at(i: u32, generation: u32) -> Option<View> {
         0 => {
             let views = views_read();
             let (view, current) = views.list.get(i as usize)?;
-            (*current == generation).then(|| view.clone())
+            if *current != generation {
+                STALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
+            views.touch(i);
+            Some(view.clone())
         }
         CONSTANT => Some(constant_of(i, generation)),
         PLACED => views_read().placed_of(i, generation),
