@@ -3850,7 +3850,7 @@ mod card_steps;
 pub(crate) mod indirects;
 #[cfg(feature = "diagnostics")]
 mod panel;
-mod place;
+pub(crate) mod place;
 pub(crate) mod rec;
 mod send;
 mod upq;

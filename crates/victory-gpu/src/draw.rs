@@ -2863,6 +2863,8 @@ impl State {
         }
         // SAFETY: an open list with everything set.
         unsafe { list.list.Dispatch(x, y, z) };
+        #[cfg(feature = "diagnostics")]
+        crate::capture::dump_after(list, &p.name);
         self.buffers_written();
         DISPATCHED.fetch_add(1, Ordering::Relaxed);
         if let Some(role) = p.stages.first().and_then(|s| s.shader.ambient)
@@ -4016,6 +4018,11 @@ impl State {
             ));
             return false;
         }
+        #[cfg(feature = "diagnostics")]
+        if crate::capture::skip_args(arguments) {
+            why("dropped by VICTORY_SKIP_ARGS");
+            return false;
+        }
         let len = u64::from(stride) * u64::from(max.max(1));
         let Some(args) = crate::shadow::find_any(arguments, len) else {
             why("arguments outside title buffers");
@@ -4144,6 +4151,10 @@ impl State {
             return false;
         }
         #[cfg(feature = "diagnostics")]
+        if kind != DISPATCH {
+            crate::capture::dump_before_reader(list, arguments, &p.name);
+        }
+        #[cfg(feature = "diagnostics")]
         list.note_op(|| {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
         });
@@ -4169,6 +4180,10 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         crate::capture::probe_counts(list, &bounded, at, (kind, stride, max), &p.name, arguments);
+        #[cfg(feature = "diagnostics")]
+        if kind == DISPATCH {
+            crate::capture::dump_after(list, &p.name);
+        }
         if kind == DISPATCH {
             self.buffers_written();
         } else {

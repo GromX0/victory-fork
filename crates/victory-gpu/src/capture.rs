@@ -233,6 +233,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     #[cfg(feature = "diagnostics")]
     reread_probes(frame);
     write_counts(frame);
+    #[cfg(feature = "diagnostics")]
+    write_dumps(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
     if drawn.saturating_sub(before) >= 500 {
@@ -1252,6 +1254,200 @@ fn write_counts(presented: u64) {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("frame-{frame}-counts.txt"))) {
             let _ = f.write_all(text.as_bytes());
+        }
+    }
+}
+
+/// `VICTORY_SKIP_ARGS=<file>`: lines `<lo> <hi>` of title addresses (hex);
+/// indirect executions whose arguments start in `[lo, hi)` are dropped.
+/// The file is read again at most every 200 ms, so a range can change
+/// while the camera holds still: what a record draws on screen.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn skip_args(arguments: u64) -> bool {
+    static FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    static RANGES: std::sync::Mutex<(Option<std::time::Instant>, Vec<(u64, u64)>)> =
+        std::sync::Mutex::new((None, Vec::new()));
+    let Some(file) = FILE.get_or_init(|| std::env::var_os("VICTORY_SKIP_ARGS").map(Into::into)) else {
+        return false;
+    };
+    let mut r = RANGES.lock().unwrap_or_else(|e| e.into_inner());
+    if r.0.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+        r.0 = Some(std::time::Instant::now());
+        let hex = |w: &str| u64::from_str_radix(w.trim_start_matches("0x"), 16).ok();
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        let ranges: Vec<(u64, u64)> = text
+            .lines()
+            .filter_map(|l| {
+                let mut w = l.split_whitespace();
+                Some((hex(w.next()?)?, hex(w.next()?)?))
+            })
+            .collect();
+        if ranges != r.1 {
+            tracing::info!(
+                ranges = ?ranges.iter().map(|(a, b)| format!("{a:#x}-{b:#x}")).collect::<Vec<_>>(),
+                "VICTORY_SKIP_ARGS: the ranges dropped now"
+            );
+        }
+        r.1 = ranges;
+    }
+    r.1.iter().any(|&(lo, hi)| arguments >= lo && arguments < hi)
+}
+
+/// The ranges of `VICTORY_DUMP` (`<address>,<len>` pairs, `;` apart,
+/// decimal or 0x hex) and the pipeline hashes of `VICTORY_DUMP_AFTER`.
+#[cfg(feature = "diagnostics")]
+fn dump_spec() -> &'static (Vec<(u64, u64)>, Vec<String>) {
+    static SPEC: std::sync::OnceLock<(Vec<(u64, u64)>, Vec<String>)> = std::sync::OnceLock::new();
+    SPEC.get_or_init(|| {
+        let num = |w: &str| -> Option<u64> {
+            let w = w.trim();
+            match w.strip_prefix("0x") {
+                Some(h) => u64::from_str_radix(h, 16).ok(),
+                None => w.parse().ok(),
+            }
+        };
+        let ranges = std::env::var("VICTORY_DUMP")
+            .unwrap_or_default()
+            .split(';')
+            .filter_map(|r| {
+                let (a, l) = r.split_once(',')?;
+                Some((num(a)?, num(l)?))
+            })
+            .filter(|&(_, l)| l > 0 && l <= 8 << 20)
+            .collect();
+        let after = std::env::var("VICTORY_DUMP_AFTER")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_owned())
+            .filter(|h| !h.is_empty())
+            .collect();
+        (ranges, after)
+    })
+}
+
+#[cfg(feature = "diagnostics")]
+struct Dump {
+    frame: u64,
+    seq: u64,
+    list: usize,
+    what: String,
+    address: u64,
+    at: usize,
+    len: usize,
+}
+
+#[cfg(feature = "diagnostics")]
+static DUMPS: std::sync::Mutex<Vec<Dump>> = std::sync::Mutex::new(Vec::new());
+
+/// In a [`listed`] frame, after a dispatch or indirect execution of
+/// pipeline `name` was recorded in `list`: when `name` holds one of
+/// `VICTORY_DUMP_AFTER`'s hashes, `VICTORY_DUMP`'s ranges as the GPU holds
+/// them at this place of the list ([`dump_ranges`]).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn dump_after(list: &crate::host::HostList, name: &str) {
+    let (ranges, after) = dump_spec();
+    if ranges.is_empty() || !after.iter().any(|h| name.contains(h.as_str())) {
+        return;
+    }
+    dump_ranges(list, &format!("after {name}"));
+}
+
+/// In a [`listed`] frame, before the first indirect draw in `list` whose
+/// arguments lie in one of `VICTORY_DUMP`'s ranges: those ranges as that
+/// draw finds them (after every pass before it in the list).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn dump_before_reader(list: &crate::host::HostList, arguments: u64, name: &str) {
+    let (ranges, _) = dump_spec();
+    if ranges.is_empty() || !ranges.iter().any(|&(a, l)| arguments >= a && arguments < a + l) {
+        return;
+    }
+    let frame = crate::queue::presented() + 1;
+    if folder().is_none() || !listed(frame) {
+        return;
+    }
+    static SEEN: std::sync::Mutex<Vec<(u64, usize)>> = std::sync::Mutex::new(Vec::new());
+    let key = (frame, std::ptr::from_ref(list) as usize);
+    {
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.contains(&key) {
+            return;
+        }
+        seen.retain(|s| s.0 + 16 > frame);
+        seen.push(key);
+    }
+    dump_ranges(list, &format!("before the first reader {name} at {arguments:#x}"));
+}
+
+/// Copies each of `VICTORY_DUMP`'s ranges from its host copy at this place
+/// of `list` (everything before it done and seen; nothing refreshed from
+/// title memory: what the GPU holds) into a read-back buffer, and notes an
+/// operation `DUMP <seq>` in the frame's operations.
+#[cfg(feature = "diagnostics")]
+fn dump_ranges(list: &crate::host::HostList, what: &str) {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let frame = crate::queue::presented() + 1;
+    if folder().is_none() || !listed(frame) {
+        return;
+    }
+    let Some(host) = crate::host::host() else { return };
+    let me = std::ptr::from_ref(list) as usize;
+    for &(address, len) in &dump_spec().0 {
+        let Some(shadow) = crate::shadow::peek(address, len) else {
+            op(me, || format!("DUMP none of {address:#x}+{len:#x} (no host copy) {what}"));
+            continue;
+        };
+        let Some(buffer) = host.read_back_buffer(len) else { return };
+        // SAFETY: an open list; the host copy outlives the list (copies
+        // are kept), the range inside it; the read-back buffer is kept by
+        // the deferred read.
+        unsafe {
+            crate::host::place::wait_for_all(host, &list.list);
+            list.list.CopyBufferRegion(&buffer, 0, &shadow.buffer, shadow.offset(address), len);
+            crate::host::place::wait_for_all(host, &list.list);
+        }
+        let landing: &'static mut [u8] = Box::leak(vec![0u8; len as usize].into_boxed_slice());
+        list.defer_read_back(buffer, landing.as_mut_ptr(), [len as usize, 1, len as usize]);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        op(me, || format!("DUMP {seq} of {address:#x}+{len:#x} {what}"));
+        DUMPS.lock().unwrap_or_else(|e| e.into_inner()).push(Dump {
+            frame,
+            seq,
+            list: me,
+            what: what.to_owned(),
+            address,
+            at: landing.as_ptr() as usize,
+            len: len as usize,
+        });
+    }
+}
+
+/// At the present of `presented`: the dumps of frames eight or more before
+/// it appended to `frame-<n>-dump.bin`, each listed in `frame-<n>-dumps.txt`
+/// (sequence, list, range, offset in the .bin, what), and freed.
+#[cfg(feature = "diagnostics")]
+fn write_dumps(presented: u64) {
+    use std::io::Write;
+    let done: Vec<Dump> = {
+        let mut dumps = DUMPS.lock().unwrap_or_else(|e| e.into_inner());
+        if dumps.is_empty() {
+            return;
+        }
+        let (done, left) = std::mem::take(&mut *dumps).into_iter().partition(|d| d.frame + 8 <= presented);
+        *dumps = left;
+        done
+    };
+    let Some(folder) = folder() else { return };
+    for d in done {
+        // SAFETY: leaked in `dump_ranges` with this length; read once, freed here.
+        let bytes = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(d.at as *mut u8, d.len)) };
+        let bin = folder.join(format!("frame-{}-dump.bin", d.frame));
+        let offset = std::fs::metadata(&bin).map_or(0, |m| m.len());
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&bin) {
+            let _ = f.write_all(&bytes);
+        }
+        let index = folder.join(format!("frame-{}-dumps.txt", d.frame));
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(index) {
+            let _ = writeln!(f, "{} list {:#x} range {:#x}+{:#x} offset {offset} {}", d.seq, d.list, d.address, d.len, d.what);
         }
     }
 }
