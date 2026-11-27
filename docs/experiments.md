@@ -842,3 +842,38 @@ Skipped and refused compute passes against the dissolving tree (27 Nov, ns1, 146
   that tree.
 - The other 36 compute pipelines the compiler once crashed on run (hf-measure2, 0 compiler crashes).
 Neither result covers every object; each is one tree at one place.
+
+### Disappearing objects: the fade is the title's, by distance (27 Nov, sessions tw3-tw5)
+
+Tools added: `VICTORY_SKIP_ARGS` lines `<pipeline> <lo> <hi>` (drop a pipeline's executions by number within
+a list; ops lines show `ord N`); `VICTORY_OPS_WORDS=1` (small raw buffers' words in the ops lines, read
+again at the list's submission: `AT-SUBMIT`, and at the presents after it, one log line a frame);
+`VICTORY_OPS_AT=<byte offsets>`.
+
+Measured:
+1. **The translation of the dither is exact.** The console code of pixel shader 64ea0f34 (disassembled with
+   `victory shader-info --disasm` from its .cdxil) does what our DXIL does, instruction for instruction:
+   noise = fract(52.98 x fract(0.0671 x py + 0.00583 x px)) after adding 5.588 x ((v14<<4 | 9) + counter & 63);
+   threshold = clamp(alpha x G) x (flag ? F(1-t) : 1-F(1-t)); `v_cmpx_gt_f32` noise > threshold kills.
+2. **The GPU gets the title's data.** Of ~50,000 small instance lists a frame read again at the first
+   present after their submission, 0 had changed (tw5): the title writes them before submitting, our
+   copy at submission is what it wrote. (Between recording and submission ~5% change: the title fills
+   them after recording the draw; the copy is made at submission, so that is fine.)
+3. **Submissions are waited for** (no relay, no late flights in play-safe: `Host::execute` runs and waits),
+   so the title never reads GPU results that have not landed: stale read-back is not the cause here.
+4. **The fade value is set by distance.** `t` = bits 16-23 of each instance word / 255, written by the
+   title's CPU into a per-frame list. With the camera still, part-way values (0x44, 0x79, 0xc4 ...) stay put
+   for seconds; after a step back of about a metre every one of them moved a little the same way
+   (0x79->0x7e, 0xc4->0xc8, 0x62->0x67, 0x71->0x73, 0xb2->0xb7): a band in space, about 2% per metre, so
+   tens of metres wide, in which an object is part-faded.
+5. In that band the title's own shader keeps a dithered part of each detail level, with the same noise for
+   both; so an object there is see-through by design for as long as it stays in the band.
+
+So the disappearing/ghosting of the palm and the tree is the title's distance crossfade between detail
+levels, applied exactly as the title asks, over a band far wider (or in another place) than the console's
+must be. What sets the band (the LOD distances and their fade range) is not established; it is computed by
+the title's CPU code. Candidates for an input that differs from the console: a quality/LOD scale the title
+derives from its frame times (we run 3-20 fps; a 40% faster frame was tried in s3-1080 without a visible
+change), the output/render size it is given (`VICTORY_OUTPUT`/`VICTORY_RENDER_SCALE` patch it), or the
+console model. Next: the title code that writes the instance word (draw callers +0x4e315bb, +0x32472,
+up from +0x555e97c) and the distances it reads.
