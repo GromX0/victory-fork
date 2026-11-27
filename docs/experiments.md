@@ -441,6 +441,19 @@ Unrelated, noticed:       victory-shader's GPU test the_record_count_of_a_struct
 Next single action:       a warm run in the busy area (user moving) for frame time and the picture.
 ```
 
+s3-heap-busy (0fd737b3, second run after the translator change, user moving into the busy area,
+360 s): peak 30,203 tables/frame, **0 refused**, search 6.2 ms at the peak; 0 "prepare failed", 0
+indirect drops, 0 compiler crashes (the known one now listed under the new fingerprint), 0 device
+losses, commit peak 66.4 GB. Not yet warm: pipelines "being made" fell from 277 to 0 over the first
+4 minutes (the first run compiled only the places it reached), with 167-327 ms frames among them.
+After that (last 45 s, 7,000-9,000 draws/frame) 57-110 ms, mean ~81 ms; s3-fp's busy windows (before
+the fix, 10,800-11,700 draws, dropping work) 71-94 ms, mean 77 ms. **Frame time: inconclusive**
+(compiling tail, different movement, different draw counts). No regression is shown, none excluded.
+Pictures not captured (no capture switches in these runs). Item 12 is fixed for correctness; its frame
+time belongs with Stage 4/6 measurements on a fully warm cache.
+Next single action (Stage 3): the purple blinds/glass traced to their first wrong pass (save
+'openworld', VICTORY_CAPTURE_FRAMES + VICTORY_DUMP_TARGETS at the frame where they show, user idle).
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
