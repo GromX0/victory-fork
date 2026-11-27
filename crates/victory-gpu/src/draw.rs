@@ -2832,6 +2832,10 @@ impl State {
             once!("a dispatch with a graphics pipeline");
             return;
         }
+        #[cfg(feature = "diagnostics")]
+        if crate::capture::skip_name(&p.name) {
+            return;
+        }
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             // A stage of the structure builder that cannot be bound is a
@@ -4023,7 +4027,7 @@ impl State {
             return false;
         }
         #[cfg(feature = "diagnostics")]
-        if crate::capture::skip_args(arguments) {
+        if crate::capture::skip_args(arguments) || (kind == DISPATCH && crate::capture::skip_name(&p.name)) {
             why("dropped by VICTORY_SKIP_ARGS");
             return false;
         }
