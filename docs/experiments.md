@@ -562,6 +562,15 @@ PalmVIDev e0b70476 / VIctory f39c6c2) changes the flips (rec-style captures) and
 unchanged, rejected.
 Next single action: that switch, then one recorded walk.
 
+rec5 (b3bdf46b, VICTORY_GPU_WINS=1 on: log confirms; save 'openworld' copy, user walking, 179 s): **same
+pop-in** (user). Rejected: the conflict rule of the merges. (Its captures were asked from frame 12,000
+on; the run reached ~2,500: none saved. The user's verdict decides it.)
+
+The user's quickest check: the palm beside the stairs, a few seconds' walk from the save's start, is
+missing every time. That is a fixed, repeatable failure: the next step is an automatic test (save
+'openworld', scripted keys to the stairs, VICTORY_KEYS holds, a capture at fixed frames, palm present or
+not in the depth target) so that the remaining causes are tested without the user playing.
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
