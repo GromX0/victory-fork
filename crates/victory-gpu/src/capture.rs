@@ -28,7 +28,7 @@ pub(crate) fn listed(n: u64) -> bool {
                 .collect()
         })
         .contains(&n)
-        || n == KEYED.load(std::sync::atomic::Ordering::Relaxed);
+        || n.checked_sub(KEYED.load(std::sync::atomic::Ordering::Relaxed)).is_some_and(|k| k < span());
     // `VICTORY_CAPTURE_WORLD`: also the 2nd and the 6th frame after the first
     // one that ran 500 draws or more (a title's first 3D frames: their
     // numbers depend on how long the menus were shown), and the 30th and
@@ -123,6 +123,15 @@ fn world_on() -> bool {
 
 /// The first frame that ran 500 draws or more (`VICTORY_CAPTURE_WORLD`).
 static WORLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Consecutive frames an F9 press or a timed capture takes
+/// (`VICTORY_CAPTURE_SPAN`, 1): the title records a frame while the one
+/// before is shown, so the operations attributed to one frame number can be
+/// part of two; several in a row hold at least one whole frame's work.
+fn span() -> u64 {
+    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("VICTORY_CAPTURE_SPAN").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(1).max(1))
+}
 
 /// When the first frame of 500 draws or more was presented, whatever the
 /// capture switches: [`world_started`].
