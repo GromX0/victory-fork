@@ -316,6 +316,35 @@ Next single action:       Stage 3, step 1: the inventory of skipped pipelines, d
                           first wrong pass with VICTORY_CAPTURE_FRAMES + VICTORY_DUMP_TARGETS.
 ```
 
+## Stage 3: inventory of omitted and substituted work (27 Nov, step 1)
+
+Source sweep of crates/victory-gpu and victory-shader (every drop, placeholder, stand-in, clamp and
+switch, with its default), counted on s2-on (b8a88c42, base-play.env, save 'openworld', 300 s, steady
+part). Only what is active under the play switches is listed; the rest (switches off, 0 in the run)
+is in the sweep, not here. "Per frame" = the meter's per-frame averages.
+
+| # | Omission / substitute | Switch (play setting) | Frequency (s2-on) | Affected pass / consequence (known) | Next repair |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Ray-tracing structure builder: every dispatch dropped | VICTORY_BVH_BUILDER off | **329 dispatches/frame** | the title's rays find nothing: ray-traced light, reflections and shadows absent (why item 2 exists) | the DispatchX thread-count flag (audit finding 1) in an isolated branch, small dispatch tests, then the builder on |
+| 2 | Indirect-light stand-in after CS_ScreenProbes_TemporalResolve: light raised to an estimate, the title's own bounded to 4x it | VICTORY_AMBIENT=0.8 | every frame (Radiance 1280x720, Resolve 2560x1440) | replacement lighting, not the title's: dark interiors / blown-out windows / colour of indirect light unverified | goes when 1 works; until then a labelled compatibility mode |
+| 3 | Compute pipelines never compiled: the bad list `warm-bad.txt` (42 keys) was copied from the cache made **before** the compiler fix (1465c1f2); 35 of those shaders compile offline since | VICTORY_WARM_BAD on | **~74 dispatches/frame, 21 shaders** ("refused") | unknown compute passes skipped every frame | one run with VICTORY_WARM_BAD=0: do they compile, crash, change the picture |
+| 4 | One indirect signature dropped (two arguments: changes root arguments) | none (shortcut) | **~73 executions/frame** | unknown | identify the signature's pass from a frame's ops list; implement root-argument signatures |
+| 5 | Shader 39f0e9aeb156a61c skipped by name | VICTORY_SKIP_PIPELINES in base-play.env (from the AMD skip list) | ~1 draw/frame | reason not recorded | re-test without the skip |
+| 6 | Grey 1x1 "neutral" texture shown until a new texture's upload | VICTORY_SHOW_AFTER=1 | 114,762 slots over the run, 0.64 frames on average, at most 3 | brief grey surfaces when textures change (a pop-in form) | Stage 6 (upload order), keep the device-loss fix |
+| 7 | A rewritten slot keeps showing its old texture until the new one is made | VICTORY_KEEP_SHOWN 1 | 79,786 slots | old texture for a frame or more | Stage 6 |
+| 8 | Queries not run: occlusion says visible, statistics 0 | none | every query | nothing culled by queries (cost, not picture) | Stage 4/5 if measured |
+| 9 | Translation approximations: custom border colour = transparent black; some non-pixel samples at level 0 without anisotropy; cube arrays as cubes; quad mask true | none | no counter | possible blur at grazing angles, edge colours | only where a traced defect points |
+| 10 | HDR refused, SDR presentation | none | always | tone/brightness vs the console's HDR output | compare against an SDR console reference |
+| 11 | Silent no-ops without a counter: resolve/clear/copy when a side has no host texture; indirect DispatchMeshX | none | **unmeasured** | unknown | add counters before judging |
+
+Not active in this run (0 or off): stand-in formats, depth bounds, topology rewrite, root-view drops,
+dynamic-slot exhaustion, levels without memory, unmapped by-address reads, indirect clamps (0
+records emptied), pipeline-wait drops ("0 being made"), the loop limit (only with fork-run -Profile
+amd -Diag). No magenta/purple filter exists in this base (docs/base-comparison-2026-11-26.md).
+
+Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
+save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
+
 ### Stage 3 defect inventory from session2 (open world, first look)
 
 1. Purple/magenta foliage almost everywhere, day and night (the papers' defect, far

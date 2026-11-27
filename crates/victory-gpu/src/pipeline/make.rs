@@ -104,9 +104,10 @@ impl Pending {
 static SKIPPED_BAD: AtomicU64 = AtomicU64::new(0);
 
 /// The keys of the pipelines the driver's compiler crashed on
-/// (`warm-bad.txt` beside the pipeline library, one key to a line, then
-/// anything; `#` begins a comment), loaded on first use. `VICTORY_WARM_BAD=0`
-/// leaves the file unread.
+/// (`warm-bad.txt` beside the pipeline library: [`super::known::bad_line`]),
+/// loaded on first use; only lines of the translator and driver in use count
+/// ([`super::known::fingerprint`]), so a translator fix or a new driver gives
+/// them another try. `VICTORY_WARM_BAD=0` leaves the file unread.
 static BAD_KEYS: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
 fn bad_keys<R>(f: impl FnOnce(&mut std::collections::HashSet<String>) -> R) -> R {
@@ -118,12 +119,13 @@ fn bad_keys<R>(f: impl FnOnce(&mut std::collections::HashSet<String>) -> R) -> R
         let listed = super::library::folder()
             .and_then(|d| std::fs::read_to_string(d.join("warm-bad.txt")).ok())
             .unwrap_or_default();
-        listed
-            .lines()
-            .filter(|l| !l.trim_start().starts_with('#'))
-            .filter_map(|l| l.split_whitespace().next())
-            .map(str::to_owned)
-            .collect()
+        let keys = super::known::bad_keys(&listed, &super::known::fingerprint());
+        tracing::info!(
+            listed = listed.lines().count(),
+            counted = keys.len(),
+            "pipelines the driver's compiler crashed on (warm-bad.txt): only those of this translator and driver count"
+        );
+        keys
     });
     f(keys)
 }
@@ -298,7 +300,8 @@ fn lost(slot: usize) {
         use std::io::Write;
         let file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("warm-bad.txt"));
         if let Ok(mut f) = file {
-            let _ = writeln!(f, "{} ended the compiler in a run: {:?}", p.key, p.shaders);
+            let why = format!("ended the compiler in a run: {:?}", p.shaders);
+            let _ = writeln!(f, "{}", super::known::bad_line(&p.key, &super::known::fingerprint(), &why));
         }
     }
     let _ = p.made.set(None);

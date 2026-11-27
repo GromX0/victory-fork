@@ -257,6 +257,28 @@ pub fn fingerprint() -> String {
     h.finalize().to_hex()[..16].to_owned()
 }
 
+/// A line of `warm-bad.txt`: the pipeline's key, the [`fingerprint`] it
+/// crashed the compiler under, then why. A translator or driver change
+/// makes another fingerprint, and the lines of the old one no longer count.
+pub fn bad_line(key: &str, fingerprint: &str, why: &str) -> String {
+    format!("{key} {fingerprint} {why}")
+}
+
+/// The keys `warm-bad.txt` (`text`) lists under `fingerprint`. Lines of
+/// another fingerprint, or of none (written before lines carried one), are
+/// left out: the compiler they crashed is not the one in use; `#` begins a
+/// comment.
+pub fn bad_keys(text: &str, fingerprint: &str) -> HashSet<String> {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter_map(|l| {
+            let mut words = l.split_whitespace();
+            let key = words.next()?;
+            (words.next() == Some(fingerprint)).then(|| key.to_owned())
+        })
+        .collect()
+}
+
 /// The translations of earlier runs are in `dir` (the pipeline library is
 /// not used: what is made here is the driver's to keep).
 pub fn use_translations(dir: PathBuf) {
@@ -467,6 +489,20 @@ impl GraphicsState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bad_keys_count_only_under_the_fingerprint_in_use() {
+        let text = [
+            "0629334f ended the compiler in a run: [compute f168]".to_owned(),
+            bad_line("aaaa", "fp-now", "ended the compiler in a run: [compute 1]"),
+            bad_line("bbbb", "fp-old", "ended the compiler in a run: [compute 2]"),
+            "# cccc fp-now a comment".to_owned(),
+        ]
+        .join("\n");
+        let keys = bad_keys(&text, "fp-now");
+        assert_eq!(keys, HashSet::from(["aaaa".to_owned()]));
+        assert!(bad_keys(&text, "fp-other").is_empty());
+    }
 
     #[test]
     fn failed_open_retries_before_later_records() {
