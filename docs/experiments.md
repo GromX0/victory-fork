@@ -744,3 +744,41 @@ waiting were it); drive.sh now nudges the camera before each capture.
 Next: with the camera held on the ghost, drop pipelines by name (bisection over the main view's draw
 pipelines) until the ghost goes; then that draw's fade input, ghost against solid, and whether another
 LOD is meant to cover the range where this one is faded.
+
+### Disappearing objects: what hides the palm (27 Nov, session palm5, 4fcbfbe8)
+
+Method: camera held on the stairs palm in its ghost state (drive.sh nudges the camera before each capture
+so the idle camera never starts), then pipelines dropped by name through `VICTORY_SKIP_ARGS` and the
+picture compared: 220 pipelines drawing to the 2560x1440 view, halved eight times, each finding checked
+alone (D:\victory-scratch\capture\palm5: e*-j* crops, k0/k1 full frames). Same place, same view, same
+moment for every pair: no camera difference to account for.
+
+Each alone:
+- dropping `mesh 89a62261 / pixel 6539386a` (G-buffer pass, 3 targets, main depth): **palm gone**;
+- dropping `vertex 25ebc920 / pixel 1cd9bc63` (screen-space tiles drawing into scene colour, depth test
+  EQUAL against a separate depth buffer, no depth write: deferred shading for one material class):
+  **palm gone**;
+- dropping `vertex 24abbd85 / pixel 2de553a0` (screen-space water composite): water gone and **the palm
+  drawn whole** where it was a ghost (k0 against k1);
+- the other seven of the last sets: ghost unchanged.
+
+So in the middle state the palm is drawn, G-buffer and shading both, and the water composite paints over
+it. The composite's pixel shader reads a water-depth texture at the pixel, discards where it is 0 (no
+water) or a G-buffer flag says so, and otherwise writes water colour and that depth (SV_Depth) with the
+depth test set to ALWAYS and stencil 0x17. It does not compare against the scene's depth itself; what keeps
+water off nearer objects must be in its inputs: the water surface (`vertex 17076288 / pixel 7933d968`,
+drawn into its own 2560x1440 depth buffer, depth test GREATER, with no clear or copy into it seen in its
+list) and that shader's own per-pixel test (it reads two textures at the pixel and works in coordinates
+(pixel+0.5)x2, i.e. built for a half-resolution pass). Why that is wrong: the palm stands on land in front
+of the water; nothing on the console version covers it with water (and in our own picture the dock posts
+and the character in front of the same water are not covered). Which input lets water through behind the
+palm (a depth source without the palm or with it at half resolution, the order of the lists, or the
+half-resolution mapping) is not yet established.
+
+Not the explanation, each tested: the 32 KiB argument buffer (palm4 c3), our clamp's budget (0 refusals),
+a missing draw (the palm's draws run), another LOD meant to cover the range (the same G-buffer pipeline
+draws the palm in the ghost state; it is hidden, not replaced).
+
+Next single action: in the ghost state, save the water pass's targets and depth (0x...7a640 at the
+frame's end, VICTORY_DUMP_TARGETS) and the two textures its surface shader reads, and see at the palm's
+pixels whether water depth is present there and what the scene depth it tested against holds.
