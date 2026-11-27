@@ -4080,8 +4080,17 @@ impl Shadow {
     /// the copy and the address. One that differs once is a write of the
     /// title's that arrived between the refresh and the look.
     fn refresh_check(&self, from: usize, to: usize) {
-        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if !*ON.get_or_init(|| std::env::var_os("VICTORY_REFRESH_CHECK").is_some_and(|v| v == "1")) {
+        static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+        let mode = *MODE.get_or_init(|| match std::env::var("VICTORY_REFRESH_CHECK").as_deref() {
+            Ok("1") => 1,
+            Ok("2") => 2,
+            _ => 0,
+        });
+        if mode == 2 {
+            self.refresh_repair(from, to);
+            return;
+        }
+        if mode != 1 {
             return;
         }
         const SAMPLE: usize = 256;
@@ -4124,6 +4133,56 @@ impl Shadow {
             }
             // The first bytes of the next 64 KiB block.
             at = (at / PAGE + 1) * PAGE;
+        }
+    }
+
+    /// `VICTORY_REFRESH_CHECK=2`: after a refresh that trusted the write
+    /// watch or the guards, four samples of 256 bytes of every 64 KiB block
+    /// of `[from, to)` (at 0, 16, 32 and 48 KiB) are compared with title
+    /// memory, and a block where one differs is copied again whole: memory
+    /// the title's side changed with nothing to tell of it (run rc1: 7
+    /// blocks of the 174 MB heap stale after three refreshes in a row) goes
+    /// to the card as it is.
+    fn refresh_repair(&self, from: usize, to: usize) {
+        const SAMPLE: usize = 256;
+        static REPAIRED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+        static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+        let start = self.start as usize;
+        let end = start + self.len as usize;
+        let mut title = [0u8; SAMPLE];
+        let mut block = from / PAGE * PAGE;
+        while block < to {
+            let (a, b) = (block.max(from).max(start), (block + PAGE).min(to).min(end));
+            let mut differs = false;
+            for k in 0..4 {
+                let at = block + k * (PAGE / 4);
+                if at < a || at >= b {
+                    continue;
+                }
+                let n = SAMPLE.min(b - at);
+                if !crate::host::read_into(at as *const u8, &mut title[..n]) {
+                    continue;
+                }
+                // SAFETY: `[a, b)` lies inside the buffer, so these bytes are
+                // inside the copy's mapping.
+                let copy = unsafe { std::slice::from_raw_parts(self.data.add(at - start).cast_const(), n) };
+                if copy != &title[..n] {
+                    differs = true;
+                    break;
+                }
+            }
+            if differs && a < b {
+                self.copy(a, b);
+                REPAIRED[0].fetch_add(1, Ordering::Relaxed);
+                REPAIRED[1].fetch_add((b - a) as u64, Ordering::Relaxed);
+            }
+            block += PAGE;
+        }
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_none_or(|t| t.elapsed().as_secs() >= 5) {
+            *last = Some(std::time::Instant::now());
+            let (n, bytes) = (REPAIRED[0].swap(0, Ordering::Relaxed), REPAIRED[1].swap(0, Ordering::Relaxed));
+            tracing::info!(blocks = n, mb = bytes as f64 / 1e6, "VICTORY_REFRESH_CHECK=2: blocks copied again in the last 5 s, stale after a refresh that trusted the watch");
         }
     }
 
