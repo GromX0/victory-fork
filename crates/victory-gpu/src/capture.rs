@@ -995,7 +995,7 @@ fn title_return_addresses(n: usize) -> Vec<usize> {
     use windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits;
     // The title's image: (base, end), found once from any address in it.
     static TITLE: std::sync::OnceLock<std::sync::Mutex<Option<(usize, usize)>>> = std::sync::OnceLock::new();
-    let title = TITLE.get_or_init(|| std::sync::Mutex::new(None));
+    let title = TITLE.get_or_init(|| std::sync::Mutex::new(crate::TITLE_IMAGE.get().copied()));
     let module_of = |addr: usize| -> Option<(usize, bool)> {
         let mut module = std::ptr::null_mut();
         // SAFETY: looks up the module holding the address, no reference.

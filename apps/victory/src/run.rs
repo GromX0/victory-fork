@@ -72,6 +72,7 @@ pub fn run(
     drop(prepared);
     drop(original);
     victory_hle::runtime::set_main_image(image.base());
+    victory_hle::set_title_image(image.base(), image.info().size_of_image as usize);
     victory_hle::runtime::set_image_path(image.base(), exe);
     println!(
         "mapped at      {:#x} (preferred {:#x})",

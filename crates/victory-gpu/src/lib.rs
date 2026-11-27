@@ -136,6 +136,15 @@ pub fn frames_begun() -> u64 {
     frame::current()
 }
 
+/// Where the title's image is mapped (`base`, `size` bytes): diagnostics
+/// name the title's code by offsets into it (`capture`'s callers).
+pub fn set_title_image(base: usize, size: usize) {
+    let _ = TITLE_IMAGE.set((base, base + size));
+}
+
+/// See [`set_title_image`].
+pub(crate) static TITLE_IMAGE: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+
 /// When the title first presented a frame of 500 draws or more (its world,
 /// past menus and loading screens), if it has: the start of recorded and
 /// replayed input (`victory_hle`'s `gameinput`).
