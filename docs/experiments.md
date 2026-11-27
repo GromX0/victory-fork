@@ -530,6 +530,38 @@ translator's RDNA-specific forms (VICTORY_RDNA_FLOAT alone, passes kept), wave-s
 host; then the 32 GB of RAM (the PC runs at ~1 GB free, Stage 2).
 Next single action: VICTORY_RDNA_FLOAT=0 alone (a warm-up run unattended, then a verdict run).
 
+Defect 1, 27 Nov 03:40-04:10:
+
+| Run | Change | Result | Decision |
+| --- | --- | --- | --- |
+| s3-rdnaf-warm | VICTORY_RDNA_FLOAT=0 (passes kept; judged once nearby pipelines were made) | still pops | rejected |
+| (code) | the loop cap | it is 2^20 iterations (lower.rs LOOP_LIMIT), not 128/256 as the source survey said | rejected |
+| (code/logs) | indirect DispatchMeshX dropped | the warning never fired in any run; indirect mesh work runs (29,000-41,000 groups a frame) | rejected |
+| (web) | a newer AMD driver | this PC's 32.0.32029.2010 (18 Nov) is newer than the newest release notes found (26.9.1, Sept) | not tried |
+| rec3 | user's own save, user walking; a capture (picture, ops, counts) every 20 frames, screen recorded | see below | - |
+| rec4 | VICTORY_GPU_LOAD_MS=25 (the title's four GPU timestamps a frame say 25 ms instead of 0) | still pops; presence flips of mesh+pixel draw types 0.196 per type per capture step (rec3: 0.147; routes differ) | rejected |
+
+**The user's own description:** an object is drawn far away, invisible in a middle band of distance,
+and drawn again close up; many objects, not only trees.
+
+**rec3, the stairs palm, captures 20 frames apart:** 3100 ghost, 3120-3160 solid, 3180-3200 ghost. Four
+mesh pipelines (6cc4dd2e/278a8c57, d9c3bcbf/d20f3c14, f0aee31b/5dff3af2, f2b41c69/e6bc7adb, 60-235
+groups a frame) are **absent** from the frames the palm is a ghost in (not run with zero work: no
+execution of them at all), while those frames have more mesh executions in all (373 vs 206): the
+title draws the same scenery another way in those frames and back again a second later. The title's
+own level-of-detail / fade state flips; no drop of ours is involved (ops: only the builder and the
+skipped 39f0e9ae dropped).
+
+Leading hypothesis: what the title decides that state from is wrong here. Candidate not yet tested:
+the merge of a submission's GPU writes into title memory keeps the **title's** byte where both changed it
+while the GPU ran (shadow.rs ~1918, settle path; the relay merges likewise for bytes the title wrote
+after sending them). A CPU-clears / GPU-sets visibility flag loses the GPU's set that way, and our GPU
+runs a frame or more behind the CPU, so such conflicts are more common than on the console. Falsification:
+a diagnostic switch giving the GPU's byte on conflicts (risk: the crash the rule was made for,
+PalmVIDev e0b70476 / VIctory f39c6c2) changes the flips (rec-style captures) and the user's verdict;
+unchanged, rejected.
+Next single action: that switch, then one recorded walk.
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
