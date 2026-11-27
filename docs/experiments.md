@@ -513,6 +513,23 @@ draws present with 0 instances where the same view with the object shows them > 
 Next single action: build that counter (diagnostics only), then one play run with two F9 presses at
 the same spot (object missing / object there).
 
+Defect 1 continued (27 Nov, 03:10-03:40):
+
+| Run | Build / change | Result | Decision |
+| --- | --- | --- | --- |
+| s3-counts | 16a907e6: F9 frames also write `frame-N-counts.txt` (each ExecuteIndirect's arguments as run, read back) | works (242-582 executions a frame); the user's pair 3093 (stairs palm invisible) / 3407 (there) differ in view too much (582 vs 447 executions) to single out the palm's draws | tool kept; needs near-identical views |
+| (log) | indirect budget rule (VICTORY_INDIRECT_REST, AvatarManz findings #4) | 0.00 records a frame emptied for budget in s3-counts, s3-picked, rec2, s3-heap-busy | rejected |
+| s3-plain | VICTORY_SHADER_OPT=0 + VICTORY_RDNA_FLOAT=0 | AMD's compiler crashed on 5 pipelines (graphics among them); white screen | invalid, stopped; the clean-up passes keep the compiler alive |
+| bb-popin2 | Belobug rx9070xt 81ebb7bd, its play settings | still pops | not our merge |
+| av-ports2 | AvatarManz 014d52de (newest: its 26 Nov pop-in fix, ports 1 and 2 improved), its README's tested settings: patches 1, 2, 5, 6, 7 on; after its 10-minute compile (0 pipelines being made) | **still pops** on this PC | AvatarManz reports the trees and palms fixed on an RX 7900 XTX / 64 GB; here, RX 9070 (RDNA4) / 32 GB, driver 32.0.32029.2010, it is not |
+
+Host adapter checked: the layer uses the RX 9070 (not the CPU's integrated graphics). Conclusion so far:
+the defect follows this PC, not a build or a missing patch. Leading suspects: the RDNA4 card or its
+driver (AMD's compiler already treats RDNA4 differently: the REUSE crashes, Belobug's #324), the
+translator's RDNA-specific forms (VICTORY_RDNA_FLOAT alone, passes kept), wave-size choices on this
+host; then the 32 GB of RAM (the PC runs at ~1 GB free, Stage 2).
+Next single action: VICTORY_RDNA_FLOAT=0 alone (a warm-up run unattended, then a verdict run).
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
