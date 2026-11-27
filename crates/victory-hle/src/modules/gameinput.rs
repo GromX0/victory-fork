@@ -194,7 +194,14 @@ mod tape {
     pub(super) fn pass(pads: &mut [Option<PadState>; PADS], keys: &[KeyState]) {
         static RECORD: OnceLock<Option<Mutex<(std::fs::File, Option<PadState>)>>> = OnceLock::new();
         static REPLAY: OnceLock<Vec<(u64, PadState)>> = OnceLock::new();
+        static OFFSET: OnceLock<u64> = OnceLock::new();
         let Some(ms) = since_world() else { return };
+        // `VICTORY_INPUT_REPLAY_OFFSET_MS`: the tape starts that much later
+        // (a slower run, ray tracing on, spends longer in the opening shots
+        // before the player has control).
+        let offset = *OFFSET.get_or_init(|| {
+            std::env::var("VICTORY_INPUT_REPLAY_OFFSET_MS").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+        });
         let record = RECORD.get_or_init(|| {
             let path = std::env::var_os("VICTORY_INPUT_RECORD")?;
             let file = std::fs::File::create(&path).ok()?;
@@ -216,7 +223,7 @@ mod tape {
             tracing::info!(path = %std::path::Path::new(&path).display(), lines = tape.len(), "input played back from the world's first frame (VICTORY_INPUT_REPLAY)");
             tape
         });
-        if let Some(state) = at(replay, ms) {
+        if let Some(state) = ms.checked_sub(offset).and_then(|ms| at(replay, ms)) {
             pads[0] = Some(pads[0].map_or(state, |host| merged(host, state)));
         }
     }
