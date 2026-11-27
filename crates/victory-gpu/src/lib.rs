@@ -135,6 +135,14 @@ pub fn frame_phase() -> u32 {
 pub fn frames_begun() -> u64 {
     frame::current()
 }
+
+/// When the title first presented a frame of 500 draws or more (its world,
+/// past menus and loading screens), if it has: the start of recorded and
+/// replayed input (`victory_hle`'s `gameinput`).
+#[cfg(all(windows, feature = "diagnostics"))]
+pub fn world_started() -> Option<std::time::Instant> {
+    capture::world_started()
+}
 #[cfg(windows)]
 pub use inplace::{title_memory_freeing, title_memory_section, title_memory_section_gone, title_memory_view};
 #[cfg(windows)]

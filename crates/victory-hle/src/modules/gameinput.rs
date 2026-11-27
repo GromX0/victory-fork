@@ -137,6 +137,109 @@ fn fallback(keys: &[KeyState]) -> PadState {
     }
 }
 
+/// Input recorded and played back, timed from the world's first frame
+/// (`victory_gpu::world_started`), so that a walk through the world is the
+/// same in every run however long loading took: a fixed route for tests of
+/// what the title draws (the pop-in investigation).
+///
+/// - `VICTORY_INPUT_RECORD=<file>`: a line each time the first pad as the
+///   title gets it (host pads and the keyboard's stand-in, merged) changes:
+///   milliseconds, buttons, triggers, sticks.
+/// - `VICTORY_INPUT_REPLAY=<file>`: such a file played into the first pad
+///   slot, merged with whatever the host has there.
+#[cfg(all(windows, feature = "diagnostics"))]
+mod tape {
+    use super::{PadState, KeyState, PADS, fallback, merged};
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    fn since_world() -> Option<u64> {
+        victory_gpu::world_started().map(|at| at.elapsed().as_millis() as u64)
+    }
+
+    fn line(ms: u64, p: &PadState) -> String {
+        format!(
+            "{ms}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            p.buttons, p.left_trigger, p.right_trigger, p.left_x, p.left_y, p.right_x, p.right_y
+        )
+    }
+
+    pub(super) fn parse(text: &str) -> Vec<(u64, PadState)> {
+        text.lines()
+            .filter_map(|l| {
+                let w: Vec<&str> = l.split('\t').collect();
+                let f = |i: usize| w.get(i)?.trim().parse::<f32>().ok();
+                Some((
+                    w.first()?.trim().parse().ok()?,
+                    PadState {
+                        buttons: w.get(1)?.trim().parse().ok()?,
+                        left_trigger: f(2)?,
+                        right_trigger: f(3)?,
+                        left_x: f(4)?,
+                        left_y: f(5)?,
+                        right_x: f(6)?,
+                        right_y: f(7)?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// The state in effect at `ms` (the last line at or before it).
+    pub(super) fn at(tape: &[(u64, PadState)], ms: u64) -> Option<PadState> {
+        let i = tape.partition_point(|&(t, _)| t <= ms);
+        (i > 0).then(|| tape[i - 1].1)
+    }
+
+    pub(super) fn pass(pads: &mut [Option<PadState>; PADS], keys: &[KeyState]) {
+        static RECORD: OnceLock<Option<Mutex<(std::fs::File, Option<PadState>)>>> = OnceLock::new();
+        static REPLAY: OnceLock<Vec<(u64, PadState)>> = OnceLock::new();
+        let Some(ms) = since_world() else { return };
+        let record = RECORD.get_or_init(|| {
+            let path = std::env::var_os("VICTORY_INPUT_RECORD")?;
+            let file = std::fs::File::create(&path).ok()?;
+            tracing::info!(path = %std::path::Path::new(&path).display(), "input recorded from the world's first frame (VICTORY_INPUT_RECORD)");
+            Some(Mutex::new((file, None)))
+        });
+        if let Some(record) = record {
+            let pad = pads.iter().flatten().copied().fold(fallback(keys), merged);
+            let mut r = record.lock().unwrap_or_else(|e| e.into_inner());
+            if r.1 != Some(pad) {
+                let _ = r.0.write_all(line(ms, &pad).as_bytes());
+                let _ = r.0.flush();
+                r.1 = Some(pad);
+            }
+        }
+        let replay = REPLAY.get_or_init(|| {
+            let Some(path) = std::env::var_os("VICTORY_INPUT_REPLAY") else { return Vec::new() };
+            let tape = std::fs::read_to_string(&path).map(|t| parse(&t)).unwrap_or_default();
+            tracing::info!(path = %std::path::Path::new(&path).display(), lines = tape.len(), "input played back from the world's first frame (VICTORY_INPUT_REPLAY)");
+            tape
+        });
+        if let Some(state) = at(replay, ms) {
+            pads[0] = Some(pads[0].map_or(state, |host| merged(host, state)));
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_recorded_tape_plays_back_the_state_in_effect() {
+            let walk = PadState { left_y: 1.0, right_x: -0.5, ..Default::default() };
+            let stop = PadState { buttons: 4, ..Default::default() };
+            let text = line(1000, &walk) + &line(2500, &stop);
+            let tape = parse(&text);
+            assert_eq!(tape, vec![(1000, walk), (2500, stop)]);
+            assert_eq!(at(&tape, 999), None);
+            assert_eq!(at(&tape, 1000), Some(walk));
+            assert_eq!(at(&tape, 2499), Some(walk));
+            assert_eq!(at(&tape, 9000), Some(stop));
+        }
+    }
+}
+
 /// Two pads as one: buttons of both, and of each axis and trigger the one
 /// pushed further.
 fn merged(a: PadState, b: PadState) -> PadState {
@@ -430,11 +533,14 @@ impl Hub {
 
     /// Reads the host once; device callbacks run on the calling thread.
     fn poll(&self) {
-        let (pads, keys) = {
+        #[allow(unused_mut)]
+        let (mut pads, keys) = {
             let mut source = lock(&self.source);
             let pads: [_; PADS] = std::array::from_fn(|slot| source.pad(slot));
             (pads, source.keys())
         };
+        #[cfg(all(windows, feature = "diagnostics"))]
+        tape::pass(&mut pads, &keys);
         let events = self.state().poll(&self.devices, self.one_pad, pads, keys);
         self.deliver(events);
     }

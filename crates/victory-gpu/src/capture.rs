@@ -124,6 +124,15 @@ fn world_on() -> bool {
 /// The first frame that ran 500 draws or more (`VICTORY_CAPTURE_WORLD`).
 static WORLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
+/// When the first frame of 500 draws or more was presented, whatever the
+/// capture switches: [`world_started`].
+static WORLD_AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// See [`crate::world_started`].
+pub(crate) fn world_started() -> Option<std::time::Instant> {
+    WORLD_AT.get().copied()
+}
+
 /// The frame F9 asked for (u64::MAX: none): see [`key_pressed`].
 static KEYED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
@@ -164,6 +173,9 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     write_counts(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
+    if drawn.saturating_sub(before) >= 500 {
+        let _ = WORLD_AT.get_or_init(std::time::Instant::now);
+    }
     if world_on()
         && drawn.saturating_sub(before) >= 500
         && WORLD.compare_exchange(u64::MAX, frame, Relaxed, Relaxed).is_ok()
