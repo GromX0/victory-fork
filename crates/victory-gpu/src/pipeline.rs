@@ -155,7 +155,7 @@ impl Shader {
             .get_or_init(|| {
                 let done = {
                     let _translation = crate::timeline::span("pipeline: translate a shader");
-                    translate(&self.container)
+                    translate(&self.container, &self.hash)
                 };
                 // `VICTORY_SHADER_SAVE=<dir>`: each shader as the title gave it (`.cdxil`) and as
                 // translated (`.dxil`), by the hash crash reports name it with
@@ -204,8 +204,154 @@ impl Shader {
     }
 }
 
+/// `VICTORY_WAVE32=<hash>[,<hash>...]` (diagnostics): those shaders translated
+/// as for a host whose widest wave is 32 lanes (a console wave64 compute
+/// program as two host waves of 32), whatever the card runs, and not cached.
+/// For telling a fault of the card's wave64 code from one of the translation.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn wave32(hash: &str) -> bool {
+    static LIST: OnceLock<Vec<String>> = OnceLock::new();
+    LIST.get_or_init(|| {
+        std::env::var("VICTORY_WAVE32")
+            .unwrap_or_default()
+            .split([',', ' ', ';'])
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect()
+    })
+    .iter()
+    .any(|h| hash.starts_with(h.as_str()))
+}
+
+#[cfg(all(windows, not(feature = "diagnostics")))]
+fn wave32(_: &str) -> bool {
+    false
+}
+
+/// `VICTORY_CODE_PATCH=<file>` (diagnostics): lines `<hash> <offset> <dword>...`
+/// (hex; the offset into the shader's machine code as `shader-info --disasm`
+/// prints it, `#` starts a comment): those dwords of the console code of a
+/// shader `hash` has lines for, replaced before translation. For testing
+/// what an instruction of the title's decides; translated without the cache.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn code_patched(container: &[u8], hash: &str) -> Option<Vec<(usize, u32)>> {
+    use victory_shader::{Container, FourCC, HwStage};
+    let text = std::fs::read_to_string(std::env::var_os("VICTORY_CODE_PATCH")?).ok()?;
+    let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+    let mut patch = Vec::new();
+    for line in text.lines() {
+        let mut words = line.split('#').next().unwrap_or("").split_whitespace();
+        let Some(h) = words.next() else { continue };
+        if !hash.starts_with(h.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        let Some(at) = words.next().and_then(hex) else { continue };
+        for (i, word) in words.filter_map(hex).enumerate() {
+            patch.push((at as usize + 4 * i, word as u32));
+        }
+    }
+    if patch.is_empty() {
+        return None;
+    }
+    // (the old dwords, for the log: the code as the translator will read it)
+    let c = Container::parse(container).ok()?;
+    let part = c.part(FourCC::DXIL).or(c.part(FourCC::ACCC))?;
+    let programs = victory_shader::native_programs(part.data).ok()?;
+    let program = programs
+        .iter()
+        .find(|p| matches!(p.stage, HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs))?;
+    for &(at, word) in &patch {
+        let old = program.code.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+        tracing::info!(hash, at = format!("{at:#x}"), old = format!("{old:08x?}"), new = format!("{word:08x}"), "VICTORY_CODE_PATCH");
+    }
+    Some(patch)
+}
+
+#[cfg(all(windows, not(feature = "diagnostics")))]
+fn code_patched(_: &[u8], _: &str) -> Option<Vec<(usize, u32)>> {
+    None
+}
+
+/// The title's instance culling pass (`compute 55679a0547649d0b`) gives each
+/// object a detail level by its distance from the camera (up to four, with a
+/// dithered crossfade near each boundary) and appends it to that level's draw
+/// lists. Here objects at level 1, the middle band, come out invisible: the
+/// palm beside the stairs, trees, many props, a dithered ghost (the crossfade
+/// into level 1) and then nothing between near and far. Runs nb1-fb2, 27 Nov:
+/// with every object at level 0 they are all drawn; forced to level 1 many
+/// vanish; level-1 lanes whose batch has no level-1 sub-draws, or whose level-1
+/// slot has no mesh record (the title's culling then sizes a per-slot mesh
+/// dispatch instead), taken to level 0 bring them back. Why level 1 is empty or
+/// drawn invisibly here is not known yet.
+///
+/// `VICTORY_LOD_NEAR`:
+/// - unset or `1`: no crossfade between levels, and those two level-1 cases
+///   drawn at level 0 (the title's level otherwise).
+/// - `all`: every object the pass draws at all is drawn at level 0, without the
+///   crossfade; one past the last level (culled) stays culled.
+/// - `0`: the pass as the title wrote it.
+///
+/// A few instructions of the pass change before translation, and only where
+/// the code holds the expected ones.
+const LOD_NEAR_HASH: &str = "55679a0547649d0b";
+
+/// (byte offset in the machine code, the title's dword, ours): the default.
+const LOD_FALLBACK_PATCH: [(usize, u32, u32); 4] = [
+    // v_cndmask_b32 v11, 1.0, v11, s[0:1] -> v_mov_b32 v11, 1.0; s_nop: no crossfade
+    (0x2a54, 0xd501_000b, 0x7e16_02f2),
+    (0x2a58, 0x0002_16f2, 0xbf80_0000),
+    // level 1, no sub-draws or no fade list: s_cbranch_vccnz (skip) -> the level-0 path
+    (0x30dc, 0xbf87_0543, 0xbf87_0090),
+    // level 1, a slot without a mesh record: s_cbranch_scc1 (per-slot dispatch) -> the level-0 path
+    (0x3134, 0xbf85_0484, 0xbf85_007a),
+];
+
+/// `VICTORY_LOD_NEAR=all`.
+const LOD_ALL_PATCH: [(usize, u32, u32); 4] = [
+    // v_cmp_le_f32 vcc, 0, v11 -> v_mov_b32 v11, 1.0: no crossfade
+    (0x2a40, 0x7c06_1680, 0x7e16_02f2),
+    // s_and_b64 s[0:1], vcc, s[0:1] -> s_nop: s[0:1] stays "v10 < s17" (a level, not culled)
+    (0x2a4c, 0x8780_006a, 0xbf80_0000),
+    // v_cndmask_b32 v11, 1.0, v11, s[0:1] -> v_cndmask_b32 v10, v10, 0, s[0:1]: level 0
+    (0x2a54, 0xd501_000b, 0xd501_000a),
+    (0x2a58, 0x0002_16f2, 0x0001_010a),
+];
+
+/// The patch `VICTORY_LOD_NEAR` asks for, with its name; none when off.
 #[cfg(windows)]
-fn translate(container: &[u8]) -> Result<Translated, String> {
+fn lod_near_mode() -> Option<(&'static str, &'static [(usize, u32, u32)])> {
+    static MODE: OnceLock<Option<(&'static str, &'static [(usize, u32, u32)])>> = OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("VICTORY_LOD_NEAR").as_deref().map(str::trim) {
+        Ok("0") => None,
+        Ok("all") => Some(("all", &LOD_ALL_PATCH[..])),
+        _ => Some(("level 1 to level 0 where it is empty", &LOD_FALLBACK_PATCH[..])),
+    })
+}
+
+/// [`lod_near_mode`]'s patch for `container` when it is that pass and its code
+/// holds the title's dwords there.
+#[cfg(windows)]
+fn lod_near_patch(container: &[u8], hash: &str) -> Option<Vec<(usize, u32)>> {
+    use victory_shader::{Container, FourCC, HwStage};
+    if hash != LOD_NEAR_HASH {
+        return None;
+    }
+    let (mode, patch) = lod_near_mode()?;
+    let c = Container::parse(container).ok()?;
+    let part = c.part(FourCC::DXIL).or(c.part(FourCC::ACCC))?;
+    let programs = victory_shader::native_programs(part.data).ok()?;
+    let program = programs.iter().find(|p| p.stage == HwStage::Cs)?;
+    let word = |at: usize| program.code.get(at..at + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    if patch.iter().any(|&(at, title, _)| word(at) != Some(title)) {
+        tracing::warn!(hash, "VICTORY_LOD_NEAR: the culling pass's code is not the expected one; left as it is");
+        return None;
+    }
+    tracing::info!(hash, mode, "VICTORY_LOD_NEAR: the culling pass's middle detail level (=0: off, =all: every object at level 0)");
+    Some(patch.iter().map(|&(at, _, ours)| (at, ours)).collect())
+}
+
+#[cfg(windows)]
+fn translate(container: &[u8], hash: &str) -> Result<Translated, String> {
     use victory_shader::{Container, FourCC, HwStage};
     // The translation depends on it (a view index past a capped heap).
     crate::descriptor::host::probe_view_limit();
@@ -214,7 +360,21 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         Some(part) => victory_shader::native_programs(part.data).map_err(|e| e.to_string())?,
         None => Vec::new(),
     };
-    let host = crate::shader_cache::host_shader(container)?;
+    // A diagnostic patch of the same shader (VICTORY_CODE_PATCH) replaces this one.
+    let patched = code_patched(container, hash).or_else(|| lod_near_patch(container, hash));
+    let host = if wave32(hash) || patched.is_some() {
+        let wave32 = wave32(hash);
+        if wave32 {
+            victory_shader::emit::set_thread_max_wave(Some(32));
+        }
+        let patch = patched.clone().unwrap_or_default();
+        let host = victory_shader::emit::with_code_patch(patch, || victory_shader::emit::translate(container)).map_err(|e| e.to_string());
+        victory_shader::emit::set_thread_max_wave(None);
+        tracing::info!(hash, ok = host.is_ok(), wave32, patched = patched.is_some(), "translated outside the cache (VICTORY_WAVE32 / VICTORY_CODE_PATCH)");
+        host?
+    } else {
+        crate::shader_cache::host_shader(container)?
+    };
     let stores = programs.is_empty() || programs.iter().any(stores);
     let threads = programs.iter().find_map(|p| match &p.io {
         victory_shader::native::StageIo::Cs(cs) if cs.threads.iter().all(|&n| n > 0) => Some(cs.threads),

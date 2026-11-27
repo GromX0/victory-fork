@@ -73,6 +73,31 @@ struct Totals {
     files_with_shaders: usize,
 }
 
+/// `code` with the dwords `VICTORY_CODE_PATCH` gives for the shader in `path`
+/// (its file name starting with the line's hash) replaced.
+fn code_patched(path: &std::path::Path, code: &[u8]) -> Vec<u8> {
+    let mut code = code.to_vec();
+    let name = path.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let Some(text) = std::env::var_os("VICTORY_CODE_PATCH").and_then(|f| std::fs::read_to_string(f).ok()) else {
+        return code;
+    };
+    let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+    for line in text.lines() {
+        let mut words = line.split('#').next().unwrap_or("").split_whitespace();
+        let (Some(h), Some(at)) = (words.next(), words.next().and_then(hex)) else { continue };
+        if !name.starts_with(h.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        for (i, word) in words.filter_map(hex).enumerate() {
+            let o = at as usize + 4 * i;
+            if let Some(b) = code.get_mut(o..o + 4) {
+                b.copy_from_slice(&(word as u32).to_le_bytes());
+            }
+        }
+    }
+    code
+}
+
 pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
     let paths = crate::default_paths(paths)?;
     let mut t = Totals::default();
@@ -107,7 +132,10 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
                                 listing.extend(n.layout.iter().map(|p| format!("    {p:?}")));
                                 listing.extend(n.used.iter().map(|u| format!("    {u:?}")));
                             }
-                            match gfx10::decode(&n.code) {
+                            // `VICTORY_CODE_PATCH=<file>` as in a run (lines `<hash> <offset> <dword>...`,
+                            // the hash a prefix of the file's name): the listing of the patched code.
+                            let code = code_patched(&path, &n.code);
+                            match gfx10::decode(&code) {
                                 Ok(insts) => {
                                     t.decoded += 1;
                                     t.instructions += insts.len();

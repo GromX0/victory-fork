@@ -940,3 +940,52 @@ Not established: what makes the title fade the palm out in the middle band, or w
 draw 0 groups there. Ruled out by test today: shader translation of the dither, instance data reaching the
 GPU, frame rate/time, our clamp's budget, the water pass (separate), skipped/refused compute pipelines,
 occlusion pyramid, queue waiting, copy-back of the draw sizes, stale heap blocks (as sampled).
+
+### Disappearing objects: the culling pass's detail levels (27 Nov, 11:20-13:30, sz3, w32, nb1, l0, l1, rc3, l1b, fb1, nx, l1fb, l1fb2, dm, rt, l0b, fb2, def, off)
+
+The pass that decides what is drawn is `compute 55679a0547649d0b` (wave64, 6,095 IR instructions; its
+code read from `shader-info --disasm`). Per instance it computes the camera distance, picks a **detail
+level** `v10` (0-3) against the batch's thresholds, a crossfade factor near each threshold, and a
+"stand-in" band factor (per-archetype distances); then it appends the instance to the chosen level's
+lists in the 174 MB heap: an instance counter per draw slot, a fade word per instance
+(`[31:24]` = 255*distance fade, `[23:16]` = fade, `[15:0]` = instance) and 16-byte group records, or, for
+a slot whose record has no mesh word, a group count added to a per-slot DispatchMesh argument
+(`heap[s94 + slot*16]` = `[N, 1, 1, 0]`, read by `indirect kind 10` draws of `fe660f2d`, `903776ba`, ...).
+Three places write a fade word: the instance's own level (fade = band * crossfade * distance), the band's
+stand-in lists, and the next level's lists (the crossfade's other half). The ghost palm's fade word in
+sz3 was `ff2d0000` (0x2d/255 = 18%).
+
+New tools: `VICTORY_CODE_PATCH=<file>` (diagnostics: lines `<hash> <offset> <dword>...` replace dwords
+of a shader's machine code before translation; `shader-info --disasm` takes the same file to list the
+patched code), `VICTORY_WAVE32=<hash>` (that shader translated for 32-lane host waves),
+`VICTORY_REFRESH_CHECK=3` (every byte compared, not samples), title-memory dumps beside the GPU's
+(`frame-N-title-<seq>.bin`), `D:\victory-scratch\tools\lodslots.js` / `reqs.js` (the pass's tables walked
+in a heap dump).
+
+| Run | Change | Stairs palm (g0 / c4) | Decision |
+| --- | --- | --- | --- |
+| w32 | `VICTORY_WAVE32=55679a05` (two host waves of 32, exact "allocation idiom" form) | ghost / ghost | the card's wave64 code: rejected |
+| nb1 | stand-in band off (level 999 and band factor removed) | ghost / ghost | the band: rejected |
+| l0 | every instance at level 0, no crossfade | **solid / solid**, the trees before the house back, fps unchanged | level 0 draws everything |
+| l1 | every instance at level 1 (its last where it has fewer), no crossfade | solid / **gone**, trees before the house gone | level 1 comes out invisible for many objects |
+| rc3 | `VICTORY_REFRESH_CHECK=3`: 650-1,050 blocks (42-67 MB) re-copied every 5 s | ghost at c4 | stale title memory (where no shader writes): rejected |
+| fb1 | no crossfade; level-1 "no sub-draws" taken to the level-0 path | solid / solid | (see nx) |
+| nx | no crossfade only (control) | solid / solid | **the ghost is the crossfade into an invisible level 1** |
+| l1fb | l1 + "no sub-draws" to level 0 | solid / gone; some trees back | one of two cases |
+| l1fb2 | l1fb + "slot without a mesh record" to level 0 | **solid / solid**, trees back | **both cases found** |
+| dm | full heap dumps (GPU's copy and the title's) after the pass | - | records the same on both sides (0 of 495 empty slots filled on the title's side): not stale uploads; per-slot DispatchMesh arguments `[N,1,1,0]` on the GPU, `[0,1,1,0]` cleared by the title |
+| rt | `VICTORY_BVH_BUILDER=1` (the structure builder on) | gone at c4 | rejected |
+| fb2 | no crossfade + both level-1 cases to level 0 | **start / g0 / c4 all solid** | kept |
+| def | fb2 built in (`VICTORY_LOD_NEAR`, default on), no diagnostic patch | **start / g0 / c4 all solid** | the fix |
+
+**Result:** the objects that vanish are those the title puts at detail level 1 (the middle distance band;
+the dithered ghost is the crossfade from level 0 into it). Level 1 comes out invisible two ways: the
+batch has no level-1 sub-draws, or the level-1 slot has no mesh record and is drawn by a per-slot
+DispatchMesh that shows nothing. Taking those level-1 instances to level 0 brings the objects back.
+**Not yet known:** why level 1 is empty here (the title's streaming of those meshes, or what the per-slot
+dispatch path needs). Device methods 0x1c8/0x218 (16,384 + 2,048 pipelines the title goes without at load)
+remain a candidate for the empty level.
+
+The fix (`crates/victory-gpu/src/pipeline.rs`, `VICTORY_LOD_NEAR`): unset/`1` = no crossfade and the two
+level-1 cases drawn at level 0; `all` = every drawn object at level 0; `0` = the title's code. Applied
+only where the four dwords are the expected ones (else logged and left).

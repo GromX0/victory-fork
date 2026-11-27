@@ -4084,10 +4084,11 @@ impl Shadow {
         let mode = *MODE.get_or_init(|| match std::env::var("VICTORY_REFRESH_CHECK").as_deref() {
             Ok("1") => 1,
             Ok("2") => 2,
+            Ok("3") => 3,
             _ => 0,
         });
-        if mode == 2 {
-            self.refresh_repair(from, to);
+        if mode >= 2 {
+            self.refresh_repair(from, to, mode == 3);
             return;
         }
         if mode != 1 {
@@ -4142,8 +4143,14 @@ impl Shadow {
     /// memory, and a block where one differs is copied again whole: memory
     /// the title's side changed with nothing to tell of it (run rc1: 7
     /// blocks of the 174 MB heap stale after three refreshes in a row) goes
-    /// to the card as it is.
-    fn refresh_repair(&self, from: usize, to: usize) {
+    /// to the card as it is. `VICTORY_REFRESH_CHECK=3` (`full`): every byte
+    /// of the block compared, not samples (a few bytes of a header changed
+    /// in the middle of a block are missed by the samples).
+    fn refresh_repair(&self, from: usize, to: usize, full: bool) {
+        if full {
+            self.refresh_repair_full(from, to);
+            return;
+        }
         const SAMPLE: usize = 256;
         static REPAIRED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
         static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
@@ -4183,6 +4190,57 @@ impl Shadow {
             *last = Some(std::time::Instant::now());
             let (n, bytes) = (REPAIRED[0].swap(0, Ordering::Relaxed), REPAIRED[1].swap(0, Ordering::Relaxed));
             tracing::info!(blocks = n, mb = bytes as f64 / 1e6, "VICTORY_REFRESH_CHECK=2: blocks copied again in the last 5 s, stale after a refresh that trusted the watch");
+        }
+    }
+
+    /// [`Self::refresh_repair`] comparing every byte, 4 KiB at a time.
+    fn refresh_repair_full(&self, from: usize, to: usize) {
+        const CHUNK: usize = 4096;
+        static REPAIRED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+        static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+        let start = self.start as usize;
+        let end = start + self.len as usize;
+        let mut title = vec![0u8; CHUNK];
+        let mut block = from / PAGE * PAGE;
+        while block < to {
+            let (a, b) = (block.max(from).max(start), (block + PAGE).min(to).min(end));
+            let mut differs = false;
+            let mut at = a;
+            while at < b {
+                let n = CHUNK.min(b - at);
+                if crate::host::read_into(at as *const u8, &mut title[..n]) {
+                    // SAFETY: `[a, b)` lies inside the buffer, so these bytes
+                    // are inside the copy's mapping.
+                    let copy = unsafe { std::slice::from_raw_parts(self.data.add(at - start).cast_const(), n) };
+                    if copy != &title[..n] {
+                        differs = true;
+                        break;
+                    }
+                }
+                at += n;
+            }
+            REPAIRED[2].fetch_add((b.saturating_sub(a)) as u64, Ordering::Relaxed);
+            if differs && a < b {
+                self.copy(a, b);
+                REPAIRED[0].fetch_add(1, Ordering::Relaxed);
+                REPAIRED[1].fetch_add((b - a) as u64, Ordering::Relaxed);
+            }
+            block += PAGE;
+        }
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_none_or(|t| t.elapsed().as_secs() >= 5) {
+            *last = Some(std::time::Instant::now());
+            let (n, bytes, looked) = (
+                REPAIRED[0].swap(0, Ordering::Relaxed),
+                REPAIRED[1].swap(0, Ordering::Relaxed),
+                REPAIRED[2].swap(0, Ordering::Relaxed),
+            );
+            tracing::info!(
+                blocks = n,
+                mb = bytes as f64 / 1e6,
+                looked_mb = looked as f64 / 1e6,
+                "VICTORY_REFRESH_CHECK=3: blocks copied again in the last 5 s (every byte compared), stale after a refresh that trusted the watch"
+            );
         }
     }
 

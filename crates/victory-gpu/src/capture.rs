@@ -1392,7 +1392,7 @@ pub(crate) fn watched_fault(at: usize, rip: usize) {
 /// The watched pages' writers so far, most frequent first, logged.
 #[cfg(feature = "diagnostics")]
 fn watch_sites_line(presented: u64) {
-    if presented % 64 != 0 {
+    if !presented.is_multiple_of(64) {
         return;
     }
     let Some(sites) = WATCH_SITES.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
@@ -1714,6 +1714,16 @@ fn dump_ranges(list: &crate::host::HostList, what: &str) {
         list.defer_read_back(buffer, landing.as_mut_ptr(), [len as usize, 1, len as usize]);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         op(me, || format!("DUMP {seq} of {address:#x}+{len:#x} {what}"));
+        // Title memory of the same range as the title holds it now (while the
+        // list is recorded), beside the GPU's: `frame-<n>-title-<seq>.bin`.
+        if let Some(folder) = folder() {
+            let mut title = vec![0u8; len as usize];
+            let read = crate::host::read_into(address as *const u8, &mut title);
+            let _ = std::fs::write(folder.join(format!("frame-{frame}-title-{seq}.bin")), &title);
+            if !read {
+                op(me, || format!("DUMP {seq}: title memory of {address:#x}+{len:#x} not readable (zeros written)"));
+            }
+        }
         DUMPS.lock().unwrap_or_else(|e| e.into_inner()).push(Dump {
             frame,
             seq,
