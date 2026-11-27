@@ -877,3 +877,26 @@ derives from its frame times (we run 3-20 fps; a 40% faster frame was tried in s
 change), the output/render size it is given (`VICTORY_OUTPUT`/`VICTORY_RENDER_SCALE` patch it), or the
 console model. Next: the title code that writes the instance word (draw callers +0x4e315bb, +0x32472,
 up from +0x555e97c) and the distances it reads.
+
+### Disappearing objects: time, writers, water depth (27 Nov, sessions ws1-ws2, fs1, pz1, wd1-wd2, st1)
+
+- **Not time-driven.** Camera held still for two minutes at normal speed (st1, four spans 35 s apart):
+  the part-way fade values stay put (0x9a, 0xa8, 0x69, 0xcc, 0x2a over all four); and with 600 ms slept
+  at every present (fs1, `VICTORY_PRESENT_SLEEP`, 0.3 fps) they did not jump to done either. The fade is
+  not a timed crossfade that our low frame rate stretches out.
+- **Writers.** Watching the pages of the instance lists (`VICTORY_WATCH_PIPES`/`VICTORY_WATCH_SLOTS`)
+  caught no write inside the lists themselves (they are not in guarded memory); writes beside them come
+  from +0x50ebc64 (an allocator's counters) and +0x557a54e (a prefix-sum loop). The code that sets the
+  fade byte is not found this way.
+- **The palm against the water depth** (wd2, frame 1897 targets): in the water pass's depth (f39) the
+  palm is a dither pattern, about half its pixels; scene depth (f19) has it faint. So the palm is drawn
+  part-faded, and water shows through the holes. The water pass is not wrong on its own: it fills what the
+  dither leaves.
+- Our depth-plane shortcut (`twin_use`, "used before the pass") hits one texture, 2560x1440 format 44
+  (the deferred-shading depth copy), read only: not the water depth.
+
+What it adds up to: the palm and the tree are drawn as one detail level part-faded, and where the other
+level would cover the holes it is not drawn there (for the palm the near level, `fd08d25a`, contributed
+nothing in the ghost state: palm4 c1/c2; its arguments come from the GPU culling passes). Whether the
+near level is culled on the GPU or never asked for by the title's CPU is the open question; it is the
+next thing to settle (its clusters in the culling output in the ghost state against the solid one).
