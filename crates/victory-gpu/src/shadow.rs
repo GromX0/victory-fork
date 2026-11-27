@@ -1923,8 +1923,11 @@ fn back_piece(
     mask.clear();
     mask.resize(n, 0);
     let mut differs = 0u8;
+    // `VICTORY_GPU_WINS=1`: the GPU's byte wherever it changed one, whatever
+    // the title did meanwhile (as on the console when the GPU writes last).
+    let title_may_keep = if gpu_wins() { 0u8 } else { 0xffu8 };
     for (((t, h), o), m) in title.iter_mut().zip(host.iter_mut()).zip(old).zip(mask.iter_mut()) {
-        let gpu = if (*h != *o) & (*t == *o) { 0xffu8 } else { 0 };
+        let gpu = if (*h != *o) & ((*t == *o) | (title_may_keep == 0)) { 0xffu8 } else { 0 };
         let merged = (*t & !gpu) | (*h & gpu);
         *m = merged ^ *t;
         differs |= *m;
@@ -2665,6 +2668,25 @@ impl Drop for Shadow {
 /// write is simply never put back, with a kept one it would be taken for a
 /// write of a later submission and put back then, over whatever the title
 /// wrote there since.
+/// `VICTORY_GPU_WINS=1` (off by default; a diagnostic): where a submission's
+/// shaders and the title both changed a byte while the GPU ran, the GPU's
+/// byte goes to title memory, not the title's. By default the title's stays
+/// (the settle merge; the relay merges skip what the title wrote after
+/// sending): an object the GPU cleared a bit of after the title replaced it
+/// broke the title (PalmVIDev e0b70476, VIctory f39c6c2). On the console the
+/// later write wins; a flag the title clears and the GPU sets each frame
+/// loses the GPU's set here (the pop-in investigation, docs/experiments.md).
+pub(crate) fn gpu_wins() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_GPU_WINS").is_some_and(|v| v == "1");
+        if on {
+            tracing::warn!("VICTORY_GPU_WINS=1: the GPU's bytes win over the title's where both changed them");
+        }
+        on
+    })
+}
+
 fn keeps() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_KEEP_SNAPSHOTS").is_some_and(|v| v == "1"))
@@ -4658,6 +4680,10 @@ impl Shadow {
             let sent = card.sent.lock().unwrap_or_else(|e| e.into_inner());
             let mut skip: Vec<(usize, usize)> = dirty.iter().copied().filter(|&(a, b)| a < at + n && b > at).collect();
             sent.near(fetched_after, at, at + n, &mut skip);
+            // `VICTORY_GPU_WINS=1`: the card's bytes there too.
+            if gpu_wins() {
+                skip.clear();
+            }
             skip
         };
         title.clear();
