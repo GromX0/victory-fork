@@ -206,6 +206,12 @@ extern "system" fn release(this: This) -> u32 {
     object::release_boxed::<RootSignature>(this)
 }
 
+/// Whether an object whose first word is `vtable` is one of our root
+/// signatures (diagnostics for device methods 0x1c8/0x218).
+pub(crate) fn is_root_table(vtable: usize) -> bool {
+    vtable == std::ptr::addr_of!(FUNCTIONS) as usize
+}
+
 /// IUnknown 3, object 4, device child 1.
 static FUNCTIONS: Table<24> = {
     let mut f = object::d3d12_object(object::missing_table::<ROOT_SIGNATURE, 24>());

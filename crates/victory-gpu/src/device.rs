@@ -388,9 +388,39 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         let first = description
             .as_ref()
             .and_then(|w| words(w[0] as usize));
+        // What the description's first word is: one of our objects?
+        let first_is = match (description.as_ref().map(|w| w[0] as usize), first.as_ref().map(|w| w[0] as usize)) {
+            (Some(object), Some(vtable)) => crate::pipeline::name_if_pipeline(object, vtable)
+                .map(|n| format!("our pipeline {n}"))
+                .or_else(|| crate::root::is_root_table(vtable).then(|| "our root signature".to_owned()))
+                .unwrap_or_else(|| "not one of our pipelines or root signatures".to_owned()),
+            _ => "unread".to_owned(),
+        };
+        // The (address, size) pairs that follow: the first 32 bytes of each, as
+        // hex and as text, to tell what kind of data they are.
+        let pieces: Vec<String> = description
+            .as_ref()
+            .map(|w| {
+                [(1usize, 2usize), (3, 4), (5, 6), (7, 8), (9, 10)]
+                    .iter()
+                    .map(|&(at, len)| {
+                        let (ptr, size) = (w[at] as usize, w[len]);
+                        let mut b = [0u8; 32];
+                        if crate::host::read_into(ptr as *const u8, &mut b) {
+                            let text: String = b.iter().map(|&c| if (32..127).contains(&c) { c as char } else { '.' }).collect();
+                            format!("{ptr:#x}+{size:#x}: {} |{text}|", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+                        } else {
+                            format!("{ptr:#x}+{size:#x}: unreadable")
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         tracing::warn!(
             slot = format_args!("{:#x}", SLOT),
             calls,
+            first_is,
+            pieces = format_args!("{pieces:?}"),
             description = format_args!("{description:x?}"),
             first_points_at = format_args!("{first:x?}"),
             "a pipeline creation method that is not implemented: the title goes without this pipeline"

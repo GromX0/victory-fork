@@ -967,6 +967,16 @@ extern "system" fn release(this: This) -> u32 {
     object::release_boxed::<Pipeline>(this)
 }
 
+/// What an object whose first word is `vtable` is, when it is one of our
+/// pipelines: its name (diagnostics for device methods 0x1c8/0x218).
+pub(crate) fn name_if_pipeline(object: usize, vtable: usize) -> Option<String> {
+    if vtable != std::ptr::addr_of!(FUNCTIONS) as usize {
+        return None;
+    }
+    let p = pipeline(object as This);
+    Some(make::ready(&p.host).map_or_else(|| "(not made yet)".to_owned(), |h| h.name.clone()))
+}
+
 /// IUnknown 3, object 4, device child 1, pipeline 3.
 static FUNCTIONS: Table<24> = {
     let mut f = object::d3d12_object(object::missing_table::<PIPELINE, 24>());
