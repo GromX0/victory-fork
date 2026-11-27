@@ -619,6 +619,15 @@ fn stencil_values(
             .collect();
         most.sort_by_key(|v| std::cmp::Reverse(v.1));
         most.truncate(16);
+        // The plane itself, grey = the stencil value, to read the material
+        // class of a surface that lights wrongly against its neighbours'.
+        let mut grey = Vec::with_capacity(w * h * 4);
+        for y in 0..h {
+            for &v in &rows[y * pitch..y * pitch + w] {
+                grey.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        save_as(&format!("frame-{frame}-stencil-{resource:?}-{w}x{h}"), w as u32, h as u32, w * 4, false, &grey);
         tracing::info!(
             frame,
             ?resource,
