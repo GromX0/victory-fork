@@ -4619,6 +4619,25 @@ fn describe(view: Option<&View>) -> String {
             // A small raw buffer (dimension 1, no format): its first 32
             // words as title memory holds them now (VICTORY_OPS_WORDS=1).
             static WORDS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            // And the words at `VICTORY_OPS_AT`'s byte offsets (`,` apart)
+            // of any raw buffer long enough.
+            static AT: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+            let offsets = AT.get_or_init(|| {
+                std::env::var("VICTORY_OPS_AT").unwrap_or_default().split(',').filter_map(|w| w.trim().parse().ok()).collect()
+            });
+            if r[0] == 1 && r[8] == 0 && !offsets.is_empty() {
+                let found: Vec<String> = offsets
+                    .iter()
+                    .filter(|&&o| o + 4 <= width * 4)
+                    .filter_map(|&o| {
+                        let mut w = [0u8; 4];
+                        crate::host::read_into((at + o) as *const u8, &mut w).then(|| format!("@{o}={:08x}", u32::from_le_bytes(w)))
+                    })
+                    .collect();
+                if !found.is_empty() {
+                    text.push_str(&format!(" at-words [{}]", found.join(" ")));
+                }
+            }
             if *WORDS.get_or_init(|| std::env::var_os("VICTORY_OPS_WORDS").is_some_and(|v| v == "1"))
                 && r[0] == 1
                 && r[8] == 0
