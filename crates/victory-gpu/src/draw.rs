@@ -4613,15 +4613,27 @@ fn describe(view: Option<&View>) -> String {
                 crate::descriptor::host::buffer_range(v)
             ),
         },
-        Some(View::Placed(u, r, d)) => format!(
-            "placed uav={u} dim {} {}x{} f{} layout {:#x} at {:#x}",
-            r[0],
-            u64::from(r[4]) | u64::from(r[5]) << 32,
-            r[6],
-            r[8],
-            r[11],
-            u64::from(d[10]) | u64::from(d[11]) << 32
-        ),
+        Some(View::Placed(u, r, d)) => {
+            let (width, at) = (u64::from(r[4]) | u64::from(r[5]) << 32, u64::from(d[10]) | u64::from(d[11]) << 32);
+            let mut text = format!("placed uav={u} dim {} {width}x{} f{} layout {:#x} at {at:#x}", r[0], r[6], r[8], r[11]);
+            // A small raw buffer (dimension 1, no format): its first 32
+            // words as title memory holds them now (VICTORY_OPS_WORDS=1).
+            static WORDS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *WORDS.get_or_init(|| std::env::var_os("VICTORY_OPS_WORDS").is_some_and(|v| v == "1"))
+                && r[0] == 1
+                && r[8] == 0
+                && (1..=256).contains(&width)
+            {
+                let n = width.min(32) as usize;
+                let mut bytes = vec![0u8; n * 4];
+                if crate::host::read_into(at as *const u8, &mut bytes) {
+                    let words: Vec<String> =
+                        bytes.chunks_exact(4).map(|w| format!("{:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]]))).collect();
+                    text.push_str(&format!(" words [{}]", words.join(" ")));
+                }
+            }
+            text
+        }
         // The first four values, as a colour rectangle's constants are.
         Some(View::Constant(address, size))
             if *size >= 16 && crate::texture::committed(*address as *const u8, 16) =>
