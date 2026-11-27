@@ -1442,6 +1442,10 @@ impl State {
         let Some(p) = crate::pipeline::host_pipeline(self.pipeline as This) else {
             return false;
         };
+        #[cfg(feature = "diagnostics")]
+        if crate::capture::skip_name(&p.name) {
+            return false;
+        }
         if p.compute || p.mesh != mesh {
             once!(mesh, "a draw or mesh dispatch with another kind of pipeline");
             return false;

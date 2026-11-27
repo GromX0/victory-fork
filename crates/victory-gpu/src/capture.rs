@@ -1258,39 +1258,60 @@ fn write_counts(presented: u64) {
     }
 }
 
-/// `VICTORY_SKIP_ARGS=<file>`: lines `<lo> <hi>` of title addresses (hex);
-/// indirect executions whose arguments start in `[lo, hi)` are dropped.
-/// The file is read again at most every 200 ms, so a range can change
-/// while the camera holds still: what a record draws on screen.
+/// `VICTORY_SKIP_ARGS=<file>`: lines `<lo> <hi>` of title addresses (hex):
+/// indirect executions whose arguments start in `[lo, hi)` are dropped;
+/// lines of one word: draws (direct or indirect) whose pipeline name holds
+/// it are dropped ([`skip_name`]). The file is read again at most every
+/// 200 ms, so what is dropped can change while the camera holds still:
+/// what a record or a pipeline draws on screen.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn skip_args(arguments: u64) -> bool {
+    skip_list(|ranges, _| ranges.iter().any(|&(lo, hi)| arguments >= lo && arguments < hi))
+}
+
+/// [`skip_args`]'s one-word lines: whether a draw of pipeline `name` is dropped.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn skip_name(name: &str) -> bool {
+    skip_list(|_, names| names.iter().any(|n| name.contains(n.as_str())))
+}
+
+#[cfg(feature = "diagnostics")]
+fn skip_list(test: impl FnOnce(&[(u64, u64)], &[String]) -> bool) -> bool {
+    type Lists = (Option<std::time::Instant>, Vec<(u64, u64)>, Vec<String>);
     static FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    static RANGES: std::sync::Mutex<(Option<std::time::Instant>, Vec<(u64, u64)>)> =
-        std::sync::Mutex::new((None, Vec::new()));
+    static LISTS: std::sync::Mutex<Lists> = std::sync::Mutex::new((None, Vec::new(), Vec::new()));
     let Some(file) = FILE.get_or_init(|| std::env::var_os("VICTORY_SKIP_ARGS").map(Into::into)) else {
         return false;
     };
-    let mut r = RANGES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = LISTS.lock().unwrap_or_else(|e| e.into_inner());
     if r.0.is_none_or(|t| t.elapsed().as_millis() >= 200) {
         r.0 = Some(std::time::Instant::now());
         let hex = |w: &str| u64::from_str_radix(w.trim_start_matches("0x"), 16).ok();
         let text = std::fs::read_to_string(file).unwrap_or_default();
-        let ranges: Vec<(u64, u64)> = text
-            .lines()
-            .filter_map(|l| {
-                let mut w = l.split_whitespace();
-                Some((hex(w.next()?)?, hex(w.next()?)?))
-            })
-            .collect();
-        if ranges != r.1 {
+        let (mut ranges, mut names) = (Vec::new(), Vec::new());
+        for line in text.lines() {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            match words.as_slice() {
+                [lo, hi] => {
+                    if let (Some(lo), Some(hi)) = (hex(lo), hex(hi)) {
+                        ranges.push((lo, hi));
+                    }
+                }
+                [name] => names.push((*name).to_owned()),
+                _ => {}
+            }
+        }
+        if ranges != r.1 || names != r.2 {
             tracing::info!(
                 ranges = ?ranges.iter().map(|(a, b)| format!("{a:#x}-{b:#x}")).collect::<Vec<_>>(),
-                "VICTORY_SKIP_ARGS: the ranges dropped now"
+                ?names,
+                "VICTORY_SKIP_ARGS: dropped now"
             );
         }
         r.1 = ranges;
+        r.2 = names;
     }
-    r.1.iter().any(|&(lo, hi)| arguments >= lo && arguments < hi)
+    test(&r.1, &r.2)
 }
 
 /// The ranges of `VICTORY_DUMP` (`<address>,<len>` pairs, `;` apart,
