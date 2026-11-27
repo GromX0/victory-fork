@@ -913,3 +913,30 @@ Sessions nl1, hz2 (27 Nov): the test meant to tell "near level culled on the GPU
 occlusion test, but the pyramid's content when never built is unknown (zero might mean "nothing
 occluded" or "everything", depending on the depth convention), and the positions differ; neither cause is
 established.
+
+### Disappearing objects: the user's close-up, the arguments' writer, stale memory (27 Nov, user2, dw1-dw2, qw0, lb1, rc1-rc2)
+
+- **user2 (the user at the controls, F9):** solid close-up at the foot of the stairs, and gone from the
+  deck above (frame 1997, the garden table in view, no palm, no trunk). Close up, dropping `89a62261`
+  alone removes the fronds (the trunk is another pipeline); bisection by draw number: ord 13 is the
+  fronds (70 groups; ords 13-15 ran 70, 12, 10). The ghost on the stairs is drawn by the same pipeline
+  and the same triple (dw2: ords 17-19 = 70, 12, 10), so it is one mesh, faded. In the invisible state no
+  70/12/10 triple ran; there are triples of 0 groups.
+- **These draws' sizes are GPU-written** (title memory 0 at the frame's present, the card ran 70) and they
+  do reach title memory one present later (lb1, probes read at every present: title = GPU at +1 for
+  89a62261). Not a missing copy-back.
+- **The writer:** dumps after every pass of the early compute lists (`VICTORY_DUMP_FILE`, ranges and
+  passes set at runtime): the value is already there before `91b10a73`, which is a clear (writes zeros),
+  and is cleared on the other half of the per-frame ring; the pass that fills it was not isolated among
+  ~100 compute pipelines on the async queue.
+- **Queue order:** `VICTORY_QUEUE_WAIT=0` (every submission runs as made): palm still gone from the
+  stairs (qw0). No forced runs at presents in any captured frame.
+- **Stale memory:** `VICTORY_REFRESH_CHECK=1` (rc1) found 7 blocks of the 174 MB heap, 0x2cc90000-
+  0x2cd10000, stale three refreshes in a row. New `VICTORY_REFRESH_CHECK=2` (8f2…, copies such blocks
+  again): 250-440 blocks (16-29 MB) re-copied every 5 s, and the palm on the stairs is still a ghost
+  (rc2 g0, c4). Not the cause.
+
+Not established: what makes the title fade the palm out in the middle band, or which GPU pass gives its
+draw 0 groups there. Ruled out by test today: shader translation of the dither, instance data reaching the
+GPU, frame rate/time, our clamp's budget, the water pass (separate), skipped/refused compute pipelines,
+occlusion pyramid, queue waiting, copy-back of the draw sizes, stale heap blocks (as sampled).
