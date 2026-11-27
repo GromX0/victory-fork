@@ -604,13 +604,16 @@ start position for the branch that leaves the palm out.
 | --- | --- | --- |
 | palm-callers (186a10d9) | callers by RtlCaptureStackBackTrace | every indirect execution "from +0x2dda7<+0xc9c5c"; both land mid-instruction (cdb -z on the exe, read only): the unwinder loses its way at the stubs between the title and us. Useless |
 | palm-callers2 (5dea60c4) | callers by a stack scan for return addresses after calls | none found (the module name test failed); fixed in f7778c76 (the range from the loader), not yet run |
-| palm-seriess | --console series-s | the same: palm missing at the start, drawn close, missing back; far islands' trees strongly magenta on Series S | rejected: not the profile's detail tables |
+| palm-seriess | --console series-s | the same: palm missing at the start, drawn close, missing back; far islands' trees strongly magenta on Series S | only that the Series S detail tables do not remove the defect; the title's detail-level logic itself is NOT ruled out (corrected 27 Nov) |
 | palm-rt | VICTORY_BVH_BUILDER=1 (ray tracing on) | **the builder runs: 53 pipelines, no crash, no device loss for 2+ minutes, ~6 fps** (before the DispatchX handling it overwrote memory); the purple blinds stay purple with it; the walk did not replay (the opening shots last longer at 6 fps) |
 | palm-face | the walk again, capture at 19.5 s (start, after the user's camera turn) | the walk went elsewhere (the character still leaning at 19.5 s, at the door at 33 s): the camera's direction after the opening varies between runs and the recorded stick inputs are relative to it. **The recorded walk is not a reliable test**; palm-base1's clean result was in part luck |
 
 Code checks: texture views keep the title's component mapping (`srv_desc`); the frame's 49,586 view
-records and 33,917 placed views all use the default mapping (0x1688) except buffer views: **no swizzle
-cause** for the purple.
+records and 33,917 placed views all use the default mapping (0x1688) except buffer views: no swizzle
+cause for the purple blinds. (This concerns colour only; it says nothing about an absent draw.)
+
+**Scope note (user, 27 Nov):** a cause counts as ruled out only where the test actually exercised it.
+Lighting and the purple blinds are parked; the disappearing objects are the only active investigation.
 
 Purple blinds traced (blinds1, VICTORY_CAPTURE_SPAN=3, 455 targets of frame 1557): the geometry pass's
 targets (50 material code, 51 grey, 52 normals, 54 motion) hold no purple colour; the first purple is in

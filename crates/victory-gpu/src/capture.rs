@@ -212,12 +212,24 @@ fn timed(frame: u64) {
     }
 }
 
+/// `VICTORY_CAPTURE_TRIGGER=<file>`: when that file appears, it is removed
+/// and the next frame captured as F9 would (with no window focus needed).
+fn triggered(frame: u64) {
+    static FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let Some(path) = FILE.get_or_init(|| std::env::var_os("VICTORY_CAPTURE_TRIGGER").map(Into::into)) else { return };
+    if folder().is_some() && std::fs::remove_file(path).is_ok() {
+        key(frame + 1);
+        tracing::info!(frame = frame + 1, "a triggered capture (VICTORY_CAPTURE_TRIGGER)");
+    }
+}
+
 /// At the present of `frame`: the draws run on the host so far.
 pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     #[cfg(windows)]
     key_pressed(frame);
     timed(frame);
+    triggered(frame);
     #[cfg(feature = "diagnostics")]
     write_counts(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

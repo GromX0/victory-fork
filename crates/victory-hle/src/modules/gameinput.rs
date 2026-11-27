@@ -226,6 +226,35 @@ mod tape {
         if let Some(state) = ms.checked_sub(offset).and_then(|ms| at(replay, ms)) {
             pads[0] = Some(pads[0].map_or(state, |host| merged(host, state)));
         }
+        if let Some(state) = live() {
+            pads[0] = Some(pads[0].map_or(state, |host| merged(host, state)));
+        }
+    }
+
+    /// `VICTORY_INPUT_LIVE=<file>`: the first pad as that file says, one line
+    /// `left_x left_y right_x right_y buttons`, held until the file changes
+    /// (read at most ten times a second): positioning by hand from outside
+    /// the window, checking captured frames between steps.
+    fn live() -> Option<PadState> {
+        static FILE: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+        static STATE: Mutex<(Option<std::time::Instant>, Option<PadState>)> = Mutex::new((None, None));
+        let path = FILE.get_or_init(|| std::env::var_os("VICTORY_INPUT_LIVE").map(Into::into)).as_ref()?;
+        let mut s = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if s.0.is_none_or(|t| t.elapsed() >= std::time::Duration::from_millis(100)) {
+            s.0 = Some(std::time::Instant::now());
+            s.1 = std::fs::read_to_string(path).ok().and_then(|t| {
+                let v: Vec<f32> = t.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+                (v.len() >= 4).then(|| PadState {
+                    left_x: v[0],
+                    left_y: v[1],
+                    right_x: v[2],
+                    right_y: v[3],
+                    buttons: v.get(4).map_or(0, |&b| b as u32),
+                    ..Default::default()
+                })
+            });
+        }
+        s.1
     }
 
     #[cfg(test)]
