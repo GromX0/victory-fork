@@ -710,3 +710,37 @@ that differs between the states is the next question.
 Next single action: in a visible and a missing span at the same place, dump the 32 KiB argument buffer
 as the card has it after the four passes and the inputs they read (their tables in the ops), and find
 the first input that differs for the palm's records.
+
+### Disappearing objects: the argument buffer checked, and a correction (27 Nov, session palm4)
+
+Tools (d4ba6422, 4fcbfbe8): `VICTORY_DUMP=<addr>,<len>` with `VICTORY_DUMP_AFTER=<hashes>` copies a title
+buffer's host copy out after each named pass and before a list's first draw reading it (frame-N-dump.bin,
+indexed in frame-N-dumps.txt, a DUMP line in the ops); `VICTORY_SKIP_ARGS=<file>` drops indirect executions
+whose arguments lie in a listed range, or (one-word lines) draws of a named pipeline, reread every 200 ms.
+Both worked in palm4 (133-200 dumps a frame; drops seen in the log and in the spans' ops).
+
+Submission structure of the 32 KiB buffer (57,063,513,120), from complete spans: it is not one object's
+arguments. It is shared by ~80 lists a frame, one per culling view (main view, shadow cascades, others);
+each list clears it (`9146291b`, 16x1x1, whose only writable view is the whole buffer), fills it with a
+pass pair (`3b471c12`/`9f017d90` in the main view, `764ca63d`/`87bf9e3f` or `fc5e66f8`/`0452fc2d` in
+others), clears/finalises again, fills again (two phases), then draws. A 32-byte slot is a bucket of that
+view's fill (many mesh pipelines read the same slots in different lists), and slot numbers shift as the
+view changes. Our clamp's budget emptied no record: 0.00 records a frame for the whole palm3 run.
+
+**Correction.** In the middle state the stairs palm is drawn, as a ghost: absent from the grill deck (b13),
+a faint dithered outline from the stairs (b16), about half opaque two steps lower (b17, c0), a smooth
+temporal-dither translucency (TAA resolving a per-pixel dither). It fades in with distance over several
+metres. Its draw remains; the earlier "not issued / 0 groups" link to `fd08d25a`/`2af15279` was a
+correlation, and a causal test says it is not the palm:
+- c1/c2: dropping the slots the `fd08d25a`/`2af15279` draws read (0xd494034e0-0xd49403700): ghost unchanged.
+- c3/c4: dropping every indirect execution reading the whole 32 KiB buffer: the character, deck, railings,
+  dock and house disappear, **the ghost palm stays**. The palm is not drawn from this buffer.
+So items 2-3 of the morning's "verified" list describe a bucket that changes with the view, not the palm;
+the per-pass comparison of that buffer does not bear on the palm and was not pursued further.
+
+Also found: after ~30 s without input the game's idle camera takes over (the "opening shots" seen while
+waiting were it); drive.sh now nudges the camera before each capture.
+
+Next: with the camera held on the ghost, drop pipelines by name (bisection over the main view's draw
+pipelines) until the ghost goes; then that draw's fade input, ghost against solid, and whether another
+LOD is meant to cover the range where this one is faded.
