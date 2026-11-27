@@ -1063,9 +1063,22 @@ fn title_return_addresses(n: usize) -> Vec<usize> {
     // SAFETY: two out values.
     unsafe { GetCurrentThreadStackLimits(&mut low, &mut high) };
     let here = std::ptr::addr_of!(low) as usize & !7;
+    // The stack this code runs on may be a fiber's, outside the thread's
+    // limits: the scan stops at the end of the memory region `here` lies
+    // in, and 64 KiB past it at most.
+    let region_end = {
+        use windows_sys::Win32::System::Memory::{MEMORY_BASIC_INFORMATION, VirtualQuery};
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: a query of our own stack's region into a local.
+        let got = unsafe { VirtualQuery(here as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+        if got == 0 { here } else { mbi.BaseAddress as usize + mbi.RegionSize }
+    };
+    let high_scan = region_end.min(here + (64 << 10));
+    let (mut in_title, mut scanned) = (0usize, 0usize);
     let mut out = Vec::new();
     let mut at = here;
-    while at + 8 <= high && out.len() < n {
+    while at + 8 <= high_scan && out.len() < n {
+        scanned += 1;
         // SAFETY: inside this thread's stack, below its base.
         let v = unsafe { std::ptr::read_volatile(at as *const usize) };
         at += 8;
@@ -1086,6 +1099,7 @@ fn title_return_addresses(n: usize) -> Vec<usize> {
                 _ => continue,
             },
         };
+        in_title += 1;
         // SAFETY: the seven bytes before an address in the title's mapped
         // image (at least eight past its base).
         let before: [u8; 7] = unsafe { std::ptr::read_unaligned((v - 7) as *const [u8; 7]) };
@@ -1094,6 +1108,20 @@ fn title_return_addresses(n: usize) -> Vec<usize> {
         if call_rel || call_ind {
             out.push(v - base);
         }
+    }
+    static TOLD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if TOLD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+        let title = *title.lock().unwrap_or_else(|e| e.into_inner());
+        tracing::info!(
+            here = format_args!("{here:#x}"),
+            thread_stack = format_args!("{low:#x}-{high:#x}"),
+            region_end = format_args!("{region_end:#x}"),
+            title = ?title.map(|(a, b)| (format!("{a:#x}"), format!("{b:#x}"))),
+            scanned,
+            in_title,
+            found = ?out.iter().map(|a| format!("+{a:#x}")).collect::<Vec<_>>(),
+            "callers: the stack scan"
+        );
     }
     out
 }
