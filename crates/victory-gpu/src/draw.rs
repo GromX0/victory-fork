@@ -4168,7 +4168,7 @@ impl State {
             self.mesh_scissor(list, false);
         }
         #[cfg(feature = "diagnostics")]
-        crate::capture::probe_counts(list, &bounded, at, (kind, stride, max), &p.name);
+        crate::capture::probe_counts(list, &bounded, at, (kind, stride, max), &p.name, arguments);
         if kind == DISPATCH {
             self.buffers_written();
         } else {

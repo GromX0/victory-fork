@@ -231,6 +231,7 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     timed(frame);
     triggered(frame);
     #[cfg(feature = "diagnostics")]
+    reread_probes(frame);
     write_counts(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
@@ -999,6 +1000,50 @@ struct Probe {
     /// A leaked buffer the read-back lands in (`HostList::defer_read_back`).
     at: usize,
     len: usize,
+    /// The arguments' title address, and title memory there when the
+    /// execution was recorded and again at its frame's present: against what
+    /// the card ran, whether the card's copy was the title's (a write after
+    /// the refresh, or through an address the guards do not watch, leaves
+    /// the card running older arguments).
+    title_at: u64,
+    title_recorded: Vec<u8>,
+    title_presented: Option<Vec<u8>>,
+}
+
+/// At the present of `frame`: title memory at the arguments of that
+/// frame's probes, read again ([`Probe::title_presented`]).
+#[cfg(feature = "diagnostics")]
+fn reread_probes(frame: u64) {
+    let mut probes = PROBES.lock().unwrap_or_else(|e| e.into_inner());
+    for p in probes.iter_mut().filter(|p| p.frame <= frame && p.title_presented.is_none()) {
+        let mut now = vec![0u8; p.len];
+        p.title_presented = crate::host::read_into(p.title_at as *const u8, &mut now).then_some(now);
+    }
+}
+
+/// The work `bytes` of `max` records of `kind`, `stride` bytes apart, ask
+/// for: records with work, total, the first eight.
+#[cfg(feature = "diagnostics")]
+fn work_of(bytes: &[u8], kind: u32, stride: u32, max: u32) -> (u32, u64, Vec<u64>) {
+    let words: Vec<u32> = bytes.chunks_exact(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect();
+    let per = (stride / 4).max(1) as usize;
+    let (mut active, mut total, mut shown) = (0u32, 0u64, Vec::new());
+    for record in words.chunks(per).take(max.max(1) as usize) {
+        let work = match kind {
+            // Vertex or index count, instance count.
+            0 | 1 => u64::from(record.first().copied().unwrap_or(0).min(1)) * u64::from(record.get(1).copied().unwrap_or(0)),
+            // Groups x, y, z.
+            _ => record.iter().take(3).map(|&v| u64::from(v)).product(),
+        };
+        if work > 0 {
+            active += 1;
+            total += work;
+        }
+        if shown.len() < 8 {
+            shown.push(work);
+        }
+    }
+    (active, total, shown)
 }
 
 #[cfg(feature = "diagnostics")]
@@ -1131,7 +1176,7 @@ fn title_return_addresses(n: usize) -> Vec<usize> {
 /// `args` at `at`, left in the indirect-argument state: copies them for
 /// [`write_counts`]. In [`listed`] frames only.
 #[cfg(feature = "diagnostics")]
-pub(crate) fn probe_counts(list: &crate::host::HostList, args: &ID3D12Resource, at: u64, (kind, stride, max): (u32, u32, u32), name: &str) {
+pub(crate) fn probe_counts(list: &crate::host::HostList, args: &ID3D12Resource, at: u64, (kind, stride, max): (u32, u32, u32), name: &str, title_at: u64) {
     let frame = crate::queue::presented() + 1;
     if folder().is_none() || !listed(frame) {
         return;
@@ -1153,6 +1198,10 @@ pub(crate) fn probe_counts(list: &crate::host::HostList, args: &ID3D12Resource, 
     let landing: &'static mut [u8] = Box::leak(vec![0u8; bytes as usize].into_boxed_slice());
     list.defer_read_back(buffer, landing.as_mut_ptr(), [bytes as usize, 1, bytes as usize]);
     let callers = CALLERS.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let mut title_recorded = vec![0u8; bytes as usize];
+    if !crate::host::read_into(title_at as *const u8, &mut title_recorded) {
+        title_recorded.clear();
+    }
     PROBES.lock().unwrap_or_else(|e| e.into_inner()).push(Probe {
         frame,
         kind,
@@ -1161,6 +1210,9 @@ pub(crate) fn probe_counts(list: &crate::host::HostList, args: &ID3D12Resource, 
         name: format!("{name} from {callers}"),
         at: landing.as_ptr() as usize,
         len: bytes as usize,
+        title_at,
+        title_recorded,
+        title_presented: None,
     });
 }
 
@@ -1183,25 +1235,17 @@ fn write_counts(presented: u64) {
     for p in done {
         // SAFETY: leaked in `probe_counts` with this length; read once, freed here.
         let bytes = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(p.at as *mut u8, p.len)) };
-        let words: Vec<u32> = bytes.chunks_exact(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect();
-        let per = (p.stride / 4).max(1) as usize;
-        let (mut active, mut total, mut shown) = (0u32, 0u64, Vec::new());
-        for record in words.chunks(per).take(p.max.max(1) as usize) {
-            let work = match p.kind {
-                // Vertex or index count, instance count.
-                0 | 1 => u64::from(record.first().copied().unwrap_or(0).min(1)) * u64::from(record.get(1).copied().unwrap_or(0)),
-                // Groups x, y, z.
-                _ => record.iter().take(3).map(|&v| u64::from(v)).product(),
-            };
-            if work > 0 {
-                active += 1;
-                total += work;
-            }
-            if shown.len() < 8 {
-                shown.push(work);
-            }
-        }
-        let line = format!("kind {} max {} active {active} total {total} first {shown:?} {}\n", p.kind, p.max, p.name);
+        let (active, total, shown) = work_of(&bytes, p.kind, p.stride, p.max);
+        let title_total = |b: &[u8]| if b.is_empty() { "unread".to_owned() } else { work_of(b, p.kind, p.stride, p.max).1.to_string() };
+        let line = format!(
+            "kind {} max {} active {active} total {total} first {shown:?} title_recorded {} title_presented {} at {:#x} {}\n",
+            p.kind,
+            p.max,
+            title_total(&p.title_recorded),
+            p.title_presented.as_deref().map_or("unread".to_owned(), title_total),
+            p.title_at,
+            p.name
+        );
         files.entry(p.frame).or_default().push_str(&line);
     }
     for (frame, text) in files {
