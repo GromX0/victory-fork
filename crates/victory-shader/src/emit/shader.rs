@@ -34,7 +34,7 @@ pub const VIEW_INTEGER: u32 = 1 << 31;
 pub const VIEW_SIGNED: u32 = 1 << 30;
 /// Dwords of the [`SLOT_STRIDES`] buffer's strides: heap indices are
 /// clamped to it.
-pub const SLOT_STRIDES_COUNT: u32 = 1 << 21;
+pub const SLOT_STRIDES_COUNT: u32 = 1 << 22;
 /// Where the [`SLOT_STRIDES`] buffer's second table begins (bytes): two
 /// dwords per view heap slot, the title address of the buffer view (or
 /// ray-tracing structure) there, low 32 bits first; 0 for anything else.

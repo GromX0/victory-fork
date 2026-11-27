@@ -1529,13 +1529,24 @@ const UNCAPPED_VIEWS: u32 = 1 << 21;
 
 /// Where the raw twins of the title's slots start in a heap that has them
 /// ([`raw_twins`]): past every slot a title's heap and the dynamic ones take.
-const RAW_TWINS: u32 = 1 << 21;
+/// The larger first, where the host takes a heap of twice as many views
+/// (`VICTORY_BIG_VIEW_HEAP=0`: the smaller only). With 2^21 the title's
+/// 1,245,184 slots left 851,967 dynamic ones, and the open world's busier
+/// places (24,000-30,500 tables a frame of up to 254 slots) held 97-99% of
+/// them: up to 967 tables a frame refused, their draws dropped (s3-slots).
+/// The RX 9070 takes heaps of up to 2^24 views.
+const RAW_TWINS: [u32; 2] = [1 << 22, 1 << 21];
+
+/// Whether the larger [`RAW_TWINS`] may be tried (`VICTORY_BIG_VIEW_HEAP`, on).
+fn big_view_heap() -> bool {
+    std::env::var_os("VICTORY_BIG_VIEW_HEAP").is_none_or(|v| v != "0")
+}
 
 /// Whether view heaps keep a raw twin of every buffer view of the title's
 /// slots, which shaders read that pick buffers by an index they compute
 /// (`victory_shader::emit::raw_views` says why; `VICTORY_RAW_VIEWS=0`: they
 /// read the title's slots themselves, as before). Needs a host that takes
-/// heaps of 2^22 views.
+/// heaps of 2^22 views (2^23 for the larger [`RAW_TWINS`]).
 fn raw_twins() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_RAW_VIEWS").is_none_or(|v| v != "0"))
@@ -1571,21 +1582,25 @@ pub(crate) fn probe_view_limit() {
             };
             made.is_ok()
         };
-        let twins = raw_twins() && fits(2 * RAW_TWINS);
-        if twins {
-            victory_shader::emit::set_raw_views(RAW_TWINS);
+        let twins = if raw_twins() {
+            RAW_TWINS.into_iter().filter(|&t| t < RAW_TWINS[0] || big_view_heap()).find(|&t| fits(2 * t))
+        } else {
+            None
+        };
+        if let Some(first) = twins {
+            victory_shader::emit::set_raw_views(first);
         }
         // (The twins lie past the null slot.)
-        let views = if twins {
-            RAW_TWINS
-        } else if fits(UNCAPPED_VIEWS) {
-            UNCAPPED_VIEWS
-        } else {
-            PORTABLE_VIEWS
+        let views = match twins {
+            Some(first) => first,
+            None if fits(UNCAPPED_VIEWS) => UNCAPPED_VIEWS,
+            None => PORTABLE_VIEWS,
         };
+        // Shaders find a slot's element stride in a table of this many.
+        debug_assert!(views <= victory_shader::emit::SLOT_STRIDES_COUNT);
         tracing::info!(
             views,
-            raw_twins = twins,
+            raw_twins = twins.unwrap_or(0),
             "host view heaps hold {views} views; view indices are clamped to the null slot at the end from the first shader on"
         );
         victory_shader::emit::set_view_heap_limit(views - 1);
@@ -1606,18 +1621,19 @@ pub(crate) fn probe_view_limit() {
 pub(crate) const DYNAMIC: u32 = 1 << 18;
 
 /// [`DYNAMIC`] for a heap of `count` title slots whose null slot is `null`
-/// (0: none): up to four times as many where the host heap has the room (a
+/// (0: none): up to eight times as many where the host heap has the room (a
 /// host that takes more than [`PORTABLE_VIEWS`]; `VICTORY_DYNAMIC_SLOTS`
 /// sets the most). 2^18 ran out in the title's bigger places (session
 /// play-1125-0127: 27,000 to 35,000 tables a frame, up to 3,285 of them
-/// refused, with 2,639 indirect draws and dispatches).
+/// refused, with 2,639 indirect draws and dispatches); so did the 851,967
+/// a heap of 2^22 left (s3-slots, see [`RAW_TWINS`]).
 fn dynamic_slots(count: u32, null: u32) -> u32 {
     static MOST: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     let most = *MOST.get_or_init(|| {
         std::env::var("VICTORY_DYNAMIC_SLOTS")
             .ok()
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(DYNAMIC << 2)
+            .unwrap_or(DYNAMIC << 3)
     });
     if null < PORTABLE_VIEWS {
         return DYNAMIC;
@@ -6013,6 +6029,26 @@ mod tests {
         // Long after the last table, a write is due at once.
         heap.queue_texture(2, true, false, frame + 3 + TABLED_FRAMES);
         assert_eq!(slots(frame + 3 + TABLED_FRAMES), [2]);
+    }
+
+    /// Which shader-visible view heap sizes this machine's driver takes
+    /// (`cargo test -p victory-gpu --lib view_heap_sizes -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "needs the host GPU; prints what it takes"]
+    fn view_heap_sizes_the_host_takes() {
+        let Some(host) = host() else { return };
+        for bits in [21u32, 22, 23, 24] {
+            // SAFETY: plain heap creation; the heap is released at once.
+            let made: windows::core::Result<ID3D12DescriptorHeap> = unsafe {
+                host.device.CreateDescriptorHeap(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    NumDescriptors: 1 << bits,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    NodeMask: 0,
+                })
+            };
+            println!("2^{bits} views: {}", if made.is_ok() { "made" } else { "refused" });
+        }
     }
 
     #[test]
