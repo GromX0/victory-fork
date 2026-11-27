@@ -832,3 +832,13 @@ low 16 bits are not a unique id), and therefore whether its fade byte is held pa
 right and something else differs. Next: find the tree's draw and instance (bisection over its draws), read
 its fade byte over a minute with the camera still; if it is held or flips, trace what the title's LOD code
 reads to decide it (frame time, and GPU results it reads back: visibility/occlusion).
+
+Skipped and refused compute passes against the dissolving tree (27 Nov, ns1, 1468bfd9):
+- `39f0e9aeb156a61c` (left out by name since the AMD skip list; reason never recorded) run instead
+  (`envs/play-safe-noskip.env`): first bound at frame 1311, no crash in ~5 minutes, and the tree left of
+  the deck dissolved the same (ns1 n1 against tw1 w0). Not the cause for that tree.
+- `f16876929fa64f9f` (the one pipeline AMD's compiler still crashes on, never made): in tw2 the tree was
+  already dissolving at frames 1583-1588 and the pipeline was first bound at frame 2408. Not the cause for
+  that tree.
+- The other 36 compute pipelines the compiler once crashed on run (hf-measure2, 0 compiler crashes).
+Neither result covers every object; each is one tree at one place.
