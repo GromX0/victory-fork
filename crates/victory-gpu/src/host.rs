@@ -9233,6 +9233,10 @@ impl Meter {
             tracing::info!(
                 "indirect mesh dispatches: the largest group count asked for {mesh_largest} (run: at most 65535), {mesh_groups:.0} groups asked per frame; {refused:.2} indirect records a frame ran empty for want of their list's budget (2^27), the largest cost of one {biggest} (0: under 2^22)"
             );
+            {
+                let [abs, neg] = [0, 1].map(|i| victory_shader::emit::FMAC_MODS_SEEN[i].load(Ordering::Relaxed));
+                tracing::info!(abs, neg, applied = victory_shader::emit::fmac_mods(), "v_fmac_f32/v_mac_f32 accumulator modifiers translated so far (VICTORY_FMAC_MODS)");
+            }
             crate::shadow::exact_line(frames);
             crate::descriptor::sync_line(frames);
             late_line(frames);

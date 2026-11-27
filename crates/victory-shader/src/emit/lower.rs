@@ -9003,13 +9003,31 @@ impl<'a> Lower<'a> {
                     return Err("an accumulator");
                 };
                 let acc = inst.read(Reg::V(reg)).ok_or("an accumulator")?;
-                let acc = match self.floats.get(&acc) {
+                let mut acc = match self.floats.get(&acc) {
                     Some(&x) => x,
                     None => {
                         let x = self.i32_of(acc)?;
                         self.as_float(x)
                     }
                 };
+                // RDNA applies abs[2] and neg[2] of the VOP3 form to the
+                // accumulator (upstream #3158).
+                let (acc_abs, acc_neg) = (v.abs >> 2 & 1 != 0, v.neg >> 2 & 1 != 0);
+                if acc_abs {
+                    super::FMAC_MODS_SEEN[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if acc_neg {
+                    super::FMAC_MODS_SEEN[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                if super::fmac_mods() {
+                    if acc_abs {
+                        acc = self.unary(6, acc);
+                    }
+                    if acc_neg {
+                        let z = self.s.m.f32(0x8000_0000);
+                        acc = self.s.m.bin(self.cur, Bin::Sub, z, acc);
+                    }
+                }
                 let r = match name {
                     "v_fmac_f32" => self.fmad(a, bb, acc),
                     "v_mac_f32" => {

@@ -184,6 +184,20 @@ pub fn group_sync() -> u8 {
     })
 }
 
+/// Whether `v_fmac_f32`/`v_mac_f32` in the VOP3 encoding take `abs[2]` and
+/// `neg[2]`, the modifiers of their accumulator (the destination register),
+/// as RDNA does (`VICTORY_FMAC_MODS=1`; off: the accumulator read as it is,
+/// as before). Upstream #3158 / Vice-Tay 8fe3ccd. Part of the translation:
+/// the shader cache keys on it.
+pub fn fmac_mods() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("VICTORY_FMAC_MODS").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// Accumulator modifiers met by the translation of `v_fmac_f32`/`v_mac_f32`
+/// (`[abs, neg]`), applied or not ([`fmac_mods`]).
+pub static FMAC_MODS_SEEN: [std::sync::atomic::AtomicU64; 2] = [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
 /// Whether buffer atomics of the ray-tracing structure builder stand between
 /// two fences (`VICTORY_BVH_FENCES=0`: they do not). Part of the
 /// translation: the shader cache keys on it.

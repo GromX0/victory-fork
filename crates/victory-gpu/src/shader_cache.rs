@@ -105,6 +105,10 @@ fn build() -> [u8; 32] {
         bytes.extend_from_slice(&limit.to_le_bytes());
         // Which group barriers wait is part of the translation too.
         bytes.push(victory_shader::emit::group_sync());
+        // The accumulator modifiers of v_fmac_f32 (VICTORY_FMAC_MODS=1).
+        if victory_shader::emit::fmac_mods() {
+            bytes.extend_from_slice(b"fmac-mods");
+        }
         // So are the switches that pick the form of a wave64 program:
         // without them here a run with `VICTORY_WAVE_WIDE=0` was
         // served the translations an earlier run of the same
