@@ -591,8 +591,17 @@ to test fully).
 palm-base1 (7932dc69, base-play.env): **reproduced**: 15 s palm missing, 33 s drawn, 44 s missing.
 `mesh f0aee31b12ffcb28 / pixel 5dff3af2d8f8a06e` runs 7 times close up and not at all in either start
 frame (one of rec3's four foliage types that vanish together); no draw type common to the three frames
-drops to zero only at the start (the medium detail is not culled to nothing on the GPU): **at the
-start position the title issues no draw for the palm**: its CPU-side decision.
+drops to zero only at the start (the medium detail is not culled to nothing on the GPU): at the
+start position the title issues no draw for the palm: its CPU-side decision.
+
+**CORRECTION (27 Nov, later): not established.** Ops and counts are attributed to "the frame being
+presented + 1" when recorded, and recording comes in bursts (the title's threads, our THIN workers): five
+consecutive frames of blinds1 held 1,028 / 19,591 / 120 / 1 / 14,252 draw operations, against 5,000-11,000
+draws a frame in the log. A single captured frame number holds anything from none to several frames'
+work, so a draw missing from one says nothing. The same applies to rec3's single-frame captures (300-840
+draw operations each) and to every "absent" conclusion drawn from them. From now on: a span of consecutive
+frames (VICTORY_CAPTURE_SPAN), its total checked against the log's draws a frame, before any presence or
+absence is read from it.
 
 Next single action: record, per ExecuteIndirect of a captured frame, the title's return address (the
 code that issued it); take the one issuing f0aee31b close up; read that code (and what it reads) at the
