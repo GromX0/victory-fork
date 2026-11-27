@@ -160,6 +160,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     #[cfg(windows)]
     key_pressed(frame);
+    #[cfg(feature = "diagnostics")]
+    write_counts(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
     if world_on()
@@ -897,6 +899,112 @@ static LEVELS: std::sync::Mutex<std::collections::VecDeque<u8>> =
 pub(crate) fn recent_levels() -> Vec<u8> {
     let levels = LEVELS.lock().unwrap_or_else(|e| e.into_inner());
     levels.iter().copied().collect()
+}
+
+/// An indirect execution of a [`listed`] frame whose arguments, as the card
+/// ran them (after the title's culling wrote them and the clamp bounded
+/// them), are read back: `frame-<n>-counts.txt` says per execution how many
+/// records did work and how many instances (draws) or groups (dispatches)
+/// they asked for. Objects the title's GPU culling leaves out show as
+/// executions with fewer instances than in a frame where they are drawn.
+#[cfg(feature = "diagnostics")]
+struct Probe {
+    frame: u64,
+    kind: u32,
+    stride: u32,
+    max: u32,
+    name: String,
+    /// A leaked buffer the read-back lands in (`HostList::defer_read_back`).
+    at: usize,
+    len: usize,
+}
+
+#[cfg(feature = "diagnostics")]
+static PROBES: std::sync::Mutex<Vec<Probe>> = std::sync::Mutex::new(Vec::new());
+
+/// After `list` recorded an `ExecuteIndirect` of `max` records of `kind`
+/// (0 draw, 1 indexed, 2 dispatch, 10 mesh) `stride` bytes apart from
+/// `args` at `at`, left in the indirect-argument state: copies them for
+/// [`write_counts`]. In [`listed`] frames only.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn probe_counts(list: &crate::host::HostList, args: &ID3D12Resource, at: u64, (kind, stride, max): (u32, u32, u32), name: &str) {
+    let frame = crate::queue::presented() + 1;
+    if folder().is_none() || !listed(frame) {
+        return;
+    }
+    let bytes = u64::from(stride) * u64::from(max.max(1));
+    if bytes == 0 || bytes > 1 << 20 {
+        return;
+    }
+    let Some(host) = crate::host::host() else { return };
+    let Some(buffer) = host.read_back_buffer(bytes) else { return };
+    use crate::host::transition;
+    // SAFETY: an open list; the arguments buffer is left readable as
+    // arguments by the execution just recorded and put back so after.
+    unsafe {
+        list.list.ResourceBarrier(&[transition(args, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+        list.list.CopyBufferRegion(&buffer, 0, args, at, bytes);
+        list.list.ResourceBarrier(&[transition(args, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT)]);
+    }
+    let landing: &'static mut [u8] = Box::leak(vec![0u8; bytes as usize].into_boxed_slice());
+    list.defer_read_back(buffer, landing.as_mut_ptr(), [bytes as usize, 1, bytes as usize]);
+    PROBES.lock().unwrap_or_else(|e| e.into_inner()).push(Probe {
+        frame,
+        kind,
+        stride,
+        max,
+        name: name.to_owned(),
+        at: landing.as_ptr() as usize,
+        len: bytes as usize,
+    });
+}
+
+/// At the present of `presented`: the probes of frames eight or more
+/// before it (their lists have run) written to `frame-<n>-counts.txt`, one
+/// line per execution in recording order, and their buffers freed.
+#[cfg(feature = "diagnostics")]
+fn write_counts(presented: u64) {
+    let done: Vec<Probe> = {
+        let mut probes = PROBES.lock().unwrap_or_else(|e| e.into_inner());
+        if probes.is_empty() {
+            return;
+        }
+        let (done, left) = std::mem::take(&mut *probes).into_iter().partition(|p| p.frame + 8 <= presented);
+        *probes = left;
+        done
+    };
+    let Some(folder) = folder() else { return };
+    let mut files: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+    for p in done {
+        // SAFETY: leaked in `probe_counts` with this length; read once, freed here.
+        let bytes = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(p.at as *mut u8, p.len)) };
+        let words: Vec<u32> = bytes.chunks_exact(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect();
+        let per = (p.stride / 4).max(1) as usize;
+        let (mut active, mut total, mut shown) = (0u32, 0u64, Vec::new());
+        for record in words.chunks(per).take(p.max.max(1) as usize) {
+            let work = match p.kind {
+                // Vertex or index count, instance count.
+                0 | 1 => u64::from(record.first().copied().unwrap_or(0).min(1)) * u64::from(record.get(1).copied().unwrap_or(0)),
+                // Groups x, y, z.
+                _ => record.iter().take(3).map(|&v| u64::from(v)).product(),
+            };
+            if work > 0 {
+                active += 1;
+                total += work;
+            }
+            if shown.len() < 8 {
+                shown.push(work);
+            }
+        }
+        let line = format!("kind {} max {} active {active} total {total} first {shown:?} {}\n", p.kind, p.max, p.name);
+        files.entry(p.frame).or_default().push_str(&line);
+    }
+    for (frame, text) in files {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("frame-{frame}-counts.txt"))) {
+            let _ = f.write_all(text.as_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
