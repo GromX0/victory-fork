@@ -412,6 +412,35 @@ Options (not yet chosen): A) heap 2^23 with the raw twins at 2^22: dynamic up to
 Next single action:       pending the choice of A or B.
 ```
 
+```text
+Stage / blocker:          Stage 3, item 12: option A chosen by the user (bigger heap)
+Baseline commit + exe:    0fd737b3 (diag)
+Scene, route, settings:   save 'openworld', 300 s, base-play.env, user moving into the busy area;
+                          first run after TRANSLATOR_VERSION 3 (every shader translated again)
+Probe:                    the RX 9070 takes shader-visible view heaps of 2^21 to 2^24 views
+                          (ignored test view_heap_sizes_the_host_takes).
+One change:               raw twins at 2^22 when the host takes 2^23 views (VICTORY_BIG_VIEW_HEAP=0:
+                          2^21 as before); SLOT_STRIDES_COUNT 2^22; dynamic slots up to 2^21
+                          (VICTORY_DYNAMIC_SLOTS default 8x2^18); TRANSLATOR_VERSION 3.
+Before / after:           heap 4,194,304 views + twins (2^23); dynamic 851,967 -> 2,097,152. Busy
+                          area 23,600-28,100 tables/frame: refused 50-967 -> **0**; slot search
+                          6-450 ms -> 3-10 ms per line; "prepare failed" lines 28-33 -> 0; indirect
+                          drops in the busy scene 157-778/frame -> 0 once compiling ended (02:21:38 on;
+                          the remaining ~280-470 drops/frame are the builder's ~330 and pipelines
+                          still being made). (The 30,500 tables/frame of s3-fp's peak not reached.)
+Rendering / stability:    0 device losses; the one known compiler crash (f16876929fa64f9f) again,
+                          caught, re-listed under the new fingerprint. Commit peak 67 GB (63 before;
+                          this run compiled 2,000 pipelines; descriptors +128 MB on the card).
+Frame time:               not comparable: ~300 ms frames for 3 minutes of compiling, then 59-153 ms in
+                          the busy area; a warm run in the same area is needed for that.
+Decision:                 keep (0fd737b3).
+Unrelated, noticed:       victory-shader's GPU test the_record_count_of_a_structured_buffer_read_by_index
+                          ends its process (0xC0000005) with or without this change; the other 301
+                          pass. Earlier today the whole suite passed: a driver-side crash to look at
+                          with the Stage 1 compiler cases.
+Next single action:       a warm run in the busy area (user moving) for frame time and the picture.
+```
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
