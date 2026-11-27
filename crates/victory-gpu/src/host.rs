@@ -6717,6 +6717,26 @@ impl HostList {
         if copy && !colour && twin.plane.is_some() {
             u.late = true;
             crate::resource::PLANES[2].fetch_add(1, Ordering::Relaxed);
+            #[cfg(feature = "diagnostics")]
+            {
+                // Which depth texture, said once each.
+                static SAID: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+                let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+                if !said.contains(&(resource as usize)) && said.len() < 64 {
+                    said.push(resource as usize);
+                    // SAFETY: a live texture.
+                    let d = unsafe { depth.texture.GetDesc() };
+                    tracing::warn!(
+                        resource = format_args!("{:#x}", resource as usize),
+                        width = d.Width,
+                        height = d.Height,
+                        format = d.Format.0,
+                        write,
+                        "a depth texture used before its twin's pass draws the twin into it (the use sees the plane as it was)"
+                    );
+                }
+                crate::capture::op(std::ptr::from_ref(self) as usize, || format!("LATE-PLANE {:#x} write {write}", resource as usize));
+            }
         }
         drop(twins);
         if copy {
