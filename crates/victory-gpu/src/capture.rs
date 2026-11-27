@@ -28,7 +28,7 @@ pub(crate) fn listed(n: u64) -> bool {
                 .collect()
         })
         .contains(&n)
-        || n.checked_sub(KEYED.load(std::sync::atomic::Ordering::Relaxed)).is_some_and(|k| k < span());
+        || keyed(n);
     // `VICTORY_CAPTURE_WORLD`: also the 2nd and the 6th frame after the first
     // one that ran 500 draws or more (a title's first 3D frames: their
     // numbers depend on how long the menus were shown), and the 30th and
@@ -142,8 +142,22 @@ pub(crate) fn world_started() -> Option<std::time::Instant> {
     WORLD_AT.get().copied()
 }
 
-/// The frame F9 asked for (u64::MAX: none): see [`key_pressed`].
-static KEYED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+/// The frames F9 or a timed capture asked for, the last 64: see [`key_pressed`].
+/// (A list: timed captures a second apart while the title presents two
+/// frames a second, loading, overwrote each other in one slot.)
+static KEYED: std::sync::Mutex<std::collections::VecDeque<u64>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+fn key(frame: u64) {
+    let mut keyed = KEYED.lock().unwrap_or_else(|e| e.into_inner());
+    if keyed.len() == 64 {
+        keyed.pop_front();
+    }
+    keyed.push_back(frame);
+}
+
+fn keyed(n: u64) -> bool {
+    KEYED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&k| n.checked_sub(k).is_some_and(|d| d < span()))
+}
 
 /// With a capture folder, F9 pressed (with one of this process's windows in
 /// front) at the present of `frame` makes the next frame a [`listed`] one:
@@ -168,7 +182,7 @@ fn key_pressed(frame: u64) {
     // SAFETY: plain queries; room for the answer.
     unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut process) };
     if process == std::process::id() {
-        KEYED.store(frame + 1, Relaxed);
+        key(frame + 1);
         tracing::info!(frame = frame + 1, "F9: this frame is captured (picture, ops list, targets with VICTORY_DUMP_TARGETS)");
     }
 }
@@ -193,7 +207,7 @@ fn timed(frame: u64) {
     let (Some(start), Some(&due)) = (world_started(), at.get(NEXT.load(Relaxed))) else { return };
     if folder().is_some() && start.elapsed().as_millis() as u64 >= due {
         NEXT.fetch_add(1, Relaxed);
-        KEYED.store(frame + 1, std::sync::atomic::Ordering::Relaxed);
+        key(frame + 1);
         tracing::info!(frame = frame + 1, ms = due, "a timed capture (VICTORY_CAPTURE_AT_MS)");
     }
 }
