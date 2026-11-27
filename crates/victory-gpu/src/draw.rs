@@ -4683,6 +4683,14 @@ fn describe(view: Option<&View>) -> String {
         Some(View::Placed(u, r, d)) => {
             let (width, at) = (u64::from(r[4]) | u64::from(r[5]) << 32, u64::from(d[10]) | u64::from(d[11]) << 32);
             let mut text = format!("placed uav={u} dim {} {width}x{} f{} layout {:#x} at {at:#x}", r[0], r[6], r[8], r[11]);
+            // A buffer's: the range the view itself names, and whether a host
+            // copy backs it (none: the slot holds a null view).
+            if r[0] == 1 {
+                let v = view.expect("matched");
+                let range = crate::descriptor::host::buffer_range(v);
+                let copy = crate::descriptor::host::buffer_copy(v).map(|(_, a, l)| (a, l));
+                text.push_str(&format!(" view-range {range:x?} host-copy {copy:x?} desc {:?}", &d[..10]));
+            }
             // A small raw buffer (dimension 1, no format): its first 32
             // words as title memory holds them now (VICTORY_OPS_WORDS=1).
             static WORDS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
