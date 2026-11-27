@@ -234,6 +234,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     crate::renderdoc::at_present();
     #[cfg(feature = "diagnostics")]
     reread_probes(frame);
+    #[cfg(feature = "diagnostics")]
+    recheck_words(frame);
     write_counts(frame);
     #[cfg(feature = "diagnostics")]
     write_dumps(frame);
@@ -1257,6 +1259,70 @@ fn write_counts(presented: u64) {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("frame-{frame}-counts.txt"))) {
             let _ = f.write_all(text.as_bytes());
         }
+    }
+}
+
+/// Small raw buffers' bytes as copied at a list's submission, to be read
+/// again at later presents ([`recheck_words`]): address, bytes, the frame
+/// presented when submitted, its tag, the presents seen since.
+#[cfg(feature = "diagnostics")]
+static SUBMITTED_WORDS: std::sync::Mutex<Vec<(u64, Vec<u8>, u64, String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+/// A small raw buffer's bytes as the GPU got them at a list's submission.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn words_submitted(at: u64, bytes: Vec<u8>, tag: &str) {
+    let mut s = SUBMITTED_WORDS.lock().unwrap_or_else(|e| e.into_inner());
+    if s.len() < 200_000 {
+        s.push((at, bytes, crate::queue::presented(), tag.to_owned(), 0));
+    }
+}
+
+/// At each present: the buffers submitted before it read again; those that
+/// title memory now holds otherwise are counted by how many presents after
+/// the submission they changed (0: before the present that followed it -
+/// the title wrote them after submitting the list that reads them). One
+/// line, and the first few as ops lines (`AFTER-SUBMIT`).
+#[cfg(feature = "diagnostics")]
+fn recheck_words(presented: u64) {
+    let mut s = SUBMITTED_WORDS.lock().unwrap_or_else(|e| e.into_inner());
+    if s.is_empty() {
+        return;
+    }
+    let (mut checked, mut changed_first, mut changed_later, mut shown) = (0u64, 0u64, 0u64, 0u32);
+    s.retain_mut(|(at, bytes, when, tag, seen)| {
+        if *when >= presented {
+            return true;
+        }
+        checked += 1;
+        let mut now = vec![0u8; bytes.len()];
+        if !crate::host::read_into(*at as *const u8, &mut now) {
+            return false;
+        }
+        if &now != bytes {
+            if *seen == 0 {
+                changed_first += 1;
+                if shown < 40 {
+                    shown += 1;
+                    let w = |b: &[u8]| b.chunks_exact(4).map(|w| format!("{:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]]))).collect::<Vec<_>>().join(" ");
+                    let (a, b) = (w(bytes), w(&now));
+                    op(0, || format!("AFTER-SUBMIT {tag} {at:#x} submitted [{a}] present [{b}]"));
+                }
+            } else {
+                changed_later += 1;
+            }
+            return false;
+        }
+        *seen += 1;
+        *seen < 3
+    });
+    if checked > 0 {
+        tracing::info!(
+            presented,
+            checked,
+            changed_before_next_present = changed_first,
+            changed_later = changed_later,
+            "small raw buffers read again after their list's submission (VICTORY_OPS_WORDS)"
+        );
     }
 }
 

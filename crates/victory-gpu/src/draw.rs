@@ -4636,6 +4636,7 @@ fn words_at_submit(list: &HostList, tag: String) {
                 now.chunks_exact(4).map(|w| format!("{:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]]))).collect();
             let same = if &now == before { "same" } else { "changed" };
             crate::capture::op(0, || format!("AT-SUBMIT {tag} {at:#x} {same} words [{}]", words.join(" ")));
+            crate::capture::words_submitted(*at, now, &tag);
         }
     });
 }
