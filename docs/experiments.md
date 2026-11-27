@@ -337,7 +337,7 @@ is in the sweep, not here. "Per frame" = the meter's per-frame averages.
 | 10 | HDR refused, SDR presentation | none | always | tone/brightness vs the console's HDR output | compare against an SDR console reference |
 | 11 | Silent no-ops without a counter: resolve/clear/copy when a side has no host texture; indirect DispatchMeshX | none | **unmeasured** | unknown | add counters before judging |
 
-Not active in this run (0 or off): stand-in formats, depth bounds, topology rewrite, root-view drops,
+Not active in this run (0 or off; s2-on never reached the heavy phase, see item 12): stand-in formats, depth bounds, topology rewrite, root-view drops,
 dynamic-slot exhaustion, levels without memory, unmapped by-address reads, indirect clamps (0
 records emptied), pipeline-wait drops ("0 being made"), the loop limit (only with fork-run -Profile
 amd -Diag). No magenta/purple filter exists in this base (docs/base-comparison-2026-11-26.md).
@@ -374,6 +374,38 @@ appears, ~11,000 draws/frame instead of ~5,800), ExecuteIndirect calls are dropp
 0/1/2/10: prepare failed", **500-1,650 executions/frame**, frames 70-250 ms. Present in earlier runs
 with the old crash list too (s2-off, share40, rec2, clean-on: 4-50 log lines each), so not caused by
 this change; s2-on never reached the phase. `draw.rs` ~4143.
+
+```text
+Stage / blocker:          Stage 3, item 12: "indirect kind N: prepare failed" in the heavy phase
+Baseline commit + exe:    066d4c08 (diag: the slot counts and the free count at the first refusals)
+Scene, route, settings:   save 'openworld', 330 s, base-play.env (s3-slots)
+Observed evidence:        "prepare failed" is State::prepare/bind returning false; the cause under it
+                          is "no free dynamic descriptor slots: a table is not made" (descriptor/
+                          host.rs), within 3 s of the heavy phase in every run that reached it
+                          (clean-on, share40, s2-off, rec2, s3-badlist, s3-fp; s2-on never did).
+                          Direct draws refused the same way are dropped too.
+Measured:                 host view heap 2^22: title slots 1,245,184, dynamic 851,967 (the rest of
+                          the lower 2^21; raw twins of every slot, dynamic ones included, fill the
+                          upper half). At the first refusals free = 5,500-22,000 of 851,967: 97-99%
+                          held (exhaustion, H1; fragmentation H2 secondary: 22,000 free without a run
+                          of 254). Demand: 15,000 tables/frame steady, 24,000-30,500 in the heavy
+                          phase, tables of 26-254 slots; refused 50-967 tables/frame; the slot search
+                          grows from 6 to 450 ms per line as the heap fills (the 70-250 ms frames).
+                          Slots go back when a list's submission has run (State::tables_done):
+                          ~18 submissions wait in the async line (under half a frame), so the hold
+                          time is normal; the demand per frame is near the capacity.
+Hypothesis:               the heavy phase drops draws because per-draw tables need more dynamic slots
+                          than the heap has room for below the raw twins.
+Options (not yet chosen): A) heap 2^23 with the raw twins at 2^22: dynamic up to ~2.9 M (the cap
+                          VICTORY_DYNAMIC_SLOTS / 4x2^18 raised with it); every shader translated
+                          again (the limit is in the cache key), +128 MB of descriptors on a card
+                          already over budget; needs the driver to take 2^23 views (probe).
+                          B) fewer slots per draw: copy only the part of a table its shaders read, or
+                          share identical tables across lists: also a Stage 4 cost cut, more risk.
+                          C) a faster free-slot search (a free list instead of a linear scan): cuts
+                          the stalls, not the refusals.
+Next single action:       pending the choice of A or B.
+```
 
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
