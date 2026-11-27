@@ -571,6 +571,12 @@ missing every time. That is a fixed, repeatable failure: the next step is an aut
 'openworld', scripted keys to the stairs, VICTORY_KEYS holds, a capture at fixed frames, palm present or
 not in the depth target) so that the remaining causes are tested without the user playing.
 
+s3-1080 (b3bdf46b, VICTORY_OUTPUT=1920x1080, save 'openworld'): the frame rate rose from ~15-17 to
+~21 fps (46-49 ms at 4,300-7,300 draws); the stairs palm still missing, same pop-in (user).
+AvatarManz's note that the title paces its streaming by its own frames made frame rate a candidate
+lever; a 40% faster frame changed nothing visible: rejected as the main cause (30 fps not reachable
+to test fully).
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
