@@ -4173,10 +4173,17 @@ impl State {
             crate::capture::dump_before_reader(list, arguments, &p.name);
         }
         #[cfg(feature = "diagnostics")]
+        WORDS_READ.with(|w| w.borrow_mut().clear());
+        #[cfg(feature = "diagnostics")]
         list.note_op(|| {
             let ord = ordinal.map_or(String::new(), |o| format!(" ord {o}"));
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}{ord}"), kind == DISPATCH)
         });
+        #[cfg(feature = "diagnostics")]
+        words_at_submit(
+            list,
+            format!("{} ord {} recorded-frame {}", p.name, ordinal.map_or("-".to_owned(), |o| o.to_string()), crate::queue::presented() + 1),
+        );
         #[cfg(feature = "diagnostics")]
         list.ran_indirect(p.pso.as_raw() as usize, &p.name, kind, max, &self.user);
         if kind == MESH {
@@ -4603,6 +4610,36 @@ fn view_state(view: Option<&View>) -> String {
     }
 }
 
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    /// The small raw buffers [`describe`] printed the words of since the
+    /// last execution took them: address, words, bytes then.
+    static WORDS_READ: std::cell::RefCell<Vec<(u64, usize, Vec<u8>)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// With `VICTORY_OPS_WORDS=1`: the words printed for the execution just
+/// noted read again when `list` is submitted (where its copies are made),
+/// as an operation `AT-SUBMIT <tag> <address> same|changed words [..]`.
+#[cfg(feature = "diagnostics")]
+fn words_at_submit(list: &HostList, tag: String) {
+    let read = WORDS_READ.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    if read.is_empty() {
+        return;
+    }
+    list.defer(move || {
+        for (at, n, before) in &read {
+            let mut now = vec![0u8; n * 4];
+            if !crate::host::read_into(*at as *const u8, &mut now) {
+                continue;
+            }
+            let words: Vec<String> =
+                now.chunks_exact(4).map(|w| format!("{:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]]))).collect();
+            let same = if &now == before { "same" } else { "changed" };
+            crate::capture::op(0, || format!("AT-SUBMIT {tag} {at:#x} {same} words [{}]", words.join(" ")));
+        }
+    });
+}
+
 /// A view in a few words (diagnostics builds).
 #[cfg(feature = "diagnostics")]
 fn describe(view: Option<&View>) -> String {
@@ -4660,6 +4697,7 @@ fn describe(view: Option<&View>) -> String {
                     let words: Vec<String> =
                         bytes.chunks_exact(4).map(|w| format!("{:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]]))).collect();
                     text.push_str(&format!(" words [{}]", words.join(" ")));
+                    WORDS_READ.with(|w| w.borrow_mut().push((at, n, bytes)));
                 }
             }
             text
