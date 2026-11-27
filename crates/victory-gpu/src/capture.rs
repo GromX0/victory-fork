@@ -238,6 +238,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     recheck_words(frame);
     #[cfg(feature = "diagnostics")]
     watch_sites_line(frame);
+    #[cfg(feature = "diagnostics")]
+    present_sleep();
     write_counts(frame);
     #[cfg(feature = "diagnostics")]
     write_dumps(frame);
@@ -1261,6 +1263,31 @@ fn write_counts(presented: u64) {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("frame-{frame}-counts.txt"))) {
             let _ = f.write_all(text.as_bytes());
         }
+    }
+}
+
+/// `VICTORY_PRESENT_SLEEP=<file>`: the milliseconds in the file (read again
+/// every second) are slept at each present: the title's frames made longer
+/// with nothing else changed.
+#[cfg(feature = "diagnostics")]
+fn present_sleep() {
+    static FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    static MS: std::sync::Mutex<(Option<std::time::Instant>, u64)> = std::sync::Mutex::new((None, 0));
+    let Some(file) = FILE.get_or_init(|| std::env::var_os("VICTORY_PRESENT_SLEEP").map(Into::into)) else { return };
+    let ms = {
+        let mut m = MS.lock().unwrap_or_else(|e| e.into_inner());
+        if m.0.is_none_or(|t| t.elapsed().as_secs() >= 1) {
+            m.0 = Some(std::time::Instant::now());
+            let v = std::fs::read_to_string(file).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            if v != m.1 {
+                tracing::info!(ms = v, "VICTORY_PRESENT_SLEEP: now");
+            }
+            m.1 = v;
+        }
+        m.1
+    };
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms.min(2000)));
     }
 }
 
