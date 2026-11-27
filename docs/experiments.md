@@ -932,7 +932,7 @@ established.
 - **Queue order:** `VICTORY_QUEUE_WAIT=0` (every submission runs as made): palm still gone from the
   stairs (qw0). No forced runs at presents in any captured frame.
 - **Stale memory:** `VICTORY_REFRESH_CHECK=1` (rc1) found 7 blocks of the 174 MB heap, 0x2cc90000-
-  0x2cd10000, stale three refreshes in a row. New `VICTORY_REFRESH_CHECK=2` (8f2…, copies such blocks
+  0x2cd10000, stale three refreshes in a row. New `VICTORY_REFRESH_CHECK=2` (481c4f3b, copies such blocks
   again): 250-440 blocks (16-29 MB) re-copied every 5 s, and the palm on the stairs is still a ghost
   (rc2 g0, c4). Not the cause.
 
