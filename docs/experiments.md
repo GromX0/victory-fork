@@ -264,6 +264,58 @@ filled and uploads it within a per-frame budget; on the console the card reads i
 after the room fix: measure that lag and cut it (what is drawn first, budget per frame). Next: free room for needed textures under pressure
 (Stage 2), then the purple glass/papers and the smear at their first wrong pass (Stage 3).
 
+### rec2: user-played open world, screen recorded (27 Nov, b8a88c42, play-popin.env)
+
+Pop-in reported by the user is mostly not textures arriving late: a nearby tree vanishes or ghosts
+when the player walks a few steps away (236-266 s), which points at the title's LOD switch / dither
+fade together with the temporal pass (Stage 3), not at memory. The upload-budget settings of
+play-popin.env (512 MB, 24 ms) are not adopted as defaults (cost unmeasured; Stage 6). Also seen:
+a dark/red frame at 186 s, the purple glass/papers, the smear.
+
+### Stage 2 gate check (27 Nov)
+
+```text
+Stage / blocker:          Stage 2 gate: bounded working set, retirement, paging, picture undamaged
+Baseline commit + exe:    b8a88c42 (base/avatar-rdna4 = main), victory.exe SHA-256 8229C308...BE90F6
+Scene, route, settings:   save 'openworld' (snapshot, at home), scripted, 300 s per run, base-play.env,
+                          warm cache D:\victory-data\handlefix (early list present: EARLY_ALL auto off).
+                          s2-on = defaults; s2-off = VICTORY_VIEW_CLEAN=0, VICTORY_TEXTURE_SHARE=0.
+                          Both: VICTORY_CAPTURE_WORLD (+2,+6,+30,+80,+150,+300,+600,+1200 frames
+                          after the first 3D frame), typeperf paging counters every second
+                          (D:\victory-runs\stage2-close.ps1, stage2-compare.ps1). Route approximate:
+                          the harness only presses Start, so no repeated traversal; the scene's flow
+                          (character pose, camera drift, traffic) diverges between runs.
+Observed evidence:        private commit 28.9 -> 31.7 -> 31.9 -> 32.1 GB at minutes 1-4 (on), 29.7 ->
+                          32.5 (off); clean-on (12 min, same save) flat at 33.0-33.2 GB from minute 3;
+                          rec2 (played) 30.5 -> 32.4 GB over minutes 2-4. Host copies 4.4 GB and host
+                          textures 5.7 GB flat after minute 2. Texture refusals: on 0, off 3,698.
+                          Paging (on, after 120 s): pages read from disk median 163/s, mean 1,073/s
+                          (4.2 MB/s), p95 5,538/s, max 38,079/s; 37 of ~200 s over 1,000/s; free RAM
+                          1.1-1.5 GB; working set 4.1-21.7 GB (Windows trims it). Off: median 147/s,
+                          mean 763/s, free RAM 0.5-0.9 GB.
+Hypothesis / falsification: the Stage 2 changes bound memory without damaging the picture; paging
+                          does not drive frame time. Falsified by: private memory still climbing after
+                          the load, a defect in s2-on absent in s2-off, or frame time following paging.
+One change:               none (measurement of the current defaults against the changes switched off)
+Before / after:           paging against 5-s frame-time lines (on, steady part): the 3 windows over
+                          1,000 pages/s 64.4 ms/frame, the other 24 59.8 ms; lowest-paging windows
+                          56-65 ms. Frame similarity (SSIM on/off) 0.70-0.89: driven by the scene's
+                          divergence, not by a rendering difference (pairs inspected).
+Rendering checks:         +6 frames: same house and garden; with the changes OFF a palm's lower fronds
+                          are magenta (a texture never made: the 3,698 refusals); ON it is green. +300:
+                          the purple window blinds are in BOTH runs (Stage 3 defect, not memory). No
+                          defect in s2-on that s2-off lacks.
+Memory / stability:       0 device losses, 0 crashes in both runs.
+Decision:                 Stage 2 gate PASSED on this route, with limits: idle route (no scripted
+                          traversal), 5-12 minute runs; the card still overflows ~10 GB into the PC's
+                          memory and the PC runs at ~1 GB free, so paging bursts cost ~5 ms where they
+                          occur (Stage 6 hitch work, not a Stage 2 blocker on this evidence).
+Next single action:       Stage 3, step 1: the inventory of skipped pipelines, dropped draws
+                          ("dropped ~360 without a host pipeline and ~75 indirect" per frame in rec2),
+                          placeholders and filters, then the purple blinds/papers traced to their
+                          first wrong pass with VICTORY_CAPTURE_FRAMES + VICTORY_DUMP_TARGETS.
+```
+
 ### Stage 3 defect inventory from session2 (open world, first look)
 
 1. Purple/magenta foliage almost everywhere, day and night (the papers' defect, far
