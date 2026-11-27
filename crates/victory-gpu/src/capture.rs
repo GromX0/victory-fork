@@ -27,7 +27,8 @@ pub(crate) fn listed(n: u64) -> bool {
                 .filter_map(|f| f.trim().parse().ok())
                 .collect()
         })
-        .contains(&n);
+        .contains(&n)
+        || n == KEYED.load(std::sync::atomic::Ordering::Relaxed);
     // `VICTORY_CAPTURE_WORLD`: also the 2nd and the 6th frame after the first
     // one that ran 500 draws or more (a title's first 3D frames: their
     // numbers depend on how long the menus were shown), and the 30th and
@@ -123,9 +124,42 @@ fn world_on() -> bool {
 /// The first frame that ran 500 draws or more (`VICTORY_CAPTURE_WORLD`).
 static WORLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
+/// The frame F9 asked for (u64::MAX: none): see [`key_pressed`].
+static KEYED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// With a capture folder, F9 pressed (with one of this process's windows in
+/// front) at the present of `frame` makes the next frame a [`listed`] one:
+/// its picture, its ops list and, with `VICTORY_DUMP_TARGETS`, what it
+/// renders to, saved: a defect seen while playing (the purple foliage that
+/// shows from some angles) caught at the frame it shows in.
+#[cfg(windows)]
+fn key_pressed(frame: u64) {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F9};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    static DOWN: AtomicBool = AtomicBool::new(false);
+    if folder().is_none() {
+        return;
+    }
+    // SAFETY: a plain query.
+    let down = unsafe { GetAsyncKeyState(i32::from(VK_F9)) } < 0;
+    if DOWN.swap(down, Relaxed) || !down {
+        return;
+    }
+    let mut process = 0;
+    // SAFETY: plain queries; room for the answer.
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), &mut process) };
+    if process == std::process::id() {
+        KEYED.store(frame + 1, Relaxed);
+        tracing::info!(frame = frame + 1, "F9: this frame is captured (picture, ops list, targets with VICTORY_DUMP_TARGETS)");
+    }
+}
+
 /// At the present of `frame`: the draws run on the host so far.
 pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     use std::sync::atomic::Ordering::Relaxed;
+    #[cfg(windows)]
+    key_pressed(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
     if world_on()
