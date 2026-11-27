@@ -1030,3 +1030,36 @@ Later the same evening (20:40-21:10):
   user on their street: **still pops**. The driver version is ruled out (AvatarManz's driver is not recorded
   anywhere). Device methods 0x1c8/0x218 are unimplemented in AvatarManz's build too, which reportedly does not
   pop there: not the cause on its own. The title asks XMemGetWorkingSetStatistics only on Series S.
+
+### Pop-in across the board: what removes the objects (27 Nov, 21:15-22:50)
+
+New tool `VICTORY_PIXEL_WHO=<file>` (diagnostics, capture.rs `who`): boxes `x y w h` of the render targets;
+in an F9/triggered span, after every draw the boxes of its first colour target are copied out and
+compared with the previous copy **in the same host list** (lists are recorded on several threads; across
+lists recording order is not the card's order): `frame-N-who.txt` lists each draw that changed pixels.
+Also `VICTORY_DUMP_ONCE=1` (each pass's dump once per F9 span) and the culling heap moves between loads
+(0x33d30000 test save; 0x28dc0000, 0x34840000, 0x9830000 on the user's save): read its address from the
+s0+688 view (182452224 bytes) of `55679a05`/`17af15c4` in the ops list.
+
+User's save, captures who4 (frames 37460 visible view, 43647 ghost bin, 46690 vanished fence; pictures
+in D:\victory-scratch\capture\who4):
+- White lattice where it is drawn: two draws, `mesh 89771a8c / pixel 0fbc5c91` and `mesh 7f7b42a2 / pixel
+  b5640b10`, ~550 of 1,024 box pixels each, complementary: a dithered crossfade of two detail levels,
+  whole between them.
+- The same lattice panel where it is gone (in front of the pink bush): only `7f7b42a2` writes, ~100 of
+  1,024; `89771a8c` writes nothing there. Its arguments (`0xf0b32e4`, 16 groups) equal what the title's
+  CPU wrote (`title_recorded 16`): these draws are sized by the CPU, not by the culling pass.
+- The grey bin ghosting close up: drawn by a direct mesh dispatch `mesh c9dee8dc / pixel a2a7199b`
+  (~435-500 of 1,024), not by its list draw `9e3584ab / b8df1385` (1,024 from further off). The direct
+  draws carry a per-draw constant (s2+0 .w) of 0.2-0.6.
+- The pixel shaders' last discard (`b5640b10` at 0xd4, `0fbc5c91` 0xd4, `64ea0f34` / `6539386a` 0xcdc,
+  `b8df1385` 0xd4): interleaved gradient noise against a per-object dissolve (`attr7.x`, or 1 - it for
+  the other half of a crossfade); `v_cmpx_gt_f32` picks the pixels to kill, `s_andn2` removes them.
+- Test nodither2: that compare replaced by `v_cmpx_f_f32` (kill none) at 1,968 sites in 1,860 pixel
+  shaders (every one with the noise constant 0x4253ee82 followed by that compare): **the fence and bush no
+  longer dip** (user, own save). Water and other effects use the same noise and broke (water's top layer
+  drawn everywhere): the patch must be limited to object shaders. (A first try with `v_cmpx_tru_f32`
+  killed every pixel: objects gone.)
+
+So the objects that vanish or ghost are drawn, and dissolved by their dissolve value. Not yet known: why
+those values are wrong here (what the title's CPU or the mesh shaders compute them from).

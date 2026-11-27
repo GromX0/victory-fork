@@ -159,6 +159,32 @@ fn keyed(n: u64) -> bool {
     KEYED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|&k| n.checked_sub(k).is_some_and(|d| d < span()))
 }
 
+/// The first frame of the F9/timed span frame `n` is in, if any.
+#[cfg(feature = "diagnostics")]
+fn span_start(n: u64) -> Option<u64> {
+    KEYED.lock().unwrap_or_else(|e| e.into_inner()).iter().copied().filter(|&k| n.checked_sub(k).is_some_and(|d| d < span())).max()
+}
+
+/// Whether `what` is dumped for the first time in the span frame `n` is
+/// in (`VICTORY_DUMP_ONCE=1`: each pass dumped once per F9 press, not in every
+/// frame of a span; without it, always).
+#[cfg(feature = "diagnostics")]
+fn first_dump_in_span(n: u64, what: &str) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("VICTORY_DUMP_ONCE").is_ok_and(|v| v.trim() == "1")) {
+        return true;
+    }
+    let Some(start) = span_start(n) else { return true };
+    static DONE: std::sync::Mutex<Vec<(u64, String)>> = std::sync::Mutex::new(Vec::new());
+    let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+    if done.iter().any(|(s, w)| *s == start && w == what) {
+        return false;
+    }
+    done.retain(|(s, _)| *s + 64 > start);
+    done.push((start, what.to_owned()));
+    true
+}
+
 /// With a capture folder, F9 pressed (with one of this process's windows in
 /// front) at the present of `frame` makes the next frame a [`listed`] one:
 /// its picture, its ops list and, with `VICTORY_DUMP_TARGETS`, what it
@@ -243,6 +269,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     write_counts(frame);
     #[cfg(feature = "diagnostics")]
     mesh_stats::at_present(frame);
+    #[cfg(feature = "diagnostics")]
+    who::at_present(frame);
     #[cfg(feature = "diagnostics")]
     write_dumps(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1656,6 +1684,10 @@ pub(crate) fn dump_after(list: &crate::host::HostList, name: &str) {
     if ranges.is_empty() || !after.iter().any(|h| h == "*" || name.contains(h.as_str())) {
         return;
     }
+    let frame = crate::queue::presented() + 1;
+    if folder().is_none() || !listed(frame) || !first_dump_in_span(frame, name) {
+        return;
+    }
     dump_ranges(list, &format!("after {name}"));
 }
 
@@ -1669,7 +1701,7 @@ pub(crate) fn dump_before_reader(list: &crate::host::HostList, arguments: u64, n
         return;
     }
     let frame = crate::queue::presented() + 1;
-    if folder().is_none() || !listed(frame) {
+    if folder().is_none() || !listed(frame) || !first_dump_in_span(frame, "before the first reader") {
         return;
     }
     static SEEN: std::sync::Mutex<Vec<(u64, usize)>> = std::sync::Mutex::new(Vec::new());
@@ -1997,6 +2029,258 @@ pub(crate) mod mesh_stats {
                 draws_with_groups_but_no_pixels = t.empty_draws,
                 "VICTORY_MESH_STATS {key}"
             );
+        }
+    }
+}
+
+/// `VICTORY_PIXEL_WHO=<file>` (diagnostics): lines `x y w h` (pixels of a
+/// render target; `#` comments; read again every 200 ms). In an F9/listed
+/// frame, after every draw whose first render target is large enough, those
+/// boxes of that target are copied out; at the frame's end
+/// `frame-N-who.txt` lists, per box and target, each draw that changed pixels
+/// in it (how many, in recording order) with its pipeline name and what it
+/// was: which draws wrote an object's pixels, without dropping any (27 Nov:
+/// the bin, fence and bushes that vanish at middle distance).
+#[cfg(feature = "diagnostics")]
+pub(crate) mod who {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use windows::Win32::Graphics::Direct3D12::*;
+
+    /// Read-back room for one frame's copies.
+    const ROOM: u64 = 512 << 20;
+
+    struct Space {
+        buffer: ID3D12Resource,
+        mapped: usize,
+    }
+    // SAFETY: a free-threaded D3D12 resource; the mapping is only read.
+    unsafe impl Send for Space {}
+    // SAFETY: as above.
+    unsafe impl Sync for Space {}
+
+    fn space() -> Option<&'static Space> {
+        static S: OnceLock<Option<Space>> = OnceLock::new();
+        S.get_or_init(|| {
+            let host = crate::host::host()?;
+            let buffer = host.read_back_buffer(ROOM)?;
+            let mut mapped = std::ptr::null_mut();
+            // SAFETY: a read-back buffer mapped once for the process.
+            unsafe { buffer.Map(0, None, Some(&mut mapped)) }.ok()?;
+            Some(Space { buffer, mapped: mapped as usize })
+        })
+        .as_ref()
+    }
+
+    fn boxes() -> Vec<[u32; 4]> {
+        static FILE: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+        let Some(file) = FILE.get_or_init(|| std::env::var_os("VICTORY_PIXEL_WHO").map(Into::into)) else {
+            return Vec::new();
+        };
+        type Now = (Option<std::time::Instant>, Vec<[u32; 4]>);
+        static NOW: Mutex<Now> = Mutex::new((None, Vec::new()));
+        let mut now = NOW.lock().unwrap_or_else(|e| e.into_inner());
+        if now.0.is_none_or(|t| t.elapsed().as_millis() >= 200) {
+            now.0 = Some(std::time::Instant::now());
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            now.1 = text
+                .lines()
+                .map(|l| l.split('#').next().unwrap_or(""))
+                .filter_map(|l| {
+                    let v: Vec<u32> = l.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+                    (v.len() == 4 && v[2] > 0 && v[3] > 0 && v[2] * v[3] <= 256 * 256).then(|| [v[0], v[1], v[2], v[3]])
+                })
+                .collect();
+        }
+        now.1.clone()
+    }
+
+    /// Bytes a texel of `format` takes, for the formats render targets use.
+    fn texel_bytes(format: i32) -> Option<u32> {
+        Some(match format {
+            1..=4 => 16,
+            9..=22 => 8,
+            23..=47 => 4,
+            48..=60 => 2,
+            61..=65 => 1,
+            85..=93 => 4,
+            _ => return None,
+        })
+    }
+
+    struct Probe {
+        frame: u64,
+        list: usize,
+        draw: u64,
+        name: String,
+        target: usize,
+        boxed: [u32; 4],
+        offset: u64,
+        pitch: u32,
+        texel: u32,
+    }
+
+    static PROBES: Mutex<Vec<Probe>> = Mutex::new(Vec::new());
+
+    thread_local! {
+        /// What the draw about to be recorded is (its arguments), for the listing.
+        static WHAT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+
+    /// Notes what the next draw on this thread is.
+    pub(crate) fn note(what: String) {
+        WHAT.with(|w| *w.borrow_mut() = what);
+    }
+
+    /// What [`note`] said, taken.
+    pub(crate) fn take_note() -> String {
+        WHAT.with(|w| std::mem::take(&mut *w.borrow_mut()))
+    }
+    static USED: AtomicU64 = AtomicU64::new(0);
+    static FRAME_OF_USE: AtomicU64 = AtomicU64::new(0);
+    static DRAWS: AtomicU64 = AtomicU64::new(0);
+
+    /// After a draw: its first render target's boxes copied out.
+    pub(crate) fn after_draw(list: &crate::host::HostList, targets: &[usize], name: &str, what: &str) {
+        let frame = crate::queue::presented() + 1;
+        if super::folder().is_none() || !super::listed(frame) {
+            return;
+        }
+        let boxes = boxes();
+        if boxes.is_empty() {
+            return;
+        }
+        let Some(&target) = targets.first() else { return };
+        let Some(texture) = crate::resource::host_made(target as crate::object::This) else { return };
+        let Some(s) = space() else { return };
+        // SAFETY: a live resource.
+        let desc = unsafe { texture.GetDesc() };
+        // A box of a texture can be copied only from a plain colour one:
+        // depth-capable, multisampled or other textures are copied whole or
+        // not at all (a list holding such a copy does not close).
+        const DEPTH_FORMATS: [i32; 9] = [19, 20, 21, 22, 39, 40, 44, 45, 55];
+        if desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
+            || desc.SampleDesc.Count != 1
+            || desc.Flags.contains(D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+            || !desc.Flags.contains(D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+            || DEPTH_FORMATS.contains(&desc.Format.0)
+        {
+            return;
+        }
+        let Some(texel) = texel_bytes(desc.Format.0) else { return };
+        if FRAME_OF_USE.swap(frame, Ordering::Relaxed) != frame {
+            // The read-back room is reused only once every probe before has been read.
+            if PROBES.lock().unwrap_or_else(|e| e.into_inner()).is_empty() {
+                USED.store(0, Ordering::Relaxed);
+            }
+            DRAWS.store(0, Ordering::Relaxed);
+        }
+        let draw = DRAWS.fetch_add(1, Ordering::Relaxed);
+        let transition = crate::host::transition;
+        for b in boxes {
+            if u64::from(b[0] + b[2]) > desc.Width || b[1] + b[3] > desc.Height {
+                continue;
+            }
+            let pitch = (b[2] * texel).next_multiple_of(256);
+            let size = u64::from(pitch) * u64::from(b[3]);
+            let offset = USED.fetch_add(size.next_multiple_of(512), Ordering::Relaxed);
+            if offset + size > ROOM {
+                return;
+            }
+            let dst = D3D12_TEXTURE_COPY_LOCATION {
+                // SAFETY: a borrowed pointer the location never releases.
+                pResource: unsafe { std::mem::transmute_copy(&s.buffer) },
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 {
+                    PlacedFootprint: D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+                        Offset: offset,
+                        Footprint: D3D12_SUBRESOURCE_FOOTPRINT { Format: desc.Format, Width: b[2], Height: b[3], Depth: 1, RowPitch: pitch },
+                    },
+                },
+            };
+            let src = D3D12_TEXTURE_COPY_LOCATION {
+                // SAFETY: as above (`texture` is already a reference to the
+                // interface: its pointer, not the reference's address).
+                pResource: unsafe { std::mem::transmute_copy(texture) },
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+            };
+            let area = D3D12_BOX { left: b[0], top: b[1], front: 0, right: b[0] + b[2], bottom: b[1] + b[3], back: 1 };
+            // SAFETY: an open list; a bound render target is in
+            // RENDER_TARGET, and goes back there.
+            unsafe {
+                list.list.ResourceBarrier(&[transition(&texture, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE)]);
+                list.list.CopyTextureRegion(&dst, 0, 0, 0, &src, Some(&area));
+                list.list.ResourceBarrier(&[transition(&texture, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET)]);
+            }
+            PROBES.lock().unwrap_or_else(|e| e.into_inner()).push(Probe {
+                frame,
+                list: std::ptr::from_ref(list) as usize,
+                draw,
+                name: format!("{what} {name}"),
+                target,
+                boxed: b,
+                offset,
+                pitch,
+                texel,
+            });
+        }
+    }
+
+    /// At a present: the probes of frames eight or more back compared draw by
+    /// draw and written to `frame-N-who.txt`.
+    pub(crate) fn at_present(presented: u64) {
+        let Some(s) = space() else { return };
+        let done: Vec<Probe> = {
+            let mut p = PROBES.lock().unwrap_or_else(|e| e.into_inner());
+            if p.is_empty() {
+                return;
+            }
+            let (done, left) = std::mem::take(&mut *p).into_iter().partition(|e| e.frame + 8 <= presented);
+            *p = left;
+            done
+        };
+        if done.is_empty() {
+            return;
+        }
+        let Some(folder) = super::folder() else { return };
+        let mut text = String::new();
+        // Copies are compared within one host list only: lists are recorded on
+        // several threads at once, so recording order across lists is not the
+        // order the card runs them in.
+        let mut last: std::collections::HashMap<(usize, usize, [u32; 4]), Vec<u8>> = std::collections::HashMap::new();
+        let frame = done[0].frame;
+        for p in &done {
+            let mut pixels = Vec::with_capacity((p.boxed[2] * p.boxed[3] * p.texel) as usize);
+            for row in 0..p.boxed[3] {
+                let at = s.mapped + (p.offset + u64::from(row * p.pitch)) as usize;
+                // SAFETY: inside the mapped read-back buffer, written by a list that has run.
+                pixels.extend_from_slice(unsafe { std::slice::from_raw_parts(at as *const u8, (p.boxed[2] * p.texel) as usize) });
+            }
+            let key = (p.list, p.target, p.boxed);
+            match last.get(&key) {
+                Some(before) => {
+                    let changed = pixels.chunks(p.texel as usize).zip(before.chunks(p.texel as usize)).filter(|(a, b)| a != b).count();
+                    if changed > 0 {
+                        text.push_str(&format!(
+                            "list {:#x} draw {} box {:?} target {:#x} changed {} of {} | {}\n",
+                            p.list,
+                            p.draw,
+                            p.boxed,
+                            p.target,
+                            changed,
+                            p.boxed[2] * p.boxed[3],
+                            p.name
+                        ));
+                    }
+                }
+                None => text.push_str(&format!("list {:#x} draw {} box {:?} target {:#x} first in list | {}\n", p.list, p.draw, p.boxed, p.target, p.name)),
+            }
+            last.insert(key, pixels);
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("frame-{frame}-who.txt"))) {
+            let _ = f.write_all(text.as_bytes());
         }
     }
 }

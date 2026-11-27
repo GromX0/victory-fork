@@ -3911,6 +3911,8 @@ impl State {
     /// A draw with the pipeline `p` was recorded (as [`State::buffers_written`]
     /// if its shaders can store to buffers).
     fn drew(&mut self, list: &HostList, p: Option<&HostPipeline>) {
+        #[cfg(feature = "diagnostics")]
+        crate::capture::who::after_draw(list, &self.targets, p.map_or("?", |p| p.name.as_str()), &crate::capture::who::take_note());
         if p.is_none_or(|p| p.stages.iter().any(|stage| stage.translated().stores)) {
             self.batch = None;
         }
@@ -4207,6 +4209,8 @@ impl State {
         if kind == MESH {
             self.mesh_scissor(list, true);
         }
+        #[cfg(feature = "diagnostics")]
+        crate::capture::who::note(format!("indirect kind {kind} max {max} at {arguments:#x}"));
         #[cfg(feature = "diagnostics")]
         let stats_slot = if kind == MESH { crate::capture::mesh_stats::begin(list, &p.name) } else { None };
         // SAFETY: an open list with everything set; the scratch buffer and
