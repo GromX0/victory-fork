@@ -1549,32 +1549,41 @@ fn skip_list<T: Default>(test: impl FnOnce(&[(u64, u64)], &[String], &[(String, 
 /// with `VICTORY_DUMP_FILE=<file>` the ranges are that file's lines
 /// `<address> <len>` (hex), read again every 200 ms.
 #[cfg(feature = "diagnostics")]
-fn dump_spec() -> (Vec<(u64, u64)>, &'static Vec<String>) {
+fn dump_spec() -> (Vec<(u64, u64)>, Vec<String>) {
     let fixed = dump_spec_fixed();
     static FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     let Some(file) = FILE.get_or_init(|| std::env::var_os("VICTORY_DUMP_FILE").map(Into::into)) else {
-        return (fixed.0.clone(), &fixed.1);
+        return (fixed.0.clone(), fixed.1.clone());
     };
-    static NOW: std::sync::Mutex<(Option<std::time::Instant>, Vec<(u64, u64)>)> = std::sync::Mutex::new((None, Vec::new()));
+    type Now = (Option<std::time::Instant>, Vec<(u64, u64)>, Vec<String>);
+    static NOW: std::sync::Mutex<Now> = std::sync::Mutex::new((None, Vec::new(), Vec::new()));
     let mut now = NOW.lock().unwrap_or_else(|e| e.into_inner());
     if now.0.is_none_or(|t| t.elapsed().as_millis() >= 200) {
         now.0 = Some(std::time::Instant::now());
         let hex = |w: &str| u64::from_str_radix(w.trim_start_matches("0x"), 16).ok();
-        let ranges: Vec<(u64, u64)> = std::fs::read_to_string(file)
-            .unwrap_or_default()
+        let text = std::fs::read_to_string(file).unwrap_or_default();
+        let ranges: Vec<(u64, u64)> = text
             .lines()
+            .filter(|l| !l.starts_with("after"))
             .filter_map(|l| {
                 let mut w = l.split_whitespace();
                 Some((hex(w.next()?)?, hex(w.next()?)?))
             })
             .filter(|&(_, l)| l > 0 && l <= 8 << 20)
             .collect();
+        // Lines `after <hash> ...`: the passes dumped after (in place of VICTORY_DUMP_AFTER's).
+        let after: Vec<String> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("after"))
+            .flat_map(|l| l.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+            .collect();
+        now.2 = if after.is_empty() { fixed.1.clone() } else { after };
         if ranges != now.1 {
             tracing::info!(ranges = ?ranges.iter().map(|(a, l)| format!("{a:#x}+{l:#x}")).collect::<Vec<_>>(), "VICTORY_DUMP_FILE: ranges now");
         }
         now.1 = ranges;
     }
-    (now.1.clone(), &fixed.1)
+    (now.1.clone(), now.2.clone())
 }
 
 #[cfg(feature = "diagnostics")]
@@ -1628,7 +1637,7 @@ static DUMPS: std::sync::Mutex<Vec<Dump>> = std::sync::Mutex::new(Vec::new());
 #[cfg(feature = "diagnostics")]
 pub(crate) fn dump_after(list: &crate::host::HostList, name: &str) {
     let (ranges, after) = dump_spec();
-    if ranges.is_empty() || !after.iter().any(|h| name.contains(h.as_str())) {
+    if ranges.is_empty() || !after.iter().any(|h| h == "*" || name.contains(h.as_str())) {
         return;
     }
     dump_ranges(list, &format!("after {name}"));
