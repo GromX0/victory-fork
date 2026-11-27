@@ -782,3 +782,12 @@ draws the palm in the ghost state; it is hidden, not replaced).
 Next single action: in the ghost state, save the water pass's targets and depth (0x...7a640 at the
 frame's end, VICTORY_DUMP_TARGETS) and the two textures its surface shader reads, and see at the palm's
 pixels whether water depth is present there and what the scene depth it tested against holds.
+
+Session palm6 (ef62ab0b): is it only the palm? Pictures with the water composite (`24abbd85`) on and off,
+camera unchanged (D:\victory-scratch\capture\palm6\pair-*.png), from the deck, the stairs and the garden
+facing the water, and towards the house and the yard. Facing the water the palm's ghost returns whole
+with the composite off again (w3); the composite paints over whatever stands in front of water. Facing
+land or sky, no object came back with it off in these views (v2, v3, w3's left half) - but none of those
+views was checked to contain a missing object, so this neither shows nor rules out that inland objects
+vanish the same way. Not established: whether objects with land behind them disappear by this pass or by
+something else; needs one such object, held in view, through the same bisection.
