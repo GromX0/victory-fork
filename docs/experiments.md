@@ -1025,3 +1025,8 @@ Later the same evening (20:40-21:10):
   word), 0x180-0x400 bytes in a separate region (0xd494....), 0x118-0x1d8 bytes of metadata, two
   addresses and a 64-bit key. None of the pieces is a DXBC container. Whole pipeline creations the
   title goes without; what they draw (object materials, or ray-tracing per-material programs) not known.
+- **Driver**: AMD Adrenalin 26.11.2 (32.0.32029.2010) replaced by 26.7.1 WHQL (32.0.31035.1003, 24 Jul 2026;
+  AMD-signed installer, factory reset), run userdrv2671 (base-play.env, tree fix + CPU occluders off),
+  user on their street: **still pops**. The driver version is ruled out (AvatarManz's driver is not recorded
+  anywhere). Device methods 0x1c8/0x218 are unimplemented in AvatarManz's build too, which reportedly does not
+  pop there: not the cause on its own. The title asks XMemGetWorkingSetStatistics only on Series S.
