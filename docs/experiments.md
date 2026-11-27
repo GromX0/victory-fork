@@ -801,3 +801,34 @@ base-play) the two tall palms by the house go see-through against open sky while
 ghost. So a fade does show against sky, but in what was seen it finishes; the object that stays missing
 in all captures so far is one in front of water. An inland object that stays missing has not been
 found by searching; one named by the user is needed for the same bisection.
+
+### Disappearing objects: what the "ghost" is (27 Nov, sessions hz1, fm1, tr1, tw1, tw2)
+
+Ruled out by test (each exercised, picture compared at a held view):
+- Occlusion pyramid builders (`2dc60219`, `42683eeb`, `82849f7a`, the passes that write the 1024x512 R32
+  depth pyramid the culling passes read) dropped: the tree by the deck dissolved the same (hz1 h2b/h3).
+- `v_fmac_f32` accumulator modifiers (upstream #3158, Vice-Tay 8fe3ccd), now in as `VICTORY_FMAC_MODS=1`
+  (off by default; counted either way): 0 uses of them in 4,157 shaders translated in the world (fm1).
+- RenderDoc 1.47 (in-app API, `VICTORY_RENDERDOC`): hooks the device, but the capture fails with
+  E_OUTOFMEMORY creating its initial-state copies (41,679 resources): not usable at this memory size.
+
+Found (tr1, pipeline bisection by name at a held view, the dissolving tree left of the deck):
+- The tree is two draws of two detail levels: `mesh adc5c689 / pixel 64ea0f34` and `mesh 89a62261 /
+  pixel 6539386a` (the same G-buffer pipeline the stairs palm was drawn by). Dropping both removes the tree;
+  dropping either leaves the other's dithered part.
+- The two pixel shaders are the same program (two table offsets differ). Their last discard is a
+  screen-space dither: interleaved gradient noise (0.06711056, 0.00583715, 52.9829; frame offset 5.588 x
+  (counter & 63)) against a threshold `saturate(alpha x G) x (flag ? F(1-t) : 1-F(1-t))`, with `t` the
+  object's fade value (times a near-camera fade), `F` and `G` per-frame constants (1.0, 2.0). A crossfade
+  between detail levels by dither; the ghost is that crossfade being shown, not a missing draw.
+- `t` comes from the mesh shader's `COLOR3` = bits 16-23 of a per-instance word / 255, read from a small
+  raw buffer (`s1+56`, 12-16 words) in the title's per-frame constant ring (0x36..., written by the
+  title's CPU each frame). The dither's frame counter (per-frame buffer offset 1520) advances 0..7 every
+  frame; the near-camera fade constants settle at 0.15 / 20.0.
+
+So the fade amount of each object is decided by the title's CPU code and handed to the GPU per frame; the
+translated shaders apply it as written. What is not established: which instance word is the tree's (the
+low 16 bits are not a unique id), and therefore whether its fade byte is held part-way, oscillates, or is
+right and something else differs. Next: find the tree's draw and instance (bisection over its draws), read
+its fade byte over a minute with the camera still; if it is held or flips, trace what the title's LOD code
+reads to decide it (frame time, and GPU results it reads back: visibility/occlusion).
