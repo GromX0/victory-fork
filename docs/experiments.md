@@ -791,3 +791,13 @@ land or sky, no object came back with it off in these views (v2, v3, w3's left h
 views was checked to contain a missing object, so this neither shows nor rules out that inland objects
 vanish the same way. Not established: whether objects with land behind them disappear by this pass or by
 something else; needs one such object, held in view, through the same bisection.
+
+Session inl1 (447df7ed) and rec2 again: objects without water behind them. From the deck facing inland
+(street, blue house, trees against sky) no object was found that stays missing; a big tree showed a
+half-done crossfade (two versions dithered over each other) right after the camera turned, and was whole
+a few seconds later with the camera still (n1/n2 against t-on/s1/s2). In the user's rec2 (17 fps,
+base-play) the two tall palms by the house go see-through against open sky while the player walks
+(238-242 s) and are solid again once he stands (246-264 s), while the stairs palm over the water stays a
+ghost. So a fade does show against sky, but in what was seen it finishes; the object that stays missing
+in all captures so far is one in front of water. An inland object that stays missing has not been
+found by searching; one named by the user is needed for the same bisection.
