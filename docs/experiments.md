@@ -226,6 +226,22 @@ user's own save folder untouched). victory.toml's cache_dir is `D:\victory-data\
 | 11-27 | 2fbb45b6 | overflow-off: clean-off + VICTORY_VIEW_SHAPES_MAX=50000 (shapes full before 108 s; 3.5 M placed table entries by 233 s) | session2's purple foliage began when its shapes filled (21:10): the entry path draws placed views wrong | after the overflow the foliage stayed green (flame tree, palms, bushes; 122-275 s). Purple on window glass (0122) as on the prologue's papers, overflow or not | rejected. (Read in passing: the copy pass defers placed views it knows by their record, CONSTANT/PLACED, to the draws, but makes table-entry ones at once; not shown to matter) |
 | 11-27 | 2fbb45b6 | earlyall-on: VICTORY_EARLY_ALL=1 (as in session2), save 'openworld', 600 s, shots every 15 s | session2's purple foliage comes with starting every pipeline at creation | **purple foliage back**: the bush beside the flame tree magenta (244-305 s), the trees through the car's windows purple-tinted (336-549 s); same save and scene green without it. Card **over budget from 240 s** (12.7 of 11.7 GB; 12.9 of 11.5 at 481 s) and texture passes that made none for lack of room **306 -> 3,536 -> 7,624 -> 11,770** (clean-on: 344 -> 586, flat, with eviction churn of 220 k let go / 92 k made again; session2: 28,309). Textures held back for lack of room wait until host copies are let go (`TextureQueue::hold`/`room`), and with the card full of what is not let go they never come | **supported: purple foliage = textures never made for lack of room on the card.** Compiling every pipeline fills it (shader code lives on the card); since 12a52593 that happens only on a cache's first run. Next (Stage 2): free room for needed textures under pressure (least recently used host copies) instead of waiting |
 
+### rec1: user-played open world, screen recorded (27 Nov, cfc63afa build, normal switches)
+
+`D:\victory-scratch\recordings\rec1-play.mkv` (347 s, both monitors; the game is the left
+2560x1440), frames every 4 s in `rec1-frames`, full-size defect frames in `recordings\defects`.
+The layer's log starts with the recording (00:27:03). 0 device losses; private 33.0 GB at the end.
+
+| Video time | Defect | Card at that time | Textures refused for lack of room | Stage |
+| --- | --- | --- | --- | --- |
+| 110 s | purple/magenta stripes on a glass door (as the prologue's papers) | 10.9 of 11.5 GB | 0-6 | 3 (rendering) |
+| 168 s | whole screen washed out white and smeared sideways, ghosted copies ("melting") | 11.3-11.8 of 11.4-12.0 GB | 517-1,305 | 3 (temporal blending; to be shown) |
+| 292-296 s | distant trees neon green; two gantry signs blank grey | **12.1 of 11.6 GB (over since ~244 s)** | **2,307** | 2 (textures never made) |
+
+The card's budget fell from 15.4 GB at the start to ~11.6 GB in the world. Pop-in (the user's
+report) fits textures waiting for room. Next: free room for needed textures under pressure
+(Stage 2), then the purple glass/papers and the smear at their first wrong pass (Stage 3).
+
 ### Stage 3 defect inventory from session2 (open world, first look)
 
 1. Purple/magenta foliage almost everywhere, day and night (the papers' defect, far
