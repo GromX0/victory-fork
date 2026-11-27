@@ -1705,6 +1705,9 @@ impl HostHeap {
             )
         };
         tracing::debug!(count, sampler, "host descriptor heap");
+        if !sampler {
+            tracing::info!(title = count, dynamic = extra, "host view heap: title slots, then dynamic slots for tables made per draw");
+        }
         // SAFETY: a live shader-visible heap.
         let gpu = unsafe { heap.GetGPUDescriptorHandleForHeapStart().ptr };
         GPU_RANGES.lock().unwrap_or_else(|e| e.into_inner()).push((
@@ -1897,8 +1900,18 @@ impl HostHeap {
             if enough {
                 self.too_long.fetch_min(n as u32, std::sync::atomic::Ordering::Relaxed);
             }
-            static ONCE: std::sync::Once = std::sync::Once::new();
-            ONCE.call_once(|| tracing::warn!(n, "no free dynamic descriptor slots: a table is not made"));
+            // The first 20 with the free count: all slots held (free < n)
+            // or none of the free ones in a run of n (free well above n).
+            static TOLD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if TOLD.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+                tracing::warn!(
+                    n,
+                    free = self.free.load(std::sync::atomic::Ordering::Relaxed),
+                    of = self.dynamic,
+                    searched = enough,
+                    "no free dynamic descriptor slots: a table is not made"
+                );
+            }
             #[cfg(feature = "diagnostics")]
             {
                 use crate::copystat::{C, add};
