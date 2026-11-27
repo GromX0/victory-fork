@@ -598,6 +598,33 @@ Next single action: record, per ExecuteIndirect of a captured frame, the title's
 code that issued it); take the one issuing f0aee31b close up; read that code (and what it reads) at the
 start position for the branch that leaves the palm out.
 
+### Overnight, unattended (27 Nov 04:30 on; the user asleep, no one playing)
+
+| Run / step | What | Result |
+| --- | --- | --- |
+| palm-callers (186a10d9) | callers by RtlCaptureStackBackTrace | every indirect execution "from +0x2dda7<+0xc9c5c"; both land mid-instruction (cdb -z on the exe, read only): the unwinder loses its way at the stubs between the title and us. Useless |
+| palm-callers2 (5dea60c4) | callers by a stack scan for return addresses after calls | none found (the module name test failed); fixed in f7778c76 (the range from the loader), not yet run |
+| palm-seriess | --console series-s | the same: palm missing at the start, drawn close, missing back; far islands' trees strongly magenta on Series S | rejected: not the profile's detail tables |
+| palm-rt | VICTORY_BVH_BUILDER=1 (ray tracing on) | **the builder runs: 53 pipelines, no crash, no device loss for 2+ minutes, ~6 fps** (before the DispatchX handling it overwrote memory); the purple blinds stay purple with it; the walk did not replay (the opening shots last longer at 6 fps) |
+| palm-face | the walk again, capture at 19.5 s (start, after the user's camera turn) | the walk went elsewhere (the character still leaning at 19.5 s, at the door at 33 s): the camera's direction after the opening varies between runs and the recorded stick inputs are relative to it. **The recorded walk is not a reliable test**; palm-base1's clean result was in part luck |
+
+Code checks: texture views keep the title's component mapping (`srv_desc`); the frame's 49,586 view
+records and 33,917 placed views all use the default mapping (0x1688) except buffer views: **no swizzle
+cause** for the purple.
+
+Purple blinds traced (blinds1, VICTORY_CAPTURE_SPAN=3, 455 targets of frame 1557): the geometry pass's
+targets (50 material code, 51 grey, 52 normals, 54 motion) hold no purple colour; the first purple is in
+the **lit HDR scene colour** (2560x1440 RGBA16F, 0x158d90cfcb0), which a compute chain (2da4beb3 ->
+3d002bca/f753697c) downsamples into a half-size blur pyramid (target 55, 1280x720 R11G11B10). With the
+builder on (ray-traced light, stand-in off) the blinds stay purple. So the purple is made by the lighting
+of the blinds (or a translucency/behind-glass pass), not by their stored colour, not by a channel
+mapping, not by the stand-in. Lead: the lighting takes a material class from the stencil plane (the
+frame's stencil values: 0, 7, 64, 72, 8, 16, 65, 3, ...); the console's D16S8 views (118-120) are
+read as host 45-47.
+
+New tools: VICTORY_CAPTURE_SPAN (consecutive frames per capture), VICTORY_INPUT_REPLAY_OFFSET_MS,
+`D:\victory-runs\palm-strip.sh`, `region-colour.sh`.
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
