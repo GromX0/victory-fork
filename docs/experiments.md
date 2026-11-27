@@ -666,3 +666,8 @@ save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec
    bounced light missing, as in the prison.
 4. A black frame (212218), probably a load.
 | 11-26 | 9dfbe7c6 | cold + bad list (67) + VICTORY_EARLY_ALL=1 alone (coldearlyonly, 300 s) | the 20 s wait is not needed | faces render (20:13: the guard's face and hands, the main character's ear and neck) | **fix for cold-start faces: VICTORY_EARLY_ALL=1**; the wait budget is not part of it |
+
+rt-soak2 (8ebc2b11-era build, VICTORY_BVH_BUILDER=1, save 'openworld', idle, stopped at 9.0 min at the
+user's request): **0 errors, 0 device losses**; after loading 4.6-15.6 fps, median 9.8; private memory
+33.9 -> 36.8 GB over the run (still rising at the end: to be watched when ray tracing is taken up again).
+Ray tracing parked; the disappearing objects are the active work.
