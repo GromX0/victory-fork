@@ -577,6 +577,27 @@ AvatarManz's note that the title paces its streaming by its own frames made fram
 lever; a 40% faster frame changed nothing visible: rejected as the main cause (30 fps not reachable
 to test fully).
 
+### The automatic stairs-palm test (27 Nov, 94ca52bd + 7932dc69)
+
+- `VICTORY_INPUT_RECORD/REPLAY=<file>` (diagnostics): the first pad as the title gets it, recorded and
+  played back from the world's first frame (`victory_gpu::world_started`), so a walk is the same in
+  every run whatever loading takes. `VICTORY_CAPTURE_AT_MS`: captures (as F9) at times after that frame.
+- The user's walk, `D:\victory-runs\routes\palm.tsv` (save 'openworld'): still at the start 0-20 s
+  (the palm beside the stairs invisible: the middle band), closer 21-30 s, still 31-35 s (visible), back
+  36-38 s, still 39.5 s on (invisible).
+- `D:\victory-runs\palm-test.ps1 -Label <x> [-Extra ...]`: replay, captures with targets and counts at
+  15, 33, 44 s, in about 2.5 minutes, nobody playing.
+
+palm-base1 (7932dc69, base-play.env): **reproduced**: 15 s palm missing, 33 s drawn, 44 s missing.
+`mesh f0aee31b12ffcb28 / pixel 5dff3af2d8f8a06e` runs 7 times close up and not at all in either start
+frame (one of rec3's four foliage types that vanish together); no draw type common to the three frames
+drops to zero only at the start (the medium detail is not culled to nothing on the GPU): **at the
+start position the title issues no draw for the palm**: its CPU-side decision.
+
+Next single action: record, per ExecuteIndirect of a captured frame, the title's return address (the
+code that issued it); take the one issuing f0aee31b close up; read that code (and what it reads) at the
+start position for the branch that leaves the palm out.
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
