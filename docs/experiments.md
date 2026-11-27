@@ -342,6 +342,39 @@ dynamic-slot exhaustion, levels without memory, unmapped by-address reads, indir
 records emptied), pipeline-wait drops ("0 being made"), the loop limit (only with fork-run -Profile
 amd -Diag). No magenta/purple filter exists in this base (docs/base-comparison-2026-11-26.md).
 
+```text
+Stage / blocker:          Stage 3, inventory item 3 (stale compiler-crash list)
+Baseline commit + exe:    b8a88c42 / a1efef7a (diag 8229C308...), then f656af43 (diag)
+Scene, route, settings:   save 'openworld', 240-300 s, base-play.env, warm cache handlefix
+Observed evidence:        warm-bad.txt (42 keys) came from the cache made before the REUSE fix;
+                          21 compute shaders refused, ~74 dispatches/frame; offline 35/35 compile.
+Hypothesis / falsification: they compile with the fixed translator; falsified by compiler crashes.
+One change:               s3-badlist: VICTORY_WARM_BAD=0. Then the code fix (f656af43): each line of
+                          warm-bad.txt carries known::fingerprint() (translator + settings + driver);
+                          only lines of the fingerprint in use count, so a translator fix or a new
+                          driver retries them; `victory warm` reads and writes the same form.
+Before / after:           s3-badlist: 20 of 21 shaders made; "refused" dispatches ~74/frame -> 0; the
+                          indirect drops of the steady scene 73/frame -> 0 (they were the same
+                          pipelines run by ExecuteIndirect: items 3 and 4 were one). One shader,
+                          compute f16876929fa64f9f (key 0629334f...), still crashes AMD's compiler
+                          (amdxc64 +0x861b9f, caught by the guard). s3-fp (defaults, f656af43): log
+                          "listed=43 counted=0", the same one crash, re-listed with fingerprint
+                          e9cc66c4ece2c90a; next runs skip it alone.
+Rendering checks:         world +6/+300/+1200 against s2-on (SSIM 0.70/0.91/0.92, scene drift): same
+                          scene, no new defect; the purple blinds unchanged (not these passes).
+Memory / stability:       0 device losses; commit peak 63.0-63.3 GB (64.2 before); frame time of the
+                          steady scene 59-61 ms (s3-badlist), 49-53 ms (s3-fp): not claimed as a gain
+                          (one run each, scene drift).
+Decision:                 keep (f656af43). Remaining: f16876929fa64f9f (a Stage 1 compiler repro case).
+Next single action:       inventory item 12 (below): "indirect kind N: prepare failed".
+```
+
+Item 12, found while checking this: in a heavier phase of the same save (2-4 min after the world
+appears, ~11,000 draws/frame instead of ~5,800), ExecuteIndirect calls are dropped with "indirect kind
+0/1/2/10: prepare failed", **500-1,650 executions/frame**, frames 70-250 ms. Present in earlier runs
+with the old crash list too (s2-off, share40, rec2, clean-on: 4-50 log lines each), so not caused by
+this change; s2-on never reached the phase. `draw.rs` ~4143.
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
