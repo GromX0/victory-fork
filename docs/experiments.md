@@ -491,6 +491,28 @@ Next single action:       one run with GPU-to-CPU read-backs off (VICTORY_READ_B
                           "which draw wrote this" tool for a captured frame.
 ```
 
+Defect 1, three more causes rejected (27 Nov, a444f002 diag, user playing the same yard and stairs,
+save 'openworld'; each verdict the user's):
+
+| Run | One change | What it tested | Check that it acted | User | Decision |
+| --- | --- | --- | --- | --- | --- |
+| s3-readback | VICTORY_READ_BACK=0 | texture-to-buffer read-backs carry the visibility data | - | still pops | rejected |
+| s3-picked | VICTORY_PICKED_WRITES=2 | writes through heap-picked views (never landed, refreshed over) | log: 1 buffer of 51 found written, 24 MB/frame declared and landed | still pops | rejected |
+| s3-stream | VICTORY_DSTORAGE_LOG | high-detail models arriving late or never (the object shows only from further away) | 138,389 requests, 0 failed; after the load (50,350): median 4 ms, p90 95 ms, p99 793 ms, max 860 ms; the title sees a status 9.7 ms after it is written | still pops | rejected (a 0.9 s worst case cannot keep an object away until the player walks off) |
+
+Code survey (read only) on the same question: no fence is seen complete before a declared copy-back
+lands; queries can only say "visible" (occlusion 2^20 samples, binary 1); writes through undeclared
+views, texture-to-texture copies and render targets never reach title memory.
+
+So: four ways data travels between GPU, CPU and disk are cleared. Leading hypothesis: the title's own
+GPU-side visibility (instance culling against the previous frame's depth, with a per-instance
+"was visible" history that drives the fades) gets one step wrong on the host and keeps visible objects
+culled or half-faded. Falsification test: in F9 frames, the counts the card actually draws per
+ExecuteIndirect (count buffers and instance counts read back after the frame): a missing object's
+draws present with 0 instances where the same view with the object shows them > 0.
+Next single action: build that counter (diagnostics only), then one play run with two F9 presses at
+the same spot (object missing / object there).
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
