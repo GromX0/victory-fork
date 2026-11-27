@@ -1268,29 +1268,57 @@ fn write_counts(presented: u64) {
 /// what a record or a pipeline draws on screen.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn skip_args(arguments: u64) -> bool {
-    skip_list(|ranges, _| ranges.iter().any(|&(lo, hi)| arguments >= lo && arguments < hi))
+    skip_list(|ranges, _, _| ranges.iter().any(|&(lo, hi)| arguments >= lo && arguments < hi))
+}
+
+/// [`skip_args`]'s lines `<name> <lo> <hi>` (decimal): the executions of
+/// pipeline `name` numbered `[lo, hi)` in recording order within each host
+/// list (from 0 at its reset) are dropped. Returns the execution's number
+/// when a line names the pipeline (for the ops line) and whether it is
+/// dropped.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn skip_ordinal(list: &crate::host::HostList, name: &str) -> (Option<u64>, bool) {
+    let rules: Vec<(String, u64, u64)> =
+        skip_list(|_, _, ords| ords.iter().filter(|o| name.contains(o.0.as_str())).cloned().collect());
+    if rules.is_empty() {
+        return (None, false);
+    }
+    static COUNTS: std::sync::Mutex<Option<std::collections::HashMap<(usize, String), u64>>> = std::sync::Mutex::new(None);
+    let key_name = rules[0].0.clone();
+    // A key of the list's own set, new after each reset.
+    let reset_key = usize::MAX - 0x5000 - (key_name.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize)) & 0xfff);
+    let fresh = list.first_use(reset_key);
+    let mut counts = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
+    let counts = counts.get_or_insert_with(Default::default);
+    let n = counts.entry((std::ptr::from_ref(list) as usize, key_name)).or_insert(0);
+    if fresh {
+        *n = 0;
+    }
+    let ordinal = *n;
+    *n += 1;
+    (Some(ordinal), rules.iter().any(|&(_, lo, hi)| ordinal >= lo && ordinal < hi))
 }
 
 /// [`skip_args`]'s one-word lines: whether a draw of pipeline `name` is dropped.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn skip_name(name: &str) -> bool {
-    skip_list(|_, names| names.iter().any(|n| name.contains(n.as_str())))
+    skip_list(|_, names, _| names.iter().any(|n| name.contains(n.as_str())))
 }
 
 #[cfg(feature = "diagnostics")]
-fn skip_list(test: impl FnOnce(&[(u64, u64)], &[String]) -> bool) -> bool {
-    type Lists = (Option<std::time::Instant>, Vec<(u64, u64)>, Vec<String>);
+fn skip_list<T: Default>(test: impl FnOnce(&[(u64, u64)], &[String], &[(String, u64, u64)]) -> T) -> T {
+    type Lists = (Option<std::time::Instant>, Vec<(u64, u64)>, Vec<String>, Vec<(String, u64, u64)>);
     static FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    static LISTS: std::sync::Mutex<Lists> = std::sync::Mutex::new((None, Vec::new(), Vec::new()));
+    static LISTS: std::sync::Mutex<Lists> = std::sync::Mutex::new((None, Vec::new(), Vec::new(), Vec::new()));
     let Some(file) = FILE.get_or_init(|| std::env::var_os("VICTORY_SKIP_ARGS").map(Into::into)) else {
-        return false;
+        return T::default();
     };
     let mut r = LISTS.lock().unwrap_or_else(|e| e.into_inner());
     if r.0.is_none_or(|t| t.elapsed().as_millis() >= 200) {
         r.0 = Some(std::time::Instant::now());
         let hex = |w: &str| u64::from_str_radix(w.trim_start_matches("0x"), 16).ok();
         let text = std::fs::read_to_string(file).unwrap_or_default();
-        let (mut ranges, mut names) = (Vec::new(), Vec::new());
+        let (mut ranges, mut names, mut ords) = (Vec::new(), Vec::new(), Vec::new());
         for line in text.lines() {
             let words: Vec<&str> = line.split_whitespace().collect();
             match words.as_slice() {
@@ -1300,20 +1328,27 @@ fn skip_list(test: impl FnOnce(&[(u64, u64)], &[String]) -> bool) -> bool {
                     }
                 }
                 [name] => names.push((*name).to_owned()),
+                [name, lo, hi] => {
+                    if let (Ok(lo), Ok(hi)) = (lo.parse(), hi.parse()) {
+                        ords.push(((*name).to_owned(), lo, hi));
+                    }
+                }
                 _ => {}
             }
         }
-        if ranges != r.1 || names != r.2 {
+        if ranges != r.1 || names != r.2 || ords != r.3 {
             tracing::info!(
                 ranges = ?ranges.iter().map(|(a, b)| format!("{a:#x}-{b:#x}")).collect::<Vec<_>>(),
                 ?names,
+                ?ords,
                 "VICTORY_SKIP_ARGS: dropped now"
             );
         }
         r.1 = ranges;
         r.2 = names;
+        r.3 = ords;
     }
-    test(&r.1, &r.2)
+    test(&r.1, &r.2, &r.3)
 }
 
 /// The ranges of `VICTORY_DUMP` (`<address>,<len>` pairs, `;` apart,

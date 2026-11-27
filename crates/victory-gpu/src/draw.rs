@@ -4031,6 +4031,16 @@ impl State {
             why("dropped by VICTORY_SKIP_ARGS");
             return false;
         }
+        #[cfg(feature = "diagnostics")]
+        let ordinal = {
+            let (ordinal, dropped) = crate::capture::skip_ordinal(list, &p.name);
+            if dropped {
+                list.note_op(|| format!("SKIPPED ord {} {} at {arguments:#x}", ordinal.unwrap_or(0), p.name));
+                why("dropped by VICTORY_SKIP_ARGS (number)");
+                return false;
+            }
+            ordinal
+        };
         let len = u64::from(stride) * u64::from(max.max(1));
         let Some(args) = crate::shadow::find_any(arguments, len) else {
             why("arguments outside title buffers");
@@ -4164,7 +4174,8 @@ impl State {
         }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| {
-            self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
+            let ord = ordinal.map_or(String::new(), |o| format!(" ord {o}"));
+            self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}{ord}"), kind == DISPATCH)
         });
         #[cfg(feature = "diagnostics")]
         list.ran_indirect(p.pso.as_raw() as usize, &p.name, kind, max, &self.user);
