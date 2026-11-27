@@ -283,8 +283,11 @@ Scene, route, settings:   save 'openworld' (snapshot, at home), scripted, 300 s 
                           Both: VICTORY_CAPTURE_WORLD (+2,+6,+30,+80,+150,+300,+600,+1200 frames
                           after the first 3D frame), typeperf paging counters every second
                           (D:\victory-runs\stage2-close.ps1, stage2-compare.ps1). Route approximate:
-                          the harness only presses Start, so no repeated traversal; the scene's flow
-                          (character pose, camera drift, traffic) diverges between runs.
+                          the harness only presses Start. CORRECTION (user, 27 Nov): the user was
+                          moving the character around during these and the s3-* test runs, so they
+                          are not idle runs: unscripted, different movement per run. That explains
+                          the camera/pose differences at equal frames and the "heavy phase" starting
+                          at different times (s2-on never reached it). Frames +2/+6 precede input.
 Observed evidence:        private commit 28.9 -> 31.7 -> 31.9 -> 32.1 GB at minutes 1-4 (on), 29.7 ->
                           32.5 (off); clean-on (12 min, same save) flat at 33.0-33.2 GB from minute 3;
                           rec2 (played) 30.5 -> 32.4 GB over minutes 2-4. Host copies 4.4 GB and host
@@ -306,8 +309,9 @@ Rendering checks:         +6 frames: same house and garden; with the changes OFF
                           the purple window blinds are in BOTH runs (Stage 3 defect, not memory). No
                           defect in s2-on that s2-off lacks.
 Memory / stability:       0 device losses, 0 crashes in both runs.
-Decision:                 Stage 2 gate PASSED on this route, with limits: idle route (no scripted
-                          traversal), 5-12 minute runs; the card still overflows ~10 GB into the PC's
+Decision:                 Stage 2 gate PASSED on this route, with limits: user-moved, unscripted play
+                          (not a repeated identical traversal), 5-12 minute runs; equal-frame
+                          comparisons hold for +2/+6 only; the card still overflows ~10 GB into the PC's
                           memory and the PC runs at ~1 GB free, so paging bursts cost ~5 ms where they
                           occur (Stage 6 hitch work, not a Stage 2 blocker on this evidence).
 Next single action:       Stage 3, step 1: the inventory of skipped pipelines, dropped draws
@@ -370,7 +374,8 @@ Next single action:       inventory item 12 (below): "indirect kind N: prepare f
 ```
 
 Item 12, found while checking this: in a heavier phase of the same save (2-4 min after the world
-appears, ~11,000 draws/frame instead of ~5,800), ExecuteIndirect calls are dropped with "indirect kind
+appears, ~11,000 draws/frame instead of ~5,800; most likely where the user moved the character, see
+the correction in the Stage 2 record), ExecuteIndirect calls are dropped with "indirect kind
 0/1/2/10: prepare failed", **500-1,650 executions/frame**, frames 70-250 ms. Present in earlier runs
 with the old crash list too (s2-off, share40, rec2, clean-on: 4-50 log lines each), so not caused by
 this change; s2-on never reached the phase. `draw.rs` ~4143.
