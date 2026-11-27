@@ -973,40 +973,85 @@ thread_local! {
 /// the decision of whether to draw sits a frame or two up.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn note_callers() {
-    use windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
-    use windows_sys::Win32::System::LibraryLoader::{
-        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleHandleExW,
-        GetModuleHandleW,
-    };
     if folder().is_none() || !listed(crate::queue::presented() + 1) {
         return;
     }
-    let mut frames = [std::ptr::null_mut(); 24];
-    // SAFETY: room for the frames asked for.
-    let n = unsafe { RtlCaptureStackBackTrace(1, frames.len() as u32, frames.as_mut_ptr(), std::ptr::null_mut()) } as usize;
-    // SAFETY: our own executable's handle.
-    let ours = unsafe { GetModuleHandleW(std::ptr::null()) } as usize;
-    let mut out = Vec::new();
-    for &frame in &frames[..n] {
+    let found = title_return_addresses(6);
+    CALLERS.with(|c| *c.borrow_mut() = found.iter().map(|a| format!("+{a:#x}")).collect::<Vec<_>>().join("<"));
+}
+
+/// The first `n` return addresses into the title's image (`victory-image-*`)
+/// on this thread's stack, as offsets into it, by a scan of the stack: the
+/// unwinder loses its way at the generated stubs between the title's calls
+/// and ours. A value counts when it points into the title's image right
+/// after a call instruction (`call rel32`, or `call` through a register or
+/// memory: 0xFF with ModRM reg 2, two to seven bytes back).
+#[cfg(feature = "diagnostics")]
+fn title_return_addresses(n: usize) -> Vec<usize> {
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
+        GetModuleHandleExW,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentThreadStackLimits;
+    // The title's image: (base, end), found once from any address in it.
+    static TITLE: std::sync::OnceLock<std::sync::Mutex<Option<(usize, usize)>>> = std::sync::OnceLock::new();
+    let title = TITLE.get_or_init(|| std::sync::Mutex::new(None));
+    let module_of = |addr: usize| -> Option<(usize, bool)> {
         let mut module = std::ptr::null_mut();
         // SAFETY: looks up the module holding the address, no reference.
-        let found = unsafe {
+        let ok = unsafe {
             GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                frame as *const u16,
+                addr as *const u16,
                 &mut module,
             )
         };
-        let module = if found != 0 { module as usize } else { 0 };
-        if module == ours {
-            continue;
+        if ok == 0 {
+            return None;
         }
-        out.push(if module != 0 { format!("+{:#x}", frame as usize - module) } else { format!("{frame:?}") });
-        if out.len() == 4 {
-            break;
+        let mut name = [0u16; 260];
+        // SAFETY: room for the name.
+        let len = unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
+        let is_title = String::from_utf16_lossy(&name[..len.min(name.len())]).contains("victory-image");
+        Some((module as usize, is_title))
+    };
+    let (mut low, mut high) = (0usize, 0usize);
+    // SAFETY: two out values.
+    unsafe { GetCurrentThreadStackLimits(&mut low, &mut high) };
+    let here = std::ptr::addr_of!(low) as usize & !7;
+    let mut out = Vec::new();
+    let mut at = here;
+    while at + 8 <= high && out.len() < n {
+        // SAFETY: inside this thread's stack, below its base.
+        let v = unsafe { std::ptr::read_volatile(at as *const usize) };
+        at += 8;
+        let known = *title.lock().unwrap_or_else(|e| e.into_inner());
+        let base = match known {
+            Some((base, end)) if v >= base + 8 && v < end => base,
+            Some(_) => continue,
+            None => match module_of(v) {
+                Some((base, true)) => {
+                    // SAFETY: the image's headers are mapped: e_lfanew, then SizeOfImage.
+                    let size = unsafe {
+                        let pe = base + std::ptr::read_unaligned((base + 0x3c) as *const u32) as usize;
+                        std::ptr::read_unaligned((pe + 0x50) as *const u32) as usize
+                    };
+                    *title.lock().unwrap_or_else(|e| e.into_inner()) = Some((base, base + size));
+                    base
+                }
+                _ => continue,
+            },
+        };
+        // SAFETY: the seven bytes before an address in the title's mapped
+        // image (at least eight past its base).
+        let before: [u8; 7] = unsafe { std::ptr::read_unaligned((v - 7) as *const [u8; 7]) };
+        let call_rel = before[2] == 0xE8;
+        let call_ind = (2..=7).any(|k| before[7 - k] == 0xFF && (before[8 - k] >> 3) & 7 == 2);
+        if call_rel || call_ind {
+            out.push(v - base);
         }
     }
-    CALLERS.with(|c| *c.borrow_mut() = out.join("<"));
+    out
 }
 
 /// After `list` recorded an `ExecuteIndirect` of `max` records of `kind`
