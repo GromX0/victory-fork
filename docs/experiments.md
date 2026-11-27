@@ -454,6 +454,43 @@ time belongs with Stage 4/6 measurements on a fully warm cache.
 Next single action (Stage 3): the purple blinds/glass traced to their first wrong pass (save
 'openworld', VICTORY_CAPTURE_FRAMES + VICTORY_DUMP_TARGETS at the frame where they show, user idle).
 
+### Stage 3: what the user's F9 captures show (s3-purple, 47391920, 27 Nov)
+
+New tool (47391920): with VICTORY_CAPTURE set, F9 saves the next frame (picture, ops list, and with
+VICTORY_DUMP_TARGETS what it renders to). 12 frames caught while playing (5001 ... 13035). Six kinds of
+defect, by the user's report the biggest first:
+
+| # | Defect | Frames | Known |
+| --- | --- | --- | --- |
+| 1 | Objects missing up close or stuck half-faded (dither holes), visible again from further away or another angle | 5001, 5059 (same palm half-faded 4 s apart); 6707 (a tree over the boat missing) vs 6931 (there) | the holes are already in the depth buffer (frame 5001 target 06): drawn faded from the first pass, not TAA; the fade does not finish |
+| 2 | Purple/magenta foliage, in shade and on frond undersides | 6931, 13035; pinkish fronds 11338-11882 | refusals are 0, so not the old texture cause |
+| 3 | Shadows near black (no bounced light) | 6707, 6931, 11273 | ray-traced light absent (builder off, item 1), stand-in only |
+| 4 | Blue rectangles on shaded ground | 6707, 6931 (under the stilt house) | not traced |
+| 5 | Purple glass/blinds | s2/s3 captures | not traced |
+| 6 | Smear/ghosting | rec1, rec2 | not traced |
+
+2-5 are all lighting/reflection results (wrong only in shade, on glass, at angles): the leading common
+cause is item 1 of the inventory (the structure builder off, rays find nothing). Not counted: the bright
+pink shrubs of 12084/12139 (flowering shrubs).
+
+```text
+Stage / blocker:          Stage 3, defect 1 (objects missing / stuck half-faded)
+Baseline commit + exe:    47391920 (diag)
+Scene, route, settings:   save 'openworld', user playing through the same yard and stairs;
+                          play-safe.env = base-play.env without its 13 speed shortcuts (THIN,
+                          CARD_STEPS, JOIN_PARTS, UPLOAD_AHEAD, RELAY=0, RELAY_COPY, WIDE_BACK=0,
+                          JOIN_COPIES, CARD_REHASH_RUNS, MAP_THREADS=1, INDIRECT_WINDOW,
+                          INDIRECT_BATCH=0, TEXTURE_NO_WAIT), those on by default set off
+Hypothesis / falsification: a speed shortcut delays when GPU-written data is seen, so the fade state
+                          never advances; falsified if the defect is unchanged with all of them off.
+Result (user):            "exactly the same" (run stopped early by the user, s3-safe).
+Decision:                 rejected: none of the 13 shortcuts causes defect 1.
+Next single action:       one run with GPU-to-CPU read-backs off (VICTORY_READ_BACK=0), diagnostic
+                          only: if the fades change sharply, the game's visibility decisions come
+                          from read-back data and that path is traced next; if not, a per-pixel
+                          "which draw wrote this" tool for a captured frame.
+```
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
