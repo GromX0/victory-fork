@@ -1271,6 +1271,8 @@ fn write_counts(presented: u64) {
 #[cfg(feature = "diagnostics")]
 static WATCHED_PAGES: std::sync::Mutex<Option<std::collections::HashSet<usize>>> = std::sync::Mutex::new(None);
 #[cfg(feature = "diagnostics")]
+static WATCHED_RANGES: std::sync::Mutex<std::collections::BTreeMap<usize, usize>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+#[cfg(feature = "diagnostics")]
 static WATCHED_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "diagnostics")]
 static WATCH_SITES: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
@@ -1285,6 +1287,25 @@ pub(crate) fn watch_pipe(name: &str) -> bool {
         .any(|p| name.contains(p.as_str()))
 }
 
+/// Whether a buffer read through `label` (`<shader> s<slot>+<offset>`) is
+/// watched: `VICTORY_WATCH_SLOTS` (`s1+72,s1+56` unless given) names the
+/// table places; any shader.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn watch_slot(label: &str) -> bool {
+    static SLOTS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| {
+            std::env::var("VICTORY_WATCH_SLOTS")
+                .unwrap_or_else(|_| "s1+72,s1+56".into())
+                .split(',')
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .iter()
+        .any(|s| label == s || label.ends_with(&format!(" {s}")))
+}
+
 /// Adds the pages of `[at, at + len)` to the watched ones.
 #[cfg(feature = "diagnostics")]
 pub(crate) fn watch_range(at: u64, len: usize) {
@@ -1295,6 +1316,11 @@ pub(crate) fn watch_range(at: u64, len: usize) {
     }
     for page in (at as usize >> 12)..=((at as usize + len.max(1) - 1) >> 12) {
         set.insert(page);
+    }
+    let mut r = WATCHED_RANGES.lock().unwrap_or_else(|e| e.into_inner());
+    if r.len() < 50_000 {
+        let e = r.entry(at as usize).or_insert(0);
+        *e = (*e).max(at as usize + len);
     }
     WATCHED_ANY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
@@ -1311,10 +1337,12 @@ pub(crate) fn watched_fault(at: usize, rip: usize) {
     if !hit {
         return;
     }
+    // Exactly inside one of the buffers, or only on its page.
+    let exact = WATCHED_RANGES.try_lock().ok().is_some_and(|r| r.range(..=at).next_back().is_some_and(|(_, &end)| at < end));
     let base = crate::TITLE_IMAGE.get().map_or(0, |t| t.0);
     let here = if base != 0 && rip > base { format!("+{:#x}", rip - base) } else { format!("{rip:#x}") };
     let callers: Vec<String> = title_return_addresses(8).iter().map(|a| format!("+{a:#x}")).collect();
-    let key = format!("{here} <{}", callers.join("<"));
+    let key = format!("{} {here} <{}", if exact { "IN" } else { "page" }, callers.join("<"));
     if let Ok(mut s) = WATCH_SITES.try_lock() {
         *s.get_or_insert_with(Default::default).entry(key).or_insert(0) += 1;
     }

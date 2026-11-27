@@ -3731,7 +3731,15 @@ impl State {
                 let what = match (u.root, self.roots_ref(compute).get(usize::from(u.slot))) {
                     (RootType::Table, Some(Root::Table(table))) => {
                         let handle = table + u64::from(u.table_offset_dwords) * 4;
-                        describe(crate::descriptor::view(handle).as_ref())
+                        let had = WORDS_READ.with(|w| w.borrow().len());
+                        let text = describe(crate::descriptor::view(handle).as_ref());
+                        let label = format!("{} s{}+{}", stage.shader.hash, u.slot, u.table_offset_dwords);
+                        WORDS_READ.with(|w| {
+                            for e in w.borrow_mut().iter_mut().skip(had) {
+                                e.3.clone_from(&label);
+                            }
+                        });
+                        text
                     }
                     (root, _) => format!("{root:?}"),
                 };
@@ -4182,8 +4190,10 @@ impl State {
         #[cfg(feature = "diagnostics")]
         if crate::capture::watch_pipe(&p.name) {
             WORDS_READ.with(|w| {
-                for (at, n, _) in w.borrow().iter() {
-                    crate::capture::watch_range(*at, n * 4);
+                for (at, n, _, label) in w.borrow().iter() {
+                    if crate::capture::watch_slot(label) {
+                        crate::capture::watch_range(*at, n * 4);
+                    }
                 }
             });
         }
@@ -4622,7 +4632,7 @@ fn view_state(view: Option<&View>) -> String {
 thread_local! {
     /// The small raw buffers [`describe`] printed the words of since the
     /// last execution took them: address, words, bytes then.
-    static WORDS_READ: std::cell::RefCell<Vec<(u64, usize, Vec<u8>)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static WORDS_READ: std::cell::RefCell<Vec<(u64, usize, Vec<u8>, String)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// With `VICTORY_OPS_WORDS=1`: the words printed for the execution just
@@ -4635,7 +4645,7 @@ fn words_at_submit(list: &HostList, tag: String) {
         return;
     }
     list.defer(move || {
-        for (at, n, before) in &read {
+        for (at, n, before, _) in &read {
             let mut now = vec![0u8; n * 4];
             if !crate::host::read_into(*at as *const u8, &mut now) {
                 continue;
@@ -4706,7 +4716,7 @@ fn describe(view: Option<&View>) -> String {
                     let words: Vec<String> =
                         bytes.chunks_exact(4).map(|w| format!("{:08x}", u32::from_le_bytes([w[0], w[1], w[2], w[3]]))).collect();
                     text.push_str(&format!(" words [{}]", words.join(" ")));
-                    WORDS_READ.with(|w| w.borrow_mut().push((at, n, bytes)));
+                    WORDS_READ.with(|w| w.borrow_mut().push((at, n, bytes, String::new())));
                 }
             }
             text
