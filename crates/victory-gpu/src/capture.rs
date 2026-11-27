@@ -236,6 +236,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     reread_probes(frame);
     #[cfg(feature = "diagnostics")]
     recheck_words(frame);
+    #[cfg(feature = "diagnostics")]
+    watch_sites_line(frame);
     write_counts(frame);
     #[cfg(feature = "diagnostics")]
     write_dumps(frame);
@@ -1259,6 +1261,76 @@ fn write_counts(presented: u64) {
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(folder.join(format!("frame-{frame}-counts.txt"))) {
             let _ = f.write_all(text.as_bytes());
         }
+    }
+}
+
+/// `VICTORY_WATCH_PIPES=<hash>,..`: the 4 KiB pages of the small raw
+/// buffers (`VICTORY_OPS_WORDS`) that draws of those pipelines read are
+/// watched: the title's write faults on them ([`watched_fault`]) name the
+/// title code that wrote them.
+#[cfg(feature = "diagnostics")]
+static WATCHED_PAGES: std::sync::Mutex<Option<std::collections::HashSet<usize>>> = std::sync::Mutex::new(None);
+#[cfg(feature = "diagnostics")]
+static WATCHED_ANY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "diagnostics")]
+static WATCH_SITES: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+
+/// Whether draws of pipeline `name` have their buffers' pages watched.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn watch_pipe(name: &str) -> bool {
+    static PIPES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    PIPES
+        .get_or_init(|| std::env::var("VICTORY_WATCH_PIPES").unwrap_or_default().split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect())
+        .iter()
+        .any(|p| name.contains(p.as_str()))
+}
+
+/// Adds the pages of `[at, at + len)` to the watched ones.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn watch_range(at: u64, len: usize) {
+    let mut w = WATCHED_PAGES.lock().unwrap_or_else(|e| e.into_inner());
+    let set = w.get_or_insert_with(Default::default);
+    if set.len() > 20_000 {
+        return;
+    }
+    for page in (at as usize >> 12)..=((at as usize + len.max(1) - 1) >> 12) {
+        set.insert(page);
+    }
+    WATCHED_ANY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// From the write-fault handler (the faulting thread): a write at `at` by
+/// the instruction at `rip`. On a watched page: the instruction and the
+/// title's return addresses on this stack are counted.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn watched_fault(at: usize, rip: usize) {
+    if !WATCHED_ANY.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let hit = WATCHED_PAGES.try_lock().ok().and_then(|w| w.as_ref().map(|s| s.contains(&(at >> 12)))).unwrap_or(false);
+    if !hit {
+        return;
+    }
+    let base = crate::TITLE_IMAGE.get().map_or(0, |t| t.0);
+    let here = if base != 0 && rip > base { format!("+{:#x}", rip - base) } else { format!("{rip:#x}") };
+    let callers: Vec<String> = title_return_addresses(8).iter().map(|a| format!("+{a:#x}")).collect();
+    let key = format!("{here} <{}", callers.join("<"));
+    if let Ok(mut s) = WATCH_SITES.try_lock() {
+        *s.get_or_insert_with(Default::default).entry(key).or_insert(0) += 1;
+    }
+}
+
+/// The watched pages' writers so far, most frequent first, logged.
+#[cfg(feature = "diagnostics")]
+fn watch_sites_line(presented: u64) {
+    if presented % 64 != 0 {
+        return;
+    }
+    let Some(sites) = WATCH_SITES.lock().unwrap_or_else(|e| e.into_inner()).clone() else { return };
+    let mut v: Vec<(String, u64)> = sites.into_iter().collect();
+    v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (site, n) in v.iter().take(12) {
+        tracing::info!(presented, n, site = site.as_str(), "VICTORY_WATCH_PIPES: a writer of the watched buffers");
     }
 }
 

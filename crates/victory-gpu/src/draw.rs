@@ -4180,6 +4180,14 @@ impl State {
             self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}{ord}"), kind == DISPATCH)
         });
         #[cfg(feature = "diagnostics")]
+        if crate::capture::watch_pipe(&p.name) {
+            WORDS_READ.with(|w| {
+                for (at, n, _) in w.borrow().iter() {
+                    crate::capture::watch_range(*at, n * 4);
+                }
+            });
+        }
+        #[cfg(feature = "diagnostics")]
         words_at_submit(
             list,
             format!("{} ord {} recorded-frame {}", p.name, ordinal.map_or("-".to_owned(), |o| o.to_string()), crate::queue::presented() + 1),

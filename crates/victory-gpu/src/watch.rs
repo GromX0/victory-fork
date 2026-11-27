@@ -3803,6 +3803,10 @@ pub(crate) fn install() {
             };
         }
         let at = r.ExceptionInformation[1];
+        #[cfg(feature = "diagnostics")]
+        if ours.is_none() {
+            crate::capture::watched_fault(at, r.ExceptionAddress as usize);
+        }
         let block = at / BLOCK;
         if ours.is_none()
             && PROTECTED.any(block, block + 1)
