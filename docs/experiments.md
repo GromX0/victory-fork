@@ -671,3 +671,42 @@ rt-soak2 (8ebc2b11-era build, VICTORY_BVH_BUILDER=1, save 'openworld', idle, sto
 user's request): **0 errors, 0 device losses**; after loading 4.6-15.6 fps, median 9.8; private memory
 33.9 -> 36.8 GB over the run (still rising at the end: to be watched when ray tracing is taken up again).
 Ray tracing parked; the disappearing objects are the active work.
+
+### Disappearing objects: validated tools and verified observations (27 Nov, morning)
+
+Tools, each checked before use:
+- **Capture completeness.** VICTORY_CAPTURE_SPAN=6 holds 6.6-8.9 frames' worth of draw operations (the
+  log's draws a frame as reference); single-frame captures hold 0-3, so absence is read from spans only.
+- **Callers (b2bffa15).** The stack scan finds nothing with the play switches (the title's draw calls
+  are recorded later on our worker threads: the scan ran 3.5 KB below the top of a fresh stack, 0 title
+  values). With all speed shortcuts off (play-safe.env) and VICTORY_THIN=0 it finds title return
+  addresses; checked in cdb on game_scarlett_master.exe (read only): each follows a call instruction and
+  they chain (+0x9786ab calls +0x24962e0 ... +0x2496802 calls +0x248ca90, which holds +0x248cbc1, the
+  vtable call into the layer). Validated.
+- **Positioning by hand.** VICTORY_INPUT_LIVE (a file the pad is read from) and VICTORY_CAPTURE_TRIGGER
+  (8ebc2b11); `D:\victory-runs\drive.sh stick|snap`.
+- **Arguments as written vs as run (5924cff0).** Counts lines give title memory at the arguments when
+  recorded and at the frame's present, beside what the card ran.
+- A hardware write breakpoint (cdb attached) on 0xd9991fc60 caught no write in ~10 frames (the debugger
+  slowed the game to 0.2 fps; the game hung after detach): inconclusive, not used.
+
+Verified (session palm3, save 'openworld', play-safe.env, complete spans):
+1. The stairs palm (fan palm at the foot of the stairs) is drawn in the opening shot (far), drawn from
+   the deck in one span (p5) and missing from nearly the same viewpoint in another (q4) and after a
+   step (p6): it flips at a fixed place.
+2. Missing: pipeline `mesh fd08d25a / pixel 2af15279` (and `mesh 18bbb989`, same pixel shader) not issued
+   (p6) or issued with 0 groups (q4); visible: 84 executions, 652 groups (p5); far: 44, 1,438.
+3. Its arguments are not the title's CPU writes: title memory at them reads 0 while the card ran 22, 140
+   ...; a writable buffer view (address 57,063,513,120, 32 KiB) covers them, bound by four compute
+   passes, `3b471c12`, `9f017d90`, `764ca63d`, `87bf9e3f`, which run in both states (9f017d90 3,006
+   groups visible and missing; 87bf9e3f 12,024 both).
+4. compute `e8c96235` (6 dispatches) ran 6,578 groups visible and 0 missing; its arguments (0xd9991fc60)
+   are in the title's per-frame CPU data (beside a camera constant buffer) and title memory holds real
+   counts there (72-82 in the opening shot).
+
+**Not yet established: the first difference that accounts for the disappearance.** The palm's draw
+arguments are produced on the GPU by culling/argument passes that run in both states; what they read
+that differs between the states is the next question.
+Next single action: in a visible and a missing span at the same place, dump the 32 KiB argument buffer
+as the card has it after the four passes and the inputs they read (their tables in the ops), and find
+the first input that differs for the palm's records.
