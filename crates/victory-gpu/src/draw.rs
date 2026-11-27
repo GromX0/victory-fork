@@ -4207,6 +4207,8 @@ impl State {
         if kind == MESH {
             self.mesh_scissor(list, true);
         }
+        #[cfg(feature = "diagnostics")]
+        let stats_slot = if kind == MESH { crate::capture::mesh_stats::begin(list, &p.name) } else { None };
         // SAFETY: an open list with everything set; the scratch buffer and
         // host copies are kept alive by the list, and the signature is cached.
         unsafe {
@@ -4219,6 +4221,10 @@ impl State {
                 counter.as_ref().map_or(0, |(s, at)| s.offset(*at)),
             )
         };
+        #[cfg(feature = "diagnostics")]
+        if let Some(slot) = stats_slot {
+            crate::capture::mesh_stats::end(list, slot, &p.name);
+        }
         if kind == MESH {
             self.mesh_scissor(list, false);
         }

@@ -989,3 +989,26 @@ remain a candidate for the empty level.
 The fix (`crates/victory-gpu/src/pipeline.rs`, `VICTORY_LOD_NEAR`): unset/`1` = no crossfade and the two
 level-1 cases drawn at level 0; `all` = every drawn object at level 0; `0` = the title's code. Applied
 only where the four dwords are the expected ones (else logged and left).
+
+### Pop-in across the board: user-played tests (27 Nov, 19:00-20:25, 6f4db9ed + diagnostics)
+
+The user played their own save (base-play.env unless noted) and judged each build; every patch's dwords
+were checked with `shader-info --disasm` and its load seen in the log.
+
+| Run | Change | User | Decision |
+| --- | --- | --- | --- |
+| usertest | 6f4db9ed default (`VICTORY_LOD_NEAR`), play-safe.env | stairs palm fixed; other objects still pop | (play-safe.env ~5 fps: the 13 speed shortcuts are off; base-play.env 15-30 fps) |
+| userfast | `VICTORY_LOD_NEAR=all` | palm no longer ghosts but switches on/off | - |
+| usernofade | all + distance fade gate off in `55679a05` (v5 = 1) | still pops | the tree pass's distance fade: rejected |
+| userfamily | `patch-family.txt`: the 30 `InstanceCulling:CS_{Tree,Prop,Grass,Simple,Slod}_BatchCull*` shaders (one source, c47eb2b0) found by pattern; 24 matched: every object at level 0, no crossfade | pop-in across the board unchanged | level choice in the GPU culling family: not the general cause |
+| usernocpu | `42683eeb` (`CS_InitDepthPyramidWithCpuOcclusion3x3`): the CPU occluder samples (128x72 R32 the title's CPU draws, uploaded by the layer) left out of the pyramid (9 x `v_max_f32` -> `v_mov_b32`) + default tree fix | **stairs palm fully solid, no ghost, no pop**; others still pop | CPU occluders reach the GPU stale: part of the palm's defect |
+| usercombo, usercombo2 | family + CPU occluders off (+ distance fade off in 23 shaders, `patch-family-nofade.txt`) | the palm by the house fixed too; everything else still ghosts or pops | - |
+| userback | `VICTORY_TEXTURE_BACK` + 1024x512f41 (depth pyramid) and 9 small GPU-written texture kinds | no change | texture copy-back: rejected |
+| userw32 | `VICTORY_WAVE32` for all 77 InstanceCulling / meshlet_culling / depth_pyramid shaders (27 loaded, 0 failed) | no change ("far visible, middle gone, close there", every object) | wave64 on RDNA4 in the culling: rejected |
+| userstats2 | new `VICTORY_MESH_STATS=all` (diagnostics: pipeline-statistics-1 + occlusion query around every indirect mesh draw, totals per mesh/pixel shader logged) | - | the per-slot mesh draws of empty detail levels (`903776ba`, `fe660f2d`) **do land pixels**: 72% / 85% of pixel-shader runs pass (tree leaves `adc5c689`: 16%) |
+
+Streaming (s3-stream) and read-backs (s3-readback) had been rejected at 03:10 and were not the question.
+The user's description of every object: far detail level shown, middle gone, close shown.
+**Corrected:** the per-slot path is not "drawing nothing"; its draws reach the screen. Not yet known where
+(wrong place/transform, wrong target, or overdrawn). Next: in an F9 frame, the per-slot draws' output
+(target and position) against the same object's level-0 draw.

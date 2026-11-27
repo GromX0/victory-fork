@@ -242,6 +242,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     present_sleep();
     write_counts(frame);
     #[cfg(feature = "diagnostics")]
+    mesh_stats::at_present(frame);
+    #[cfg(feature = "diagnostics")]
     write_dumps(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let before = LAST.swap(drawn, Relaxed);
@@ -1808,5 +1810,193 @@ mod tests {
         assert_eq!(super::to_rgba(89, 1, 1, 4, &xr), Some(vec![255, 127, 0, 255]));
         // B8G8R8A8 still swaps to RGBA.
         assert_eq!(super::to_rgba(87, 1, 1, 4, &[1, 2, 3, 4]), Some(vec![3, 2, 1, 255]));
+    }
+}
+
+/// `VICTORY_MESH_STATS=all|<hash>[,<hash>...]` (diagnostics): every mesh draw
+/// run through `ExecuteIndirect` whose mesh shader matches (`all`: every one)
+/// is wrapped in a pipeline-statistics query, and every ~5 s the totals per
+/// mesh shader are logged: draws, mesh-shader groups run (`MSInvocations`),
+/// primitives they emitted (`MSPrimitives`), primitives the rasterizer was
+/// given and kept after clipping (`CInvocations`, `CPrimitives`) and pixel
+/// shader invocations (`PSInvocations`). For telling a draw whose shader
+/// emits nothing from one whose primitives are lost after it (the per-slot
+/// mesh draws of the culling pass's empty detail levels, 27 Nov).
+#[cfg(feature = "diagnostics")]
+pub(crate) mod mesh_stats {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use windows::Win32::Graphics::Direct3D12::*;
+
+    const SLOTS: u32 = 1 << 16;
+    const SIZE: u64 = std::mem::size_of::<D3D12_QUERY_DATA_PIPELINE_STATISTICS1>() as u64;
+
+    struct Stats {
+        heap: ID3D12QueryHeap,
+        buffer: ID3D12Resource,
+        mapped: usize,
+        /// Occlusion queries (samples that passed every test and were not
+        /// discarded), one u64 a slot.
+        occ: ID3D12QueryHeap,
+        occ_buffer: ID3D12Resource,
+        occ_mapped: usize,
+    }
+    // SAFETY: the heap and buffer are free-threaded D3D12 objects; the
+    // mapping is only read.
+    unsafe impl Send for Stats {}
+    // SAFETY: as above.
+    unsafe impl Sync for Stats {}
+
+    fn filter() -> Option<&'static Vec<String>> {
+        static F: OnceLock<Option<Vec<String>>> = OnceLock::new();
+        F.get_or_init(|| {
+            let v = std::env::var("VICTORY_MESH_STATS").ok()?;
+            Some(v.split([',', ';', ' ']).map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect())
+        })
+        .as_ref()
+    }
+
+    fn stats() -> Option<&'static Stats> {
+        static S: OnceLock<Option<Stats>> = OnceLock::new();
+        S.get_or_init(|| {
+            let host = crate::host::host()?;
+            let desc = D3D12_QUERY_HEAP_DESC { Type: D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS1, Count: SLOTS, NodeMask: 0 };
+            let mut heap: Option<ID3D12QueryHeap> = None;
+            // SAFETY: plain creation.
+            if let Err(e) = unsafe { host.device.CreateQueryHeap(&desc, &mut heap) } {
+                tracing::warn!(error = %e, "VICTORY_MESH_STATS: no pipeline-statistics-1 query heap (mesh statistics unsupported?)");
+                return None;
+            }
+            let buffer = host.read_back_buffer(u64::from(SLOTS) * SIZE)?;
+            let mut mapped = std::ptr::null_mut();
+            // SAFETY: a read-back buffer, mapped once for the process.
+            unsafe { buffer.Map(0, None, Some(&mut mapped)) }.ok()?;
+            let desc = D3D12_QUERY_HEAP_DESC { Type: D3D12_QUERY_HEAP_TYPE_OCCLUSION, Count: SLOTS, NodeMask: 0 };
+            let mut occ: Option<ID3D12QueryHeap> = None;
+            // SAFETY: plain creation.
+            unsafe { host.device.CreateQueryHeap(&desc, &mut occ) }.ok()?;
+            let occ_buffer = host.read_back_buffer(u64::from(SLOTS) * 8)?;
+            let mut occ_mapped = std::ptr::null_mut();
+            // SAFETY: as above.
+            unsafe { occ_buffer.Map(0, None, Some(&mut occ_mapped)) }.ok()?;
+            tracing::info!("VICTORY_MESH_STATS: pipeline statistics and occlusion on for mesh draws");
+            Some(Stats { heap: heap?, buffer, mapped: mapped as usize, occ: occ?, occ_buffer, occ_mapped: occ_mapped as usize })
+        })
+        .as_ref()
+    }
+
+    /// The mesh shader hash in a pipeline name (`... mesh <16 hex> ...`).
+    fn mesh_of(name: &str) -> Option<&str> {
+        let at = name.find("mesh ")? + 5;
+        name.get(at..at + 16)
+    }
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    static PENDING: Mutex<Vec<(u32, u64, String)>> = Mutex::new(Vec::new());
+
+    /// Before a mesh draw: begins a query when the draw's mesh shader is asked for.
+    pub(crate) fn begin(list: &crate::host::HostList, name: &str) -> Option<u32> {
+        let f = filter()?;
+        let mesh = mesh_of(name)?;
+        if !f.iter().any(|h| h == "all" || mesh.starts_with(h.as_str())) {
+            return None;
+        }
+        let s = stats()?;
+        let slot = NEXT.fetch_add(1, Ordering::Relaxed) % SLOTS;
+        // SAFETY: an open list; a slot of our heap.
+        unsafe {
+            list.list.BeginQuery(&s.heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS1, slot);
+            list.list.BeginQuery(&s.occ, D3D12_QUERY_TYPE_OCCLUSION, slot);
+        }
+        Some(slot)
+    }
+
+    /// After that draw: ends the query and resolves it into the read-back buffer.
+    pub(crate) fn end(list: &crate::host::HostList, slot: u32, name: &str) {
+        let Some(s) = stats() else { return };
+        // SAFETY: an open list; the query begun in `begin`; the buffer stays
+        // in COPY_DEST (a read-back heap).
+        unsafe {
+            list.list.EndQuery(&s.occ, D3D12_QUERY_TYPE_OCCLUSION, slot);
+            list.list.ResolveQueryData(&s.occ, D3D12_QUERY_TYPE_OCCLUSION, slot, 1, &s.occ_buffer, u64::from(slot) * 8);
+            list.list.EndQuery(&s.heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS1, slot);
+            list.list.ResolveQueryData(&s.heap, D3D12_QUERY_TYPE_PIPELINE_STATISTICS1, slot, 1, &s.buffer, u64::from(slot) * SIZE);
+        }
+        let key = format!("mesh {} {}", mesh_of(name).unwrap_or("?"), name.split(", pixel ").nth(1).map_or("", |p| p.get(..16).unwrap_or("")));
+        PENDING.lock().unwrap_or_else(|e| e.into_inner()).push((slot, crate::queue::presented() + 1, key));
+    }
+
+    #[derive(Default, Clone, Copy)]
+    struct Total {
+        draws: u64,
+        groups: u64,
+        ms_prims: u64,
+        c_inv: u64,
+        c_prims: u64,
+        ps: u64,
+        samples: u64,
+        empty_draws: u64,
+        discarded_draws: u64,
+    }
+
+    static TOTALS: Mutex<Option<HashMap<String, Total>>> = Mutex::new(None);
+    static LOGGED: AtomicU64 = AtomicU64::new(0);
+
+    /// At a present: queries of frames eight or more before it are read and
+    /// added up; every 150 presents the totals so far are logged.
+    pub(crate) fn at_present(presented: u64) {
+        let Some(s) = stats() else { return };
+        let done: Vec<(u32, u64, String)> = {
+            let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+            if p.is_empty() {
+                return;
+            }
+            let (done, left) = std::mem::take(&mut *p).into_iter().partition(|e| e.1 + 8 <= presented);
+            *p = left;
+            done
+        };
+        let mut totals = TOTALS.lock().unwrap_or_else(|e| e.into_inner());
+        let totals = totals.get_or_insert_with(HashMap::new);
+        for (slot, _, key) in done {
+            // SAFETY: inside the mapped buffer; written by the card for a list that has run.
+            let q = unsafe { std::ptr::read_unaligned((s.mapped as *const u8).add((u64::from(slot) * SIZE) as usize).cast::<D3D12_QUERY_DATA_PIPELINE_STATISTICS1>()) };
+            let t = totals.entry(key).or_default();
+            t.draws += 1;
+            t.groups += q.MSInvocations;
+            t.ms_prims += q.MSPrimitives;
+            t.c_inv += q.CInvocations;
+            t.c_prims += q.CPrimitives;
+            t.ps += q.PSInvocations;
+            // SAFETY: inside the mapped occlusion buffer.
+            let samples = unsafe { std::ptr::read_unaligned((s.occ_mapped as *const u8).add(slot as usize * 8).cast::<u64>()) };
+            t.samples += samples;
+            if q.PSInvocations > 0 && samples == 0 {
+                t.discarded_draws += 1;
+            }
+            if q.MSInvocations > 0 && q.PSInvocations == 0 {
+                t.empty_draws += 1;
+            }
+        }
+        if presented.saturating_sub(LOGGED.load(Ordering::Relaxed)) < 150 {
+            return;
+        }
+        LOGGED.store(presented, Ordering::Relaxed);
+        let mut rows: Vec<(&String, &Total)> = totals.iter().collect();
+        rows.sort_by(|a, b| b.1.groups.cmp(&a.1.groups));
+        for (key, t) in rows.iter().take(60) {
+            tracing::info!(
+                draws = t.draws,
+                groups = t.groups,
+                ms_primitives = t.ms_prims,
+                raster_in = t.c_inv,
+                raster_kept = t.c_prims,
+                pixel_invocations = t.ps,
+                samples_landed = t.samples,
+                draws_all_pixels_discarded = t.discarded_draws,
+                draws_with_groups_but_no_pixels = t.empty_draws,
+                "VICTORY_MESH_STATS {key}"
+            );
+        }
     }
 }
