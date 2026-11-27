@@ -625,6 +625,21 @@ read as host 45-47.
 New tools: VICTORY_CAPTURE_SPAN (consecutive frames per capture), VICTORY_INPUT_REPLAY_OFFSET_MS,
 `D:\victory-runs\palm-strip.sh`, `region-colour.sh`.
 
+**A repeatable view: the opening shots.** After the save loads, the camera flies a fixed path round the
+house before the player has control, whatever the input: the same shots in every run. With timed
+captures a second apart (2de7bf32: captures kept in a list; one slot lost them while loading at two
+frames a second) and `D:\victory-runs\match-shots.sh` (SSIM pairs of two runs' shots), runs can be
+compared shot for shot.
+
+fly-off2 / fly-rt2 (2de7bf32, base-play.env, ray tracing off / on, D:\victory-scratch\capture\fly-pairs.png):
+matched shots (SSIM 0.77-0.87). With the builder on the lighting is the title's own: deeper shading on
+the house front, under the deck and in the trees, richer foliage; off, the stand-in is flatter and
+lighter in the shade. No purple in these shots either way. Cost: ~6 fps against ~15. The ray-traced
+picture is the target (the Series X runs with ray tracing); its frame time is Stage 5's.
+
+Stencil planes read back are now saved as images too (b70e3c94: grey = value), for the material class
+of the blinds against their neighbours (not yet run).
+
 Defects seen but not explained by any omission yet: the purple glass/blinds/papers (reproducible:
 save 'openworld', world frame +300, both s2 runs), the smear/ghosting (rec1, rec2), vanishing trees.
 
