@@ -249,7 +249,19 @@ sweep (`resource::let_go_idle`) lets a texture's host copy go only when no list 
 slot** holds it; slots of the title's heaps hold thousands. The texture pass makes no new host
 texture past 90% of the budget (`resource::room`), and the slot waits: blank signs, pop-in. Windows
 itself moves allocations to the PC's memory past the budget, which keeps the picture (at some cost).
-Test: `VICTORY_TEXTURE_BUDGET_MB` replaces the 90% gate by a limit on the textures' own bytes. Next: free room for needed textures under pressure
+Test: `VICTORY_TEXTURE_BUDGET_MB` replaces the 90% gate by a limit on the textures' own bytes.
+
+| Date | Build | Change / switches | Hypothesis | Result | Decision |
+| --- | --- | --- | --- | --- | --- |
+| 11-27 | cfc63afa | texbudget6g: VICTORY_TEXTURE_BUDGET_MB=6000, save 'openworld', 600 s, shots every 15 s; against clean-on (same route and build, 90% gate) | the refusals (blank signs, late textures) are the 90% gate on a moving budget | **refusals 0 for the run** (clean-on: 344 -> 586); host textures ~3.1 GB alive (2.5); card 12.2 of 11.6 GB, the PC's memory shared with the card 11.3 GB (10.3); private 33.7 GB (33.2); 0 losses, 0 crashes; no blank textures seen in the shots; the smear frame at 336 s as before. Frame lines: 6-9k 55.8 ms (48.9), 9k+ 67.1 (66.2), scene mix different | refusals are skipped work and go; default made from a share of the card (21244e58), A/B in one build next |
+| 11-27 | 21244e58 | share40 (the new default, VICTORY_TEXTURE_SHARE=40), save 'openworld', 600 s; baseline clean-on (the 90% gate alone; the second run with SHARE=0 cancelled as the same code path) | a share of the card removes the refusals at an acceptable cost | **refusals 0** (586); host textures 2.8-3.6 GB alive (2.3-2.7); the PC's memory shared with the card 10.0-11.4 GB (10.3); 0 losses, 0 crashes. Frame lines: 6-9k **59.2 ms** (48.9), 9k+ 63.4 (66.2); with texbudget6g's 55.8, the medium scenes cost ~7-10 ms more. Upload queue: mean due 598 (865), mean oldest 108 frames (65) | **keep**: no texture the title asked for is left out; the medium-scene cost is a Stage 4 target (where it goes: the system moving card memory, or more uploads) |
+
+Pop-in has a second cause, the upload queue (rec1's `textures picked by index, the queue` line):
+slots due for upload 200-1,000 typically, 3,805-7,068 at peaks, the oldest written 8 frames
+(~0.5 s) ago typically, 72-459 frames (5-30 s) at peaks; a further 4,000-23,000 wait for the title
+to map their memory (its own streaming, as on the console). The layer notices a texture the title
+filled and uploads it within a per-frame budget; on the console the card reads it at once. Next,
+after the room fix: measure that lag and cut it (what is drawn first, budget per frame). Next: free room for needed textures under pressure
 (Stage 2), then the purple glass/papers and the smear at their first wrong pass (Stage 3).
 
 ### Stage 3 defect inventory from session2 (open world, first look)
