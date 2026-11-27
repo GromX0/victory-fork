@@ -1018,6 +1018,8 @@ struct Probe {
     title_at: u64,
     title_recorded: Vec<u8>,
     title_presented: Option<Vec<u8>>,
+    /// The present `title_presented` was read at.
+    title_when: u64,
 }
 
 /// At the present of `frame`: title memory at the arguments of that
@@ -1025,9 +1027,19 @@ struct Probe {
 #[cfg(feature = "diagnostics")]
 fn reread_probes(frame: u64) {
     let mut probes = PROBES.lock().unwrap_or_else(|e| e.into_inner());
-    for p in probes.iter_mut().filter(|p| p.frame <= frame && p.title_presented.is_none()) {
+    for p in probes.iter_mut().filter(|p| p.frame <= frame) {
         let mut now = vec![0u8; p.len];
-        p.title_presented = crate::host::read_into(p.title_at as *const u8, &mut now).then_some(now);
+        if !crate::host::read_into(p.title_at as *const u8, &mut now) {
+            continue;
+        }
+        // The first read, and afterwards the one with the most work: what
+        // shaders wrote there reaches title memory at all, and when.
+        let total = |b: &[u8]| work_of(b, p.kind, p.stride, p.max).1;
+        let better = p.title_presented.as_ref().is_none_or(|old| total(&now) > total(old));
+        if better {
+            p.title_presented = Some(now);
+            p.title_when = frame;
+        }
     }
 }
 
@@ -1223,6 +1235,7 @@ pub(crate) fn probe_counts(list: &crate::host::HostList, args: &ID3D12Resource, 
         title_at,
         title_recorded,
         title_presented: None,
+        title_when: 0,
     });
 }
 
@@ -1248,11 +1261,12 @@ fn write_counts(presented: u64) {
         let (active, total, shown) = work_of(&bytes, p.kind, p.stride, p.max);
         let title_total = |b: &[u8]| if b.is_empty() { "unread".to_owned() } else { work_of(b, p.kind, p.stride, p.max).1.to_string() };
         let line = format!(
-            "kind {} max {} active {active} total {total} first {shown:?} title_recorded {} title_presented {} at {:#x} {}\n",
+            "kind {} max {} active {active} total {total} first {shown:?} title_recorded {} title_presented {} (+{}) at {:#x} {}\n",
             p.kind,
             p.max,
             title_total(&p.title_recorded),
             p.title_presented.as_deref().map_or("unread".to_owned(), title_total),
+            p.title_when.saturating_sub(p.frame),
             p.title_at,
             p.name
         );
