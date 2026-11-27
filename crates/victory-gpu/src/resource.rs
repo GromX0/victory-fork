@@ -1714,6 +1714,34 @@ fn texture_floor_bytes(vram_budget: Option<u64>) -> u64 {
     }
 }
 
+/// The floor in use: [`texture_floor_bytes`], or `share` percent of the
+/// card's own memory (`dedicated`) if that is more. The system's budget for
+/// the process moves with what else uses the card (15.4 GB at the start of
+/// a session, 11.4 GB in the world with a second monitor and other programs
+/// open: rec1), and past nine tenths of it the texture pass made no new host
+/// texture: the slot waited, and the title showed blank signs, distant trees
+/// in the wrong colour and late textures (2,307 refusals at the blank signs;
+/// with the first two GiB the only room, 2.5-3.2 GB were wanted). A share of
+/// the card itself does not move; past the budget the system moves the
+/// card's memory into the PC's, which keeps the picture.
+#[cfg(any(windows, test))]
+fn texture_floor_with(vram_budget: Option<u64>, dedicated: Option<u64>, share: u64) -> u64 {
+    let base = texture_floor_bytes(vram_budget);
+    match dedicated {
+        Some(card) if share > 0 => base.max(card / 100 * share.min(90)),
+        _ => base,
+    }
+}
+
+/// `VICTORY_TEXTURE_SHARE`: the percent of the card's own memory host
+/// copies of textures the title fills may always take (40; 0: only
+/// [`texture_floor_bytes`], as before).
+#[cfg(windows)]
+fn texture_share() -> u64 {
+    static SHARE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| std::env::var("VICTORY_TEXTURE_SHARE").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(40))
+}
+
 /// Whether more host copies of textures the title fills may be made for
 /// shaders that pick textures by index (`draw.rs` `heap_textures`): always
 /// up to [`texture_floor_bytes`] bytes of them, beyond that while the card's
@@ -1736,7 +1764,11 @@ pub(crate) fn room(memory: Option<[u64; 4]>) -> bool {
     if let Some(limit) = limit {
         return filled < limit;
     }
-    let floor = texture_floor_bytes(memory.map(|[budget, ..]| budget));
+    let dedicated = match crate::host::DEDICATED_VRAM.load(Relaxed) {
+        0 => None,
+        bytes => Some(bytes),
+    };
+    let floor = texture_floor_with(memory.map(|[budget, ..]| budget), dedicated, texture_share());
     if filled < floor {
         return true;
     }
@@ -4586,6 +4618,20 @@ float4 lit() : SV_Target { return 1.0; }
         // The resource keeps the heap alive.
         assert_eq!(slot::<Release>(heap, 0x10)(heap), 1);
         assert_eq!(slot::<Release>(placed, 0x10)(placed), 0);
+    }
+
+    #[test]
+    fn texture_floor_takes_a_share_of_the_card() {
+        const GIB: u64 = 1 << 30;
+        // A 16 GiB card with a budget fallen to 11.4 GiB: 40% of the card.
+        assert_eq!(texture_floor_with(Some(11 * GIB), Some(16 * GIB), 40), 16 * GIB / 100 * 40);
+        // Share 0 or no card size: the floor as before.
+        assert_eq!(texture_floor_with(Some(11 * GIB), Some(16 * GIB), 0), 2 * GIB);
+        assert_eq!(texture_floor_with(Some(11 * GIB), None, 40), 2 * GIB);
+        // A small card's share below the old floor keeps the old floor.
+        assert_eq!(texture_floor_with(Some(4 * GIB), Some(4 * GIB), 20), GIB);
+        // At most 90% of the card.
+        assert_eq!(texture_floor_with(None, Some(10 * GIB), 200), 10 * GIB / 100 * 90);
     }
 
     #[test]

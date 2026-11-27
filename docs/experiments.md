@@ -239,7 +239,17 @@ The layer's log starts with the recording (00:27:03). 0 device losses; private 3
 | 292-296 s | distant trees neon green; two gantry signs blank grey | **12.1 of 11.6 GB (over since ~244 s)** | **2,307** | 2 (textures never made) |
 
 The card's budget fell from 15.4 GB at the start to ~11.6 GB in the world. Pop-in (the user's
-report) fits textures waiting for room. Next: free room for needed textures under pressure
+report) fits textures waiting for room.
+
+The card at the end of rec1 (the system's count: budget 11,417 MB, in use 12,163 MB; the PC's memory
+shared with the card 10,557 MB of 14,056): host copies of textures the title fills 2,883 MB (18,037),
+of textures the host renders to or writes 2,926 MB (765), of buffers in the card's memory 925 MB (57);
+**~5.4 GB not attributed** by any line (pipelines, pools, tiles, twins, the driver's own). The
+sweep (`resource::let_go_idle`) lets a texture's host copy go only when no list and **no descriptor
+slot** holds it; slots of the title's heaps hold thousands. The texture pass makes no new host
+texture past 90% of the budget (`resource::room`), and the slot waits: blank signs, pop-in. Windows
+itself moves allocations to the PC's memory past the budget, which keeps the picture (at some cost).
+Test: `VICTORY_TEXTURE_BUDGET_MB` replaces the 90% gate by a limit on the textures' own bytes. Next: free room for needed textures under pressure
 (Stage 2), then the purple glass/papers and the smear at their first wrong pass (Stage 3).
 
 ### Stage 3 defect inventory from session2 (open world, first look)

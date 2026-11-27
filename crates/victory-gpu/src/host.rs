@@ -36,6 +36,10 @@ pub(crate) fn texture_state(state: u32) -> u32 {
 /// ring of host descriptors is enough.
 const RTV_RING: u32 = 1024;
 
+/// The host adapter's own memory in bytes (0 until the device is made, or
+/// if the adapter does not say): `resource::room`'s floor for textures.
+pub(crate) static DEDICATED_VRAM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(crate) struct Host {
     pub(crate) device: ID3D12Device,
     queue: ID3D12CommandQueue,
@@ -1081,6 +1085,7 @@ fn create() -> windows::core::Result<Host> {
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
             .ok();
         if let Some(desc) = adapter.as_ref().and_then(|a| a.GetDesc1().ok()) {
+            DEDICATED_VRAM.store(desc.DedicatedVideoMemory as u64, std::sync::atomic::Ordering::Relaxed);
             let name = String::from_utf16_lossy(&desc.Description);
             tracing::info!(
                 adapter = name.trim_end_matches('\0'),
