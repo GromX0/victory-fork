@@ -960,6 +960,55 @@ struct Probe {
 #[cfg(feature = "diagnostics")]
 static PROBES: std::sync::Mutex<Vec<Probe>> = std::sync::Mutex::new(Vec::new());
 
+#[cfg(feature = "diagnostics")]
+thread_local! {
+    /// The title's code that issued the call being recorded ([`note_callers`]).
+    static CALLERS: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// In a [`listed`] frame: the first four return addresses on this thread's
+/// stack that lie outside our own executable (the title's code, as
+/// `module+offset`), for [`probe_counts`] to name the code that issued an
+/// indirect execution: a draw is usually issued through a shared helper,
+/// the decision of whether to draw sits a frame or two up.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn note_callers() {
+    use windows_sys::Win32::System::Diagnostics::Debug::RtlCaptureStackBackTrace;
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleHandleExW,
+        GetModuleHandleW,
+    };
+    if folder().is_none() || !listed(crate::queue::presented() + 1) {
+        return;
+    }
+    let mut frames = [std::ptr::null_mut(); 24];
+    // SAFETY: room for the frames asked for.
+    let n = unsafe { RtlCaptureStackBackTrace(1, frames.len() as u32, frames.as_mut_ptr(), std::ptr::null_mut()) } as usize;
+    // SAFETY: our own executable's handle.
+    let ours = unsafe { GetModuleHandleW(std::ptr::null()) } as usize;
+    let mut out = Vec::new();
+    for &frame in &frames[..n] {
+        let mut module = std::ptr::null_mut();
+        // SAFETY: looks up the module holding the address, no reference.
+        let found = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                frame as *const u16,
+                &mut module,
+            )
+        };
+        let module = if found != 0 { module as usize } else { 0 };
+        if module == ours {
+            continue;
+        }
+        out.push(if module != 0 { format!("+{:#x}", frame as usize - module) } else { format!("{frame:?}") });
+        if out.len() == 4 {
+            break;
+        }
+    }
+    CALLERS.with(|c| *c.borrow_mut() = out.join("<"));
+}
+
 /// After `list` recorded an `ExecuteIndirect` of `max` records of `kind`
 /// (0 draw, 1 indexed, 2 dispatch, 10 mesh) `stride` bytes apart from
 /// `args` at `at`, left in the indirect-argument state: copies them for
@@ -986,12 +1035,13 @@ pub(crate) fn probe_counts(list: &crate::host::HostList, args: &ID3D12Resource, 
     }
     let landing: &'static mut [u8] = Box::leak(vec![0u8; bytes as usize].into_boxed_slice());
     list.defer_read_back(buffer, landing.as_mut_ptr(), [bytes as usize, 1, bytes as usize]);
+    let callers = CALLERS.with(|c| std::mem::take(&mut *c.borrow_mut()));
     PROBES.lock().unwrap_or_else(|e| e.into_inner()).push(Probe {
         frame,
         kind,
         stride,
         max,
-        name: name.to_owned(),
+        name: format!("{name} from {callers}"),
         at: landing.as_ptr() as usize,
         len: bytes as usize,
     });

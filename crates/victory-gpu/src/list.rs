@@ -1887,6 +1887,8 @@ extern "system" fn execute_indirect(
     count_offset: u64,
 ) {
     count_draw();
+    #[cfg(all(windows, feature = "diagnostics"))]
+    crate::capture::note_callers();
     let Some((stride, args)) = crate::signature::layout(signature) else {
         return;
     };
