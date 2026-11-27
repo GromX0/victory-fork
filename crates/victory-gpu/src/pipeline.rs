@@ -373,7 +373,7 @@ fn translate(container: &[u8], hash: &str) -> Result<Translated, String> {
         tracing::info!(hash, ok = host.is_ok(), wave32, patched = patched.is_some(), "translated outside the cache (VICTORY_WAVE32 / VICTORY_CODE_PATCH)");
         host?
     } else {
-        crate::shader_cache::host_shader(container)?
+        crate::shader_cache::host_shader(container, hash)?
     };
     let stores = programs.is_empty() || programs.iter().any(stores);
     let threads = programs.iter().find_map(|p| match &p.io {

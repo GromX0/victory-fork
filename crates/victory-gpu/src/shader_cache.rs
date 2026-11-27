@@ -174,12 +174,37 @@ pub fn precompile(container: &[u8]) -> Result<bool, String> {
     Ok(MISSES.load(Ordering::Relaxed) == misses)
 }
 
-/// The translation of a console shader container, from the cache when
-/// there is one.
-pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
-    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+/// The translation of a console shader container (shader `hash`), from the
+/// cache when there is one; with its built-in changes (`crate::builtin`),
+/// which are part of the entry's key.
+pub(crate) fn host_shader(container: &[u8], hash: &str) -> Result<HostShader, String> {
+    #[cfg(windows)]
+    let patch = if crate::builtin::has(hash) { crate::builtin::patch(container, hash) } else { None };
+    #[cfg(not(windows))]
+    let patch: Option<Vec<(usize, u32)>> = {
+        let _ = hash;
+        None
+    };
+    let translate = |c: &[u8]| {
+        match &patch {
+            Some(p) => victory_shader::emit::with_code_patch(p.clone(), || victory_shader::emit::translate(c)),
+            None => victory_shader::emit::translate(c),
+        }
+        .map_err(|e| e.to_string())
+    };
+    let mut key = build();
+    if let Some(p) = &patch {
+        let mut h = blake3::Hasher::new();
+        h.update(&key);
+        h.update(b"builtin-patches-v1");
+        for &(at, word) in p {
+            h.update(&(at as u64).to_le_bytes());
+            h.update(&word.to_le_bytes());
+        }
+        key = *h.finalize().as_bytes();
+    }
     match CACHE.get() {
-        Some(cache) => cached(cache, &build(), container, translate, refresh_in_runs()),
+        Some(cache) => cached(cache, &key, container, translate, refresh_in_runs()),
         None => translate(container),
     }
 }

@@ -1063,3 +1063,21 @@ in D:\victory-scratch\capture\who4):
 
 So the objects that vanish or ghost are drawn, and dissolved by their dissolve value. Not yet known: why
 those values are wrong here (what the title's CPU or the mesh shaders compute them from).
+
+Built in (27 Nov, 23:35): `crates/victory-gpu/src/builtin.rs` + `patches/builtin.txt` (1,301 `dissolve` sites,
+9 `occluders` sites), applied through the shader cache (the change is part of the entry's key), each only
+where the title's dword matches. `VICTORY_DISSOLVE=0` / `VICTORY_CPU_OCCLUDERS=1` turn them off. Run nohiz
+logged both groups loaded and no mismatch.
+
+Objects that pop fully in and out (not fading) remain. Each rejected with the dissolve fix on, user on
+their street (pop2-pop5, nohiz):
+| Run | Change | Result |
+| --- | --- | --- |
+| pop2 | distance fade gate off in 23 culling shaders | purple bush / fan palm still gone at middle distance |
+| pop3 | stand-in band off (the 5 tree shaders, the only ones with level 999) | still gone |
+| pop4 | the culling visibility flag forced on in the 7 main BatchCull shaders | **bush and palm back**; textures broken (everything drawn); other objects still pop |
+| pop5 | depth pyramid level 0 written as far (both 3x3 init builders) | still pops |
+| nohiz | the HiZ comparison itself (`v_cmp_ge_f32` after the pyramid samples) passed in 18 instance-culling shaders (29 sites) | still pops |
+So for the tree-shader objects the flag that hides them is not the occlusion test; what is left in it are
+the per-view plane tests and the per-instance flags combined with them (55679a05 0x2700-0x27a4). Other
+objects that pop are not covered by that flag at all. Not done: which part of the flag, and what removes the rest.

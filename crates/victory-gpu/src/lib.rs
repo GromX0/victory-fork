@@ -17,6 +17,7 @@
 
 #[cfg(windows)]
 mod ambient;
+mod builtin;
 #[cfg(windows)]
 mod lightprobe;
 #[cfg(windows)]
