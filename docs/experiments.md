@@ -900,3 +900,16 @@ level would cover the holes it is not drawn there (for the palm the near level, 
 nothing in the ghost state: palm4 c1/c2; its arguments come from the GPU culling passes). Whether the
 near level is culled on the GPU or never asked for by the title's CPU is the open question; it is the
 next thing to settle (its clusters in the culling output in the ghost state against the solid one).
+
+Sessions nl1, hz2 (27 Nov): the test meant to tell "near level culled on the GPU" from "never asked for".
+- From the stairs the palm was a ghost (nl1 g0), and a step along the rail it was gone altogether (c4,
+  span from 1973). The solid close-up state was not reached: the character stays in the rail-leaning
+  animation and the stick does not take him down the stairs from there.
+- Occlusion pyramid builders dropped from the start (hz2, as hz1): from about the same place on the stairs
+  the palm is not there at all (hz2 g0 against nl1 g0; the positions differ by a step). Dropping them
+  mid-session (nl1 m_hz) freezes the last pyramid rather than removing it, and the camera sway with the
+  palm behind the character made those pictures useless.
+**Result: inconclusive.** Without the pyramid the palm did not come back, which points away from the
+occlusion test, but the pyramid's content when never built is unknown (zero might mean "nothing
+occluded" or "everything", depending on the depth convention), and the positions differ; neither cause is
+established.
