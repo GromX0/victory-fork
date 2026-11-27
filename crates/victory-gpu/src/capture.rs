@@ -231,6 +231,8 @@ pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     timed(frame);
     triggered(frame);
     #[cfg(feature = "diagnostics")]
+    crate::renderdoc::at_present();
+    #[cfg(feature = "diagnostics")]
     reread_probes(frame);
     write_counts(frame);
     #[cfg(feature = "diagnostics")]

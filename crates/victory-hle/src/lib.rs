@@ -32,6 +32,9 @@ pub use victory_gpu::pipeline::known as known_pipelines;
 /// Where the title's image is mapped, for diagnostics that name its code.
 #[cfg(windows)]
 pub use victory_gpu::set_title_image;
+/// RenderDoc's in-application API (diagnostics, `VICTORY_RENDERDOC`).
+#[cfg(all(windows, feature = "diagnostics"))]
+pub use victory_gpu::renderdoc::load as renderdoc_load;
 /// Renderer port #2's switch and marks, for the launcher.
 #[cfg(windows)]
 pub use victory_gpu::port_descriptors;
