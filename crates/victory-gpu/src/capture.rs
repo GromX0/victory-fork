@@ -164,11 +164,37 @@ fn key_pressed(frame: u64) {
     }
 }
 
+/// `VICTORY_CAPTURE_AT_MS` (comma-separated milliseconds after the world's
+/// first frame, [`world_started`]): at the present of the first frame past
+/// each, the next frame is captured as F9 would ([`KEYED`]). With
+/// `VICTORY_INPUT_REPLAY` the same moments of the same walk in every run.
+fn timed(frame: u64) {
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+    static AT: std::sync::OnceLock<Vec<u64>> = std::sync::OnceLock::new();
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let at = AT.get_or_init(|| {
+        let mut list: Vec<u64> = std::env::var("VICTORY_CAPTURE_AT_MS")
+            .unwrap_or_default()
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        list.sort_unstable();
+        list
+    });
+    let (Some(start), Some(&due)) = (world_started(), at.get(NEXT.load(Relaxed))) else { return };
+    if folder().is_some() && start.elapsed().as_millis() as u64 >= due {
+        NEXT.fetch_add(1, Relaxed);
+        KEYED.store(frame + 1, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(frame = frame + 1, ms = due, "a timed capture (VICTORY_CAPTURE_AT_MS)");
+    }
+}
+
 /// At the present of `frame`: the draws run on the host so far.
 pub(crate) fn frame_drew(frame: u64, drawn: u64) {
     use std::sync::atomic::Ordering::Relaxed;
     #[cfg(windows)]
     key_pressed(frame);
+    timed(frame);
     #[cfg(feature = "diagnostics")]
     write_counts(frame);
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
