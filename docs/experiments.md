@@ -1356,3 +1356,16 @@ rest are lane-mask forms of this newer compiler (`s_and_b64 exec, sN, exec` ... 
 `s_and_saveexec`: "a select on an untracked mask" 31, "a lane mask read as data" 25, "a constant lane mask" 7, "an opaque
 lane mask" 5), 7 conditional exports, and one each of `s_cmovk_i32`, a DPP compare, a whole-wave section.
 Suite: 301 pass; `the_record_count_of_a_structured_buffer_read_by_index` crashes (access violation) at 17fe65ea too.
+
+### deser1 / deser0: first run of the serialized mesh pipelines (28 Nov, 04:37-04:40, save 'openworld')
+
+deser1 (d8cad056 + VICTORY_PIPELINE_1C8=1): the device made **8,192+ serialized mesh pipelines** (outcome "made", counted
+to the 8,192nd log line), refused 8,192+ vertex-stage ones (not rebuilt yet), and 1,024 + 65 whose render-target block
+names CB format 7 (FLOAT) or 0 (an unused slot), which the runtime's own converter turns into UNKNOWN (format 7 is now
+taken as R11G11B10_FLOAT, the only 11/11/10 float format; 0 as no format). The title then stopped at **its own
+breakpoint, title+0x4dcbc9d, ~frame 521**: a linear writer's overflow check (0x6c0 bytes asked, 0x50 left of 0x18000),
+called from the frame update (+0x5ab13e8 -> +0x4e529a0 -> +0x4e52a40). **deser0, the control without the switch,
+stopped at the same check (frame ~256, 16 s)**: not the serialized pipelines. Both runs came after the run cache's
+25,788 translations were rewritten by the new translator (`victory shaders`, 0 of 4,441 previously cached ones
+different); the last good run on this save was deser2 at cc70032e (03:11, 621 s). Under test: whether title shaders
+that newly translate (the new ops and mask forms) are behind it (the 17fe65ea translator's failure list against today's).

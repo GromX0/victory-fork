@@ -50,6 +50,12 @@ use crate::gfx10::{self, Fields, Operand};
 /// The container part that carries a pixel stage's `SPI_SHADER_COL_FORMAT`.
 pub const COLOR_FORMAT_PART: [u8; 4] = *b"VXCF";
 
+/// The container part that marks a serialized pipeline's stage: code of the
+/// console's newer compiler, whose forms the translator then takes
+/// ([`crate::structure::with_newer_compiler`]). The title's own containers
+/// never have it, so their translations stay as they were.
+pub const SERIALIZED_PART: [u8; 4] = *b"VXSP";
+
 const CONTEXT_SIZE: usize = 0xe0;
 const SPI_STANDARD: usize = 0x2c;
 const SPI_GS: usize = 0x58;
@@ -152,6 +158,12 @@ pub fn dxgi_format(t: Target) -> Option<u32> {
         (4, _) => match n { 4 => 0x2a, 5 => 0x2b, 7 => 0x29, _ => return None },
         (5, _) => match n { 0 => 0x23, 1 => 0x25, 4 => 0x24, 5 => 0x26, 7 => 0x22, _ => return None },
         (6, _) if n == FLOAT => 0x1a,
+        // The runtime has no DXGI form of 11_11_10 (it gives UNKNOWN); the one
+        // 11/11/10 float format, which the title's own pipelines name for such
+        // targets, is taken (assumption: not shown on a bound view yet).
+        (7, _) if n == FLOAT => 0x1a,
+        // An unused slot below the count: no format.
+        (0, _) => 0,
         (9, _) => match n { 0 => 0x18, 1 => 0xbd, 4 => 0x19, _ => return None },
         (10, 1) if n == UNORM => 0x57,
         (10, 1) if n == SRGB => 0x5b,
@@ -585,7 +597,12 @@ fn group_prologue(code: &[u8]) -> Result<Vec<u8>, ShaderError> {
     let sx = format!("s{x}");
     let mentions = |t: &str| t.split([' ', ',']).any(|w| w == sx);
     let first = text[at + 1 + want.len()..].iter().find(|t| mentions(t));
-    if !first.is_some_and(|t| t.starts_with(&format!("s_mov_b32 {sx}, "))) {
+    // (its destination, and no source: `s_mov_b32 sX, ..`, `v_readfirstlane_b32 sX, ..`)
+    let writes_only = |t: &str| {
+        let mut operands = t.split_once(' ').map_or("", |(_, o)| o).split(',').map(str::trim);
+        operands.next() == Some(sx.as_str()) && operands.all(|o| o.split(' ').all(|w| w != sx))
+    };
+    if !first.is_some_and(|t| writes_only(t)) {
         return Ok(code.to_vec());
     }
     let mut out = code.to_vec();
@@ -867,6 +884,7 @@ fn container(fssm: &[u8], col_format: Option<u32>, inputs: &[Row], outputs: &[Ro
     if !pixel {
         parts.push((b"PSG1", &psg1));
     }
+    parts.push((&SERIALIZED_PART, &[]));
     if let Some(v) = &vxcf {
         parts.push((&COLOR_FORMAT_PART, v));
     }
@@ -878,4 +896,109 @@ fn u16_at(data: &[u8], at: usize) -> Result<u16, ShaderError> {
     data.get(at..at + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .ok_or(Malformed("serialized packet out of bounds"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(w: &[u32]) -> Vec<u8> {
+        w.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    /// A GS-stage packet: register block 0x170, render-target block 0x5c.
+    fn packet() -> Vec<u8> {
+        let mut p = vec![0u8; 0x1c + 0x170 + 0x5c];
+        p[4] = 2;
+        p[0x28..0x2a].copy_from_slice(&0x170u16.to_le_bytes());
+        p[0x2a..0x2c].copy_from_slice(&0x5cu16.to_le_bytes());
+        p
+    }
+
+    #[test]
+    fn the_context_follows_the_gs_block_and_targets_unpack() {
+        let mut p = packet();
+        // SPI_SHADER_COL_FORMAT at context + 0x18 (context at 0xac with a GS block).
+        p[0xac + 0x18..0xac + 0x1c].copy_from_slice(&0x44u32.to_le_bytes());
+        // Record 0 of the render-target block: target 0 SRGB 8_8_8_8, target 1
+        // UNORM 16_16, two targets, one sample.
+        let rb = 0x1c + 0x170 + 0x38;
+        p[rb..rb + 4].copy_from_slice(&6u32.to_le_bytes());
+        p[rb + 4..rb + 8].copy_from_slice(&(10u32 << 8 | 5 << 13 | 2 << 28).to_le_bytes());
+        let pk = Packet::new(&p).unwrap();
+        assert!(pk.geometry());
+        assert_eq!(pk.context(0x18), 0x44);
+        let (t, samples) = pk.render_targets().unwrap();
+        assert_eq!(samples, 1);
+        assert_eq!(t, [Target { format: 10, number: 6, swap: 0 }, Target { format: 5, number: 0, swap: 0 }]);
+        assert_eq!(dxgi_format(t[0]), Some(0x1d)); // R8G8B8A8_UNORM_SRGB
+        assert_eq!(dxgi_format(t[1]), Some(0x23)); // R16G16_UNORM
+        assert_eq!(dxgi_format(Target { format: 10, number: 0, swap: 1 }), Some(0x57)); // B8G8R8A8_UNORM
+    }
+
+    #[test]
+    fn a_packet_whose_block_size_disagrees_is_refused() {
+        let mut p = packet();
+        p[0x28..0x2a].copy_from_slice(&0x11cu16.to_le_bytes());
+        assert!(Packet::new(&p).is_err());
+    }
+
+    #[test]
+    fn parameters_lie_from_dword_8_and_the_heaps_follow() {
+        // RTS0 1.0: a table, then two root constants; heaps indexed directly.
+        let mut r = words(&[1, 2, 24, 0, 0, 0xc00]);
+        r.extend(words(&[0, 0, 48, 1, 0, 60]));
+        r.extend(words(&[0, 0, 0])); // (the table's ranges, not read)
+        r.extend(words(&[500, 0, 2]));
+        let l = RootLayout::from_blob(&r).unwrap();
+        assert_eq!(l.sizes, [1, 2]);
+        assert!(l.resource_heap && l.sampler_heap);
+        assert_eq!(l.user_data(0), Some(8));
+        assert_eq!(l.user_data(1), Some(9));
+        assert_eq!(l.end(), 11);
+    }
+
+    #[test]
+    fn the_group_prologue_becomes_each_lane_taking_the_group() {
+        let code = words(&[
+            0xBEFE_0481, // 0x00 s_mov_b64 exec, 1
+            0xBE88_047E, // 0x04 s_mov_b64 s[8:9], exec
+            0x870A_FF03, // 0x08 s_and_b32 s10, s3, lit
+            0x0F00_0000,
+            0xBF85_0007, // 0x10 s_cbranch_scc1 0x30
+            0x2C0A_0A87, // 0x14 v_lshrrev_b32 v5, 7, v5
+            0x7E00_0280, // 0x18 v_mov_b32 v0, 0
+            0xD834_0008, // 0x1c ds_write_b32 v0, v5 offset:8
+            0x0000_0500,
+            0xBFA3_FFE3, // 0x24 s_waitcnt_depctr 0xffe3
+            0xBF8A_0000, // 0x28 s_barrier
+            0xBF82_0004, // 0x2c s_branch 0x40
+            0xBF8A_0000, // 0x30 s_barrier
+            0x7E00_0280, // 0x34 v_mov_b32 v0, 0
+            0xD8D8_0008, // 0x38 ds_read_b32 v5, v0 offset:8
+            0x0500_0000,
+            0xBE8A_0311, // 0x40 s_mov_b32 s10, s17
+            0xBF81_0000, // s_endpgm
+        ]);
+        let before: Vec<String> = gfx10::decode(&code).unwrap().iter().map(|i| i.text(true)).collect();
+        assert_eq!(before[0], "s_mov_b64 exec, 1", "{before:?}");
+        let out = group_prologue(&code).unwrap();
+        assert_ne!(out, code, "{before:?}");
+        let after = gfx10::decode(&out).unwrap();
+        let at = |o: usize| after.iter().find(|i| i.offset == o).map(|i| i.text(true)).unwrap_or_default();
+        assert_eq!(at(0x00), "s_mov_b64 exec, -1");
+        assert_eq!(at(0x08), "v_readfirstlane_b32 s10, v5");
+        assert_eq!(at(0x0c), "s_lshr_b32 s10, s10, 7");
+        assert_eq!(at(0x10), "v_mov_b32 v5, s10");
+        assert_eq!(at(0x14), "v_mov_b32 v0, 0");
+        assert!(at(0x18).starts_with("s_branch"), "{}", at(0x18));
+        // The branch lands on E; the old LDS hand-over is no longer reached.
+        assert!(after.iter().all(|i| !i.text(true).starts_with("ds_")));
+    }
+
+    #[test]
+    fn code_without_the_prologue_is_left_alone() {
+        let code = words(&[0x7E00_0280, 0xBF81_0000]);
+        assert_eq!(group_prologue(&code).unwrap(), code);
+    }
 }

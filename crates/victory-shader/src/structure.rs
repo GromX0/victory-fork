@@ -455,6 +455,31 @@ impl Structured {
     }
 }
 
+thread_local! {
+    /// See [`with_newer_compiler`].
+    static NEWER_COMPILER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `structure` with the forms of the console's newer compiler, which
+/// made the title's serialized pipelines ([`crate::deserialized`]): a wave64
+/// `s_cselect_b64 sX, -1, 0` that a `v_cndmask_b32` selects by is a lane mask
+/// (all lanes or none: a uniform condition), and a join leaves out a pair
+/// that holds plain data (see `Lanes::join`). The title's own containers
+/// (the older compiler) keep what they had: such a select is the number the
+/// wave agrees on, which they translate exactly.
+/// Whether the program being translated is of the newer compiler
+/// ([`with_newer_compiler`]).
+pub(crate) fn newer_compiler() -> bool {
+    NEWER_COMPILER.get()
+}
+
+pub fn with_newer_compiler<R>(on: bool, structure: impl FnOnce() -> R) -> R {
+    let before = NEWER_COMPILER.replace(on);
+    let result = structure();
+    NEWER_COMPILER.set(before);
+    result
+}
+
 /// Builds the per-lane form of `program`.
 pub fn structure(program: &Program) -> Result<Structured, ShaderError> {
     structure_wide(program, &HashSet::new())
@@ -924,11 +949,11 @@ impl<'a> Lanes<'a> {
     }
 
     /// Whether the pair holds plain data, no lane mask (see `join`): each
-    /// half written by a scalar memory load or, in wave64 code, by a 32-bit
-    /// scalar operation (descriptor words being patched), or joined from
-    /// such values only.
+    /// half written by a scalar memory load, loaded by the hardware (user
+    /// data), or, in wave64 code, written by a 32-bit scalar operation
+    /// (descriptor words being patched), or joined from such values only.
     fn loaded(&self, k: Key) -> bool {
-        self.p.wave64 && self.data(k.0, 8) && self.data(k.1, 8)
+        NEWER_COMPILER.get() && self.data(k.0, 8) && self.data(k.1, 8)
     }
 
     fn data(&self, v: Value, depth: u8) -> bool {
@@ -937,12 +962,17 @@ impl<'a> Lanes<'a> {
             let inst = &p.blocks[b].insts[i];
             return match &inst.fields {
                 Fields::Smem { .. } => true,
-                Fields::Sop { .. } => {
+                // (in wave32 a 32-bit operation may be a mask's)
+                Fields::Sop { .. } if p.wave64 => {
                     let n = inst.name();
                     !n.ends_with("_b64") && !n.contains("saveexec") && !n.contains("wrexec") && !n.starts_with("s_cselect")
                 }
                 _ => false,
             };
+        }
+        // User data and other values the hardware loads, but EXEC and VCC.
+        if let Some(&(reg, _)) = p.inputs.iter().find(|i| i.1 == v) {
+            return !matches!(reg, Reg::S(c) if c == EXEC || c == EXEC + 1 || c == VCC || c == VCC + 1);
         }
         match self.phis.get(&v) {
             Some(&(b, i)) if depth > 0 => p.blocks[b].phis[i].args.iter().all(|&a| a == v || self.data(a, depth - 1)),
@@ -1294,7 +1324,8 @@ impl<'a> Lanes<'a> {
                     && name == "s_cselect_b64"
                     && src.len() == 2
                     && src.iter().all(|s| all_or_none(s) || takes_mask)
-                    && inst.writes.first().is_some_and(|&(_, lo)| self.selects_by(lo));
+                    && inst.writes.first().is_some_and(|&(_, lo)| self.selects_by(lo))
+                    && NEWER_COMPILER.get();
                 if (takes_mask || touches_exec || lane_select)
                     && let Some(r) = self.sop(inst).filter(|r| r.derived)
                 {

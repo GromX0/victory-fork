@@ -6485,6 +6485,17 @@ impl<'a> Lower<'a> {
                 let pixels = src32(self, 0)?;
                 (self.quad_mask(pixels), None)
             }
+            "s_cmov_b32" | "s_cmovk_i32" if crate::structure::newer_compiler() => {
+                // The source where SCC is set, else what the register held.
+                let cond = self.scc_in(inst)?;
+                let new = if name == "s_cmovk_i32" { sext16(self) } else { src32(self, 0)? };
+                let Fields::Sop { dst: Some(Operand::Scalar { code, .. }), .. } = &inst.fields else {
+                    return Err(name);
+                };
+                let old = inst.read(Reg::S(*code)).ok_or("an unread operand")?;
+                let old = self.i32_of(old)?;
+                (self.s.m.select(c, cond, new, old), None)
+            }
             "s_cselect_b32" => {
                 let cond = self.scc_in(inst)?;
                 let (a, b) = (src32(self, 0)?, src32(self, 1)?);
@@ -8535,10 +8546,23 @@ impl<'a> Lower<'a> {
             return Ok(());
         }
         if let Some(rest) = name.strip_prefix("v_cmp_").or(name.strip_prefix("v_cmpx_")) {
-            let r = if v.dpp.is_some() {
-                Err("a compare with DPP")
-            } else {
-                self.compare(inst, rest)
+            // With DPP, src0 from another lane (`quad_perm` in the console's
+            // pixel code): as any VALU's, where every lane gets a source.
+            let r = match v.dpp {
+                // (the newer compiler's code only: the title's own programs with
+                // such a compare translate as before, without it)
+                Some(_) if !crate::structure::newer_compiler() => Err("a compare with DPP"),
+                Some(d) => match self.dpp(inst, d) {
+                    Ok((x, None)) => {
+                        self.src0 = Some(x);
+                        let r = self.compare(inst, rest);
+                        self.src0 = None;
+                        r
+                    }
+                    Ok((_, Some(_))) => Err("a compare with DPP that leaves lanes out"),
+                    Err(why) => Err(why),
+                },
+                None => self.compare(inst, rest),
             };
             if let Err(why) = r {
                 for &(_, w) in &inst.writes {

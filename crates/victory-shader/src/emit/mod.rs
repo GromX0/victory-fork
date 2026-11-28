@@ -472,13 +472,18 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
         }
     });
     let p = crate::spill::build(&native)?;
-    // Structurisation first: tracing per-lane descriptors needs it (its
-    // failure is reported after the earlier stages').
-    let st = structure::structure(&p);
-    let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
-    let io = io::raise(&p, &native)?;
-    let st = st?;
-    emit(&c, &native, &p, &st, &io, &res)
+    // (the newer compiler's forms for the serialized pipelines' containers,
+    // see `structure::with_newer_compiler`)
+    let newer = c.part(FourCC(crate::deserialized::SERIALIZED_PART)).is_some();
+    structure::with_newer_compiler(newer, || {
+        // Structurisation first: tracing per-lane descriptors needs it (its
+        // failure is reported after the earlier stages').
+        let st = structure::structure(&p);
+        let res = resource::track(&p, &native.layout, native.stage, st.as_ref().ok())?;
+        let io = io::raise(&p, &native)?;
+        let st = st?;
+        emit(&c, &native, &p, &st, &io, &res)
+    })
 }
 
 /// [`emit`] with the same second tries as [`translate`] (first halves of
