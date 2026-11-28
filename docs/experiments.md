@@ -1276,3 +1276,10 @@ Candidate (not shown): the middle level of such objects needs one of the refused
 vertex + pixel pipelines; the close versions are mesh-shader draws), so the title issues nothing for it.
 The SDK does not document the graphics packet's contents (no register layouts in d3d12_xs.h); the kit's PC-side
 pipeline tools (xgs12_pc_xs.dll, PhSO_xs.exe) may make known pipelines to compare packets against.
+
+Sampled across the whole set (deser2, autosave, every 256th of 16,384 + the first 64: 163 descriptions): 106 PS+VS with
+2D/effect input layouts (POSITION, COLOR, TEXCOORD; no NORMAL/TANGENT), 5 PS+VS with large pixel shaders, **45 PS+GS
+with no input layout, 32 of them with large material pixel shaders (0x1740-0xb400 bytes)**, 7 single-stage (VS or GS
+only). On Series X|S, mesh shaders and NGG geometry are the hardware GS stage: about 4,800 of the refused pipelines are
+mesh-style world-material pipelines, the kind an object's detail level draws with. Packet sizes 0x184-0x208, pipeline
+metadata 0x50 for the GS ones (0xbc with an input layout). Building DeserializeGraphicsPipelineStateX is next.

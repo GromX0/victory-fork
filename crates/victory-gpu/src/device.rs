@@ -371,11 +371,11 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         // SAFETY: the title's out pointer (a local of its own).
         unsafe { *out = std::ptr::null() };
     }
-    // `VICTORY_DESER_DUMP=<dir>`: the first 64 descriptions whole (the
+    // `VICTORY_DESER_DUMP=<dir>`: the first 64 descriptions and every 256th whole (the
     // description's 0x88 bytes, then each named part) as `<slot>-<n>-<k>.bin`,
     // for working out the graphics packet and the stages' metadata.
     #[cfg(windows)]
-    if calls <= 64
+    if (calls <= 64 || calls.is_multiple_of(256))
         && let Some(dir) = std::env::var_os("VICTORY_DESER_DUMP")
     {
         let dir = std::path::PathBuf::from(dir);
