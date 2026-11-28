@@ -101,3 +101,83 @@ fn patched_translates() {
     println!("{} words patched; plain {plain:?}; patched {patched:?}", patch.len());
     assert!(patched.is_ok(), "{patched:?}");
 }
+
+/// `VICTORY_DECODE_FILE=<raw GFX10 code>[;wave32]`: the listing of a bare code blob (a deserialized
+/// pipeline's stage, 28 Nov), for reading its exports and interpolants.
+#[test]
+#[ignore = "diagnostic: needs VICTORY_DECODE_FILE"]
+fn decode_raw_code() {
+    let Ok(spec) = std::env::var("VICTORY_DECODE_FILE") else { return };
+    let (file, wave32) = match spec.split_once(';') {
+        Some((f, w)) => (f.to_owned(), w == "wave32"),
+        None => (spec.clone(), false),
+    };
+    let code = std::fs::read(file).expect("the code");
+    match crate::gfx10::decode(&code) {
+        Ok(insts) => {
+            for i in &insts {
+                println!("{:06x}: {}", i.offset, i.text(!wave32));
+            }
+        }
+        Err(e) => println!("decode failed: {e}"),
+    }
+}
+
+/// `VICTORY_DESER_DIR=<dir>`: every dumped serialized mesh pipeline there
+/// (`1c8-<n>-<part>.bin`: 0 packet, 2/3 pixel code and metadata, 6/7 the
+/// GS stage's) rebuilt as containers ([`crate::deserialized`]) and
+/// translated: what fails, and why.
+#[test]
+#[ignore = "diagnostic: needs VICTORY_DESER_DIR"]
+fn deserialized_mesh_pipelines_translate() {
+    let Ok(dir) = std::env::var("VICTORY_DESER_DIR") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    let read = |n: &str, k: u32| std::fs::read(dir.join(format!("1c8-{n}-{k}.bin"))).ok();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the dump directory")
+        .filter_map(|e| {
+            let f = e.ok()?.file_name().into_string().ok()?;
+            Some(f.strip_prefix("1c8-")?.strip_suffix("-0.bin")?.to_owned())
+        })
+        .collect();
+    names.sort_by_key(|n| n.parse::<u32>().unwrap_or(0));
+    let (mut built, mut ok, mut why) = (0, 0, std::collections::BTreeMap::<String, u32>::new());
+    for n in &names {
+        let (Some(packet), Some(gs), Some(gs_meta)) = (read(n, 0), read(n, 6), read(n, 7)) else { continue };
+        let ps = read(n, 2).zip(read(n, 3));
+        let parts = crate::deserialized::StageParts { code: &gs, meta: &gs_meta };
+        let ps_parts = ps.as_ref().map(|(c, m)| crate::deserialized::StageParts { code: c, meta: m });
+        // The world root signature, as the title's own mesh containers lay it
+        // out (MSNC_VS_PropFoliageSkinDeferred): records that disagree fail.
+        let root = crate::deserialized::RootLayout { sizes: vec![1, 1, 1, 2, 2], resource_heap: true, sampler_heap: true };
+        let g = match crate::deserialized::mesh_pipeline(&packet, &root, parts, ps_parts) {
+            Ok(g) => g,
+            Err(e) => {
+                println!("{n}: not rebuilt: {e}");
+                *why.entry(format!("rebuild: {e}")).or_default() += 1;
+                continue;
+            }
+        };
+        built += 1;
+        let mut fine = true;
+        for (stage, c) in [("mesh", Some(&g.mesh)), ("pixel", g.pixel.as_ref())] {
+            let Some(c) = c else { continue };
+            if let Ok(out) = std::env::var("VICTORY_DESER_OUT") {
+                let _ = std::fs::write(std::path::Path::new(&out).join(format!("{n}-{stage}.cdxil")), c);
+            }
+            match crate::emit::translate(c) {
+                Ok(_) => {}
+                Err(e) => {
+                    fine = false;
+                    println!("{n} {stage}: {e}");
+                    *why.entry(format!("{stage}: {e}")).or_default() += 1;
+                }
+            }
+        }
+        ok += u32::from(fine);
+    }
+    println!("{built} rebuilt, {ok} translated whole");
+    for (w, k) in &why {
+        println!("{k:5} {w}");
+    }
+}

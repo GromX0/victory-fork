@@ -503,6 +503,11 @@ pub fn emit_with_retries(
     }
 }
 
+/// A DXBC container of these parts, hashed (for [`crate::deserialized`]).
+pub(crate) fn container_build(parts: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    container::build(parts)
+}
+
 /// Emits a program whose earlier stages already ran.
 pub fn emit(
     c: &Container,
@@ -837,16 +842,24 @@ fn emit_program(
         }
         _ => 0,
     };
-    let l = lower::lower(&lower::Parts {
-        native,
-        p,
-        st,
-        io,
-        res,
-        inputs,
-        outputs,
-        prims,
-        mesh_stride,
+    // A serialized pipeline's pixel stage exports in its targets' formats
+    // (`SPI_SHADER_COL_FORMAT`, [`crate::deserialized`]).
+    let color_format = c
+        .part(FourCC(crate::deserialized::COLOR_FORMAT_PART))
+        .and_then(|p| crate::dxbc::u32_at(p.data, 0).ok())
+        .filter(|_| pixel);
+    let l = lower::with_color_formats(color_format, || {
+        lower::lower(&lower::Parts {
+            native,
+            p,
+            st,
+            io,
+            res,
+            inputs,
+            outputs,
+            prims,
+            mesh_stride,
+        })
     })?;
     let wave_size = l.wave_size;
     let shader = HostShader {

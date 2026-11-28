@@ -1546,6 +1546,24 @@ pub(super) fn host_rdna() -> u32 {
 pub(super) const FIRST_HALF: &str = "the first half of an interpolation";
 
 thread_local! {
+    /// See [`with_color_formats`].
+    static COLOR_FORMATS: std::cell::Cell<Option<u32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `translate` with a pixel program's color exports in the console's
+/// export formats `formats` (`SPI_SHADER_COL_FORMAT`, 4 bits per target: 0
+/// none, 1 32_R, 2 32_GR, 3 32_AR, 4 FP16, 5 UNORM16, 6 SNORM16, 7 UINT16,
+/// 8 SINT16, 9 32_ABGR): the code of a serialized pipeline, which the
+/// console specialised for its targets (other programs come with export
+/// patches for the full 32-bit form, [`NativeProgram::patched_code`]).
+pub(super) fn with_color_formats<R>(formats: Option<u32>, translate: impl FnOnce() -> R) -> R {
+    let before = COLOR_FORMATS.replace(formats);
+    let result = translate();
+    COLOR_FORMATS.set(before);
+    result
+}
+
+thread_local! {
     /// Whether first halves of interpolations are evaluated as the pair
     /// they start ([`with_first_half_pairs`]).
     static FIRST_HALF_PAIRS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -2987,6 +3005,25 @@ impl<'a> Lower<'a> {
                 let w = self.s.m.bin(self.s.entry, Bin::LShr, f, shift);
                 let k24 = self.s.m.i32(24);
                 return Val::I32(self.s.m.bin(self.s.entry, Bin::Shl, w, k24));
+            }
+            Input::FixedPosition => {
+                // `POS_FIXED_PT`: the pixel's integer coordinates, x in bits
+                // 0-15 and y in 16-31 (Mesa's `load_pixel_coord`), from the
+                // position's x and y (pixel centres: truncation gives the pixel).
+                let (Val::I32(x), Val::I32(y)) = (self.input(Input::Position(0)), self.input(Input::Position(1))) else {
+                    return Val::Missing("a pixel system input the signature lacks");
+                };
+                let (e, f32t, i32t) = (self.s.entry, self.s.t.f32, self.s.t.i32);
+                let coordinate = |l: &mut Self, v: V| {
+                    let f = l.s.m.cast(e, Cast::Bitcast, v, f32t);
+                    let u = l.s.m.cast(e, Cast::FpToUi, f, i32t);
+                    let low = l.s.m.i32(0xFFFF);
+                    l.s.m.bin(e, Bin::And, u, low)
+                };
+                let (x, y) = (coordinate(self, x), coordinate(self, y));
+                let k16 = self.s.m.i32(16);
+                let y = self.s.m.bin(e, Bin::Shl, y, k16);
+                return Val::I32(self.s.m.bin(e, Bin::Or, x, y));
             }
             _ => return Val::Missing("a pixel system input"),
         };
@@ -6471,6 +6508,23 @@ impl<'a> Lower<'a> {
                 let w = self.s.m.bin(c, Bin::LShr, b, k16);
                 let w = self.s.m.bin(c, Bin::And, w, k127);
                 (self.bfe(a, b, w, name == "s_bfe_i32"), None)
+            }
+            "s_pack_ll_b32_b16" | "s_pack_lh_b32_b16" | "s_pack_hh_b32_b16" => {
+                // A half of src1 above a half of src0: ll both low halves,
+                // lh src0's low and src1's high, hh both high (SCC kept).
+                let (a, b) = (src32(self, 0)?, src32(self, 1)?);
+                let (k16, low, high) = (self.s.m.i32(16), self.s.m.i32(0xFFFF), self.s.m.i32(0xFFFF_0000));
+                let a = if name == "s_pack_hh_b32_b16" {
+                    self.s.m.bin(c, Bin::LShr, a, k16)
+                } else {
+                    self.s.m.bin(c, Bin::And, a, low)
+                };
+                let b = if name == "s_pack_ll_b32_b16" {
+                    self.s.m.bin(c, Bin::Shl, b, k16)
+                } else {
+                    self.s.m.bin(c, Bin::And, b, high)
+                };
+                (self.s.m.bin(c, Bin::Or, a, b), None)
             }
             "s_and_b32" | "s_or_b32" | "s_xor_b32" | "s_andn2_b32" | "s_orn2_b32"
             | "s_nand_b32" | "s_nor_b32" | "s_xnor_b32" => {
@@ -12734,6 +12788,14 @@ impl<'a> Lower<'a> {
             .exports
             .get(&(b, i))
             .ok_or("an export I/O raising did not see")?;
+        if let Target::Color(n) = e.target
+            && let Some(formats) = COLOR_FORMATS.get()
+        {
+            let format = formats >> (4 * u32::from(n)) & 0xF;
+            if e.compressed || matches!(format, 1..=3) {
+                return self.export_formatted(b, i, &e, n, format);
+            }
+        }
         if e.compressed {
             return Err("a compressed export");
         }
@@ -12962,6 +13024,116 @@ impl<'a> Lower<'a> {
             );
         }
         self.end_guarded(at, &[]);
+        Ok(())
+    }
+
+    /// A color export in the console's export format `format`
+    /// ([`with_color_formats`]): compressed, two 16-bit values per VGPR
+    /// (channel 2k in the low half of the k-th source, 2k + 1 in its high
+    /// half), or the 32-bit short forms. GFX10 exports 32_AR's alpha in
+    /// channel 1 (Mesa's `si_export_mrt_color`, GFX10 and later).
+    fn export_formatted(&mut self, b: usize, i: usize, e: &Export, n: u8, format: u32) -> Result<(), Why> {
+        let guard = self.guard(b, i)?;
+        if let Some(g) = guard {
+            if !(e.done && self.s.pixel) {
+                return Err("a conditional export");
+            }
+            let c = self.cur;
+            let t = self.s.m.bool(true);
+            let kill = self.s.m.bin(c, Bin::Xor, g, t);
+            self.s
+                .op(c, "discard", Attr::NoUnwind, self.s.t.void, 82, &[kill]);
+        }
+        let Some(id) = self
+            .s
+            .outputs
+            .iter()
+            .position(|o| o.kind == 16 && o.row == Some(u32::from(n)))
+        else {
+            return Ok(());
+        };
+        let f32t = self.s.t.f32;
+        let mut channels: [Option<V>; 4] = [None; 4];
+        if e.compressed {
+            if !(4..=8).contains(&format) {
+                return Err("a compressed export to a 32-bit export format");
+            }
+            for ch in 0..4 {
+                let Some(v) = e.values[ch] else { continue };
+                let x = self.i32_of(v)?;
+                let c = self.cur;
+                let h = if ch % 2 == 1 {
+                    let k16 = self.s.m.i32(16);
+                    self.s.m.bin(c, Bin::LShr, x, k16)
+                } else {
+                    let low = self.s.m.i32(0xFFFF);
+                    self.s.m.bin(c, Bin::And, x, low)
+                };
+                let sext = |l: &mut Self, h: V| {
+                    let k16 = l.s.m.i32(16);
+                    let up = l.s.m.bin(c, Bin::Shl, h, k16);
+                    l.s.m.bin(c, Bin::AShr, up, k16)
+                };
+                let y = match format {
+                    4 => {
+                        let f = self.s.op(c, "legacyF16ToF32", Attr::ReadNone, f32t, 131, &[h]);
+                        self.as_int(f)
+                    }
+                    5 => {
+                        let f = self.s.m.cast(c, Cast::UiToFp, h, f32t);
+                        let scale = self.s.m.f32((1.0f32 / 65535.0).to_bits());
+                        let f = self.s.m.bin(c, Bin::Mul, f, scale);
+                        self.as_int(f)
+                    }
+                    6 => {
+                        let s = sext(self, h);
+                        let f = self.s.m.cast(c, Cast::SiToFp, s, f32t);
+                        let scale = self.s.m.f32((1.0f32 / 32767.0).to_bits());
+                        let f = self.s.m.bin(c, Bin::Mul, f, scale);
+                        let minus_one = self.s.m.f32((-1.0f32).to_bits());
+                        // `dx.op.binary` FMax 35: -32768 gives -1, as the hardware clamps.
+                        let f = self.s.op(c, "binary.f32", Attr::ReadNone, f32t, 35, &[f, minus_one]);
+                        self.as_int(f)
+                    }
+                    7 => h,
+                    _ => sext(self, h),
+                };
+                channels[ch] = Some(y);
+            }
+        } else {
+            let from: [Option<usize>; 4] = match format {
+                1 => [Some(0), None, None, None],
+                2 => [Some(0), Some(1), None, None],
+                _ => [Some(0), None, None, Some(1)],
+            };
+            for ch in 0..4 {
+                if let Some(k) = from[ch]
+                    && let Some(v) = e.values[k]
+                {
+                    channels[ch] = Some(self.i32_of(v)?);
+                }
+            }
+        }
+        let (col0, cols, comp) = {
+            let el = &self.s.outputs[id];
+            (el.col, el.cols, el.comp)
+        };
+        for (ch, x) in channels.into_iter().enumerate() {
+            let Some(x) = x else { continue };
+            let col = ch as u8;
+            if col < col0 || col >= col0 + cols {
+                continue;
+            }
+            self.s.outputs[id].usage |= 1 << (col - col0);
+            let (suffix, x) = if comp == 9 {
+                (".f32", self.as_float(x))
+            } else {
+                (".i32", x)
+            };
+            let args = [self.s.m.i32(id as u32), self.s.m.i32(0), self.s.m.i8(col - col0), x];
+            let void = self.s.t.void;
+            self.s.op(self.cur, &format!("storeOutput{suffix}"), Attr::NoUnwind, void, 5, &args);
+        }
         Ok(())
     }
 

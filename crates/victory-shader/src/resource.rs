@@ -2384,6 +2384,13 @@ fn copy_source(inst: &Inst, k: usize) -> Option<Moved> {
         let (w, at) = (inline(*w)? & 31, inline(*at)? & 31);
         return Some(Moved::Const(((1u32 << w) - 1) << at));
     }
+    // Its 64-bit form, as the console's serialized pipelines make a
+    // sampler's first two words (`s_bfm_b64 s[60:61], 2, 54`).
+    if let ("s_bfm_b64", [Operand::Const(w), Operand::Const(at)]) = (inst.name(), &src[..]) {
+        let (w, at) = (inline(*w)? & 63, inline(*at)? & 63);
+        let mask = ((1u64 << w) - 1) << at;
+        return Some(Moved::Const((mask >> (32 * k)) as u32));
+    }
     let src = src.first()?;
     match (inst.name(), *src) {
         ("s_mov_b32" | "s_mov_b64", Operand::Scalar { code, .. }) if code != NULL => {

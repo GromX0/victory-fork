@@ -285,11 +285,21 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
             // v_writelane_b32, v_movreld_b32, DPP that skips lanes) and
             // partial-EXEC writes pass; check those too if a mesh program
             // writes v5 that way.
-            let per_lane = p.blocks.iter().flat_map(|b| &b.insts).find(|i| {
-                i.read(Reg::V(5)).is_some_and(|v| group.contains(&v))
-                    && i.name() != "v_readfirstlane_b32"
-                    && (i.write(Reg::V(5)).is_none() || operand_reads(p, i).contains(&Reg::V(5)))
-            });
+            // A read where only lane 0 runs is the first lane's (the console's
+            // serialized mesh pipelines shift it there under `s_mov_b64 exec, 1`
+            // and share it through LDS).
+            let per_lane = p
+                .blocks
+                .iter()
+                .enumerate()
+                .flat_map(|(b, k)| k.insts.iter().enumerate().map(move |(n, i)| (b, n, i)))
+                .find(|&(b, n, i)| {
+                    i.read(Reg::V(5)).is_some_and(|v| group.contains(&v))
+                        && i.name() != "v_readfirstlane_b32"
+                        && (i.write(Reg::V(5)).is_none() || operand_reads(p, i).contains(&Reg::V(5)))
+                        && !lane0_only(p, b, n)
+                })
+                .map(|(_, _, i)| i);
             if let Some(i) = per_lane {
                 return Err(unsupported(
                     i.machine.offset,
@@ -513,6 +523,25 @@ pub fn raise(p: &Program, native: &NativeProgram) -> Result<Io, ShaderError> {
 }
 
 /// The pixel input VGPRs that `addr` enables, with their meaning.
+/// Whether only lane 0 runs instruction `at` of block `b`: the last EXEC
+/// write before it, back along single-predecessor blocks, sets EXEC to 1.
+fn lane0_only(p: &Program, b: usize, at: usize) -> bool {
+    let (mut b, mut end) = (b, at);
+    for _ in 0..p.blocks.len() {
+        for i in p.blocks[b].insts[..end].iter().rev() {
+            if i.write(Reg::S(crate::ir::EXEC)).is_some() {
+                let t = i.machine.text(true);
+                return t == "s_mov_b64 exec, 1" || t == "s_mov_b32 exec_lo, 1";
+            }
+        }
+        match p.blocks[b].preds[..] {
+            [q] => (b, end) = (q, p.blocks[q].insts.len()),
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn ps_vgprs(addr: u32) -> Vec<(u8, Input)> {
     let mut out = Vec::new();
     let mut next = 0u8;

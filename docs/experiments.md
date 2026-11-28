@@ -1315,3 +1315,44 @@ DB_DEPTH_CONTROL 0x007007f0, blend 0xe5040504 = alpha blending, masks 0xff, samp
 Context +0xa8 (16 halves, pairs per target) is the SX blend-optimisation per target, not the pixel inputs. Where the
 pixel inputs' parameter mapping is kept is not found yet: in the SPI structs, or implied (attribute n = parameter n) by
 compiling the stages together; to be checked against the code (exp param / v_interp attr).
+
+### Serialized mesh pipelines rebuilt as console containers (28 Nov, offline; deser2's 48 GS-stage pipelines)
+
+Stage I/O, checked on the dumped code (`decode_raw_code`, listings in D:\victory-scratch\deser2\asm):
+- **Attribute n = parameter n**: on all 156 sampled pixel stages with a vertex or mesh partner, every `v_interp` attribute
+  the pixel code reads is a parameter the partner exports (0 exceptions). The stages are compiled together, so the
+  mapping (`SPI_PS_INPUT_CNTL_n`) is the identity and is not stored. A parameter read with 16-bit interpolation
+  (`v_interp_p1ll_f16`/`p2_f16`, `high`) carries 8 halves (two 16-bit rows per dword), as packed console outputs do.
+- The GS stage is a mesh shader: its entry matches the title's own mesh programs (`s3` bits 24-27 the wave, `v5` the group
+  times 128). Limits from `PsoSpi_GeometryShader`: +0x18 VGT_GS_ONCHIP_CNTL bits 0-10 = 128 lanes, +0x1c and +0x20 = 128
+  and 128 (vertex / primitive maxima; equal in every sample, so their order is not shown), +0x30 VGT_GS_OUT_PRIM_TYPE 2
+  (triangles), RSRC2_GS bit 19 = one 512-byte LDS granule. Identical in all 48.
+- Context fields found by matching against the code: +0x00 SPI_PS_INPUT_ENA (also the VGPR layout: 12288's v4 is the
+  fixed-point position bit 15 predicts), +0x04 SPI_PS_IN_CONTROL (bits 0-5 = attribute count; **bit 15 = wave32**, exact
+  on 133 pixel stages, 12 of them wave32), +0x18 **SPI_SHADER_COL_FORMAT** (fits all 156: compressed exports where FP16,
+  the 5 `exp null` ones have the 32_R placeholder), +0x40 **PA_CL_VS_OUT_CNTL** (14080, one distance: 0x1400101; 12032,
+  four: 0x1400f0f; clip and cull both enabled for each, AMD's form for clip distances).
+- The depth format is not in the packet (the render-target block's first word follows the pipeline kind, not depth use);
+  on the console it belongs to the bound depth view. The title's own world mesh pipelines use D32_FLOAT_S8X24 (G-buffer)
+  and D16 (shadows).
+- Stage metadata: as the compute form, header 0x10 (u32 2, size, code dwords, 0x40, ?, record count, 0), the 0x41
+  record's +0x10 is a structured buffer's stride (0x42 kind 12). It leaves out the heap addresses: the title's own
+  `MSNC_VS_PropFoliageSkinDeferred` has its root parameters from user-data dword 8 in slot order (tables 8, 9, 10, root
+  view 11-12, constants b500 13-14) then the resource heap at 15 and the sampler heap at 16; every record agrees with
+  that layout except 4 pipelines (another root signature: refused, not guessed).
+
+Built (`victory_shader::deserialized`, not used by the device yet): per stage a console container (FSSM in an XDAT
+index, ISG1/OSG1/PSG1 rows from the above, a `VXCF` part with the pixel stage's SPI_SHADER_COL_FORMAT); the translator
+now exports compressed and short-form colors by that format (FP16/UNORM16/SNORM16/UINT16/SINT16 halves, 32_R/GR/AR),
+gives `POS_FIXED_PT` (integer x | y << 16 from SV_Position), lowers `s_pack_{ll,lh,hh}_b32_b16`, folds `s_bfm_b64`
+sampler words, and takes the group input in a lane-0-only section. The mesh stages' common prologue (wave 0 lane 0
+shifts the group id and passes it through LDS between barriers, under `s_mov_b64 exec, 1`) is rewritten in place to each
+lane taking it (`v_readfirstlane` + shift, EXEC full): on the host the group input is the same in every lane, and the
+lane-0 sections only move uniform values through LDS (checked on all 48: scalar code, `ds_read/write_b32` of uniform
+values, `v_readfirstlane`, barriers; no stores or exports).
+
+Offline (`deserialized_mesh_pipelines_translate`, VICTORY_DESER_DIR): 44 of 48 rebuilt, **0 translated whole yet**: the
+rest are lane-mask forms of this newer compiler (`s_and_b64 exec, sN, exec` ... `s_andn2_b64 exec, sM, exec` in place of
+`s_and_saveexec`: "a select on an untracked mask" 31, "a lane mask read as data" 25, "a constant lane mask" 7, "an opaque
+lane mask" 5), 7 conditional exports, and one each of `s_cmovk_i32`, a DPP compare, a whole-wave section.
+Suite: 301 pass; `the_record_count_of_a_structured_buffer_read_by_index` crashes (access violation) at 17fe65ea too.
