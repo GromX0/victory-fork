@@ -72,3 +72,32 @@ fn probe() {
         println!("{name}: {:.2} ms (least {:.2})", times[times.len() / 2], times[0]);
     }
 }
+
+/// `VICTORY_PATCH_TEST=<container.cdxil>;<patch file>` and `--ignored
+/// patched_translates`: the container translates with the patch file's lines
+/// for its hash applied (`VICTORY_CODE_PATCH`'s format, code may grow): for
+/// checking a recorder's detour before a run.
+#[test]
+#[ignore = "a tool: VICTORY_PATCH_TEST=<cdxil>;<patch>"]
+fn patched_translates() {
+    let Ok(spec) = std::env::var("VICTORY_PATCH_TEST") else { return };
+    let (file, patch_file) = spec.split_once(';').expect("<cdxil>;<patch>");
+    let bytes = std::fs::read(file).expect("the container");
+    let name = std::path::Path::new(file).file_name().unwrap().to_string_lossy().to_ascii_lowercase();
+    let hex = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+    let mut patch = Vec::new();
+    for line in std::fs::read_to_string(patch_file).expect("the patch").lines() {
+        let mut words = line.split('#').next().unwrap_or("").split_whitespace();
+        let (Some(h), Some(at)) = (words.next(), words.next().and_then(hex)) else { continue };
+        if !name.starts_with(h.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        for (i, w) in words.filter_map(hex).enumerate() {
+            patch.push((at as usize + 4 * i, w as u32));
+        }
+    }
+    let plain = super::translate(&bytes).map(|t| t.dxil.len());
+    let patched = super::with_code_patch(patch.clone(), || super::translate(&bytes)).map(|t| t.dxil.len());
+    println!("{} words patched; plain {plain:?}; patched {patched:?}", patch.len());
+    assert!(patched.is_ok(), "{patched:?}");
+}

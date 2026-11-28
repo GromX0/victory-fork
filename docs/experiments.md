@@ -1081,3 +1081,73 @@ their street (pop2-pop5, nohiz):
 So for the tree-shader objects the flag that hides them is not the occlusion test; what is left in it are
 the per-view plane tests and the per-instance flags combined with them (55679a05 0x2700-0x27a4). Other
 objects that pop are not covered by that flag at all. Not done: which part of the flag, and what removes the rest.
+
+### Correction: the rec2 "impossible" culling records are a shortcut path (28 Nov)
+
+The rec2 recorder records (55679a05, at the gate 0x27b8) with every per-view result 1 and the final 0 were
+read as a translator lane-mask fault. They are not one. 0x1590 branches to 0x1a30 when batch flag s39 bit 1
+is clear; that path sets v6-v9 to 1 and goes straight to the gate, so the final there is v30 alone (the
+occlusion result from 0x1574), and the recorder's plane bits (v27, v26, v17, v22) are left-over registers. The
+translated combine block 0x2700-0x27b4 (5567.ll, block %4617) matches the console: base & (view0|view1|view2)
+| ((s39 & 0x100 | v30) & view3). No translator fix follows from rec2.
+
+Not yet tested: on that path v30 = (s39 & 0x102) == 0x102 ? the earlier v30 : v13, and v13 is inverted when
+s45 bit 0 is set (0x1544-0x1560). nohiz forced the depth compare (0x1534) to "visible", which the inversion turns
+into "culled" in those passes, so nohiz did not show what the occlusion result alone does. The recorder also
+needs s39 and s45 per record to tell the paths apart.
+
+### occl: occlusion forced visible after the flip (28 Nov, user at their street)
+
+`patch-occl.txt` (scan/occl.js): the HiZ result (nohiz's 40 sites) and the per-batch flip after it (15 sites, `v_cndmask
+vX, vB, vX, s[..]` after `v_cmp_eq_u32 vcc, 0, vX`) both set to 1 in the BatchCull shaders, plus the tree recorder with
+the path flags (bit 10 s39 bit 1, bit 11 s45 bit 0, bit 12 s39 bit 8). **Objects still pop**: the user stood where one
+was gone (frame 2611, heap 0x3a100000). Occlusion is ruled out for the popping.
+
+Recorder, frame 2611, 17 tree dispatches split by the counter in each dump (scan/passes.js): the last and largest
+(2,502 records, s34 0x5979b90, the main view by its size and results) kept all 149 tree instances within 40 m in the
+camera's direction (330-30 degrees) and all 4 within 15 m. The other dispatches (shadow and other views) keep a part.
+Every in-view tree instance within 40 m is kept by some dispatch (scan/inst.js). So in the tree pass nothing in view
+is culled; what hides the object comes later (the level of detail picked after the gate at 0x27bc, meshlet culling,
+the draw) or in another BatchCull family (props, grass, simple), which this recorder does not see. Dropped work this
+run: the ray-tracing builder (off), 39f0e9ae (skipped on purpose), f1687692 (tree skinning for ray tracing) only.
+
+The main-view tree dispatch (17) in the camera's direction (330-30 degrees, scan/mid.js): every instance with
+distance minus radius under 70 m kept (367), none culled; beyond 72 m 600 culled, every one with all four per-view
+plane tests failed (v27, v26, v17, v22 = 0; occlusion forced 1), and 110 kept, by view 3 (95) or view 2 (15) alone.
+A range cut at about 70 m in views 0 and 1 for full-detail trees, by design as far as this shows: past it a far
+version is meant to take over. The user's bush and palm were gone at that moment. pop4 (the gate forced) drew the
+full-detail versions past the cut, which is why they came back there (and why everything else doubled up). So the
+fault is in the hand-over: the far version of those objects is missing, culled in its own pass (Slod, ImposterOnly,
+the level-of-detail choice after the gate), or not loaded. Not yet traced.
+
+### recall: all seven BatchCull passes recorded (28 Nov, user at their street, bush and palm gone)
+
+`patch-occl-all.txt` = occlusion forced (as occl) + scan/recall.js: at each pass's gate a 64-byte record per instance
+(pass, final, fade, size, position, s34, camera, s39, s45) into per-pass rings in the culling heap's tail (counters
+at heap + 0xa9ff000, rings of 8192 at + 0xaa00000 + pass * 0x80000), dumped after every culling dispatch. Read with
+scan/readall.js (frame 7731, heap 0x36ac0000).
+
+**Correction to occl:** the dumps' counters show the lists run on the GPU in another order than recorded: the group
+that holds every pass including Slod and Simple (main camera only) ran before the others. occl's "dispatch 17" was
+the last by counter, so most likely a shadow view; its 70 m cut is not the main view's.
+
+Main camera's passes (the group's dumps): within 80 m in the camera's direction, of the props it drops 300 of 303
+have another record kept within 1.5 m (their other level of detail); trees the same (582 of 643 dropped past 72 m
+have a kept tree record within 4 m). Simple and grass keep everything in view. So in the main view the culling keeps
+a version of nearly every object in view; the bush and palm are not lost in culling. They are lost after it: the
+kept version (the level of detail for that distance) is drawn invisibly or not drawn. Per-pass dispatch counts and
+the far-only ones (Slod: no position in the record) are in readall.js's output.
+
+### who5: the pixel tracer on the purple bush and fan palm, visible and gone (28 Nov, 01:20-01:35)
+
+Run who5 (occlusion forced, `VICTORY_PIXEL_WHO=D:\victory-runs\who5.txt`), user's save, daylight, at the house with
+the jet ski. Captures in D:\victory-scratch\capture\who5.
+- Visible (frame 6448, close): the purple bush is written by `mesh 89a62261 / pixel 6539386a` (args 0x2ed48080,
+  1,024 of 1,024 in its box); the fan palm by the same pair from three neighbouring argument slots (0x2ed3f080 /
+  090 / 0a0: 144-870 of 1,024 each), the detail levels.
+- Gone (frame 7788, a few metres back, same direction): both missing on screen while **the palm's trunk shadow is
+  still on the road**: the palm is drawn into the shadow map, not into the main view. The boxes placed by
+  landmarks show the red bushes and the background palms (the same shader pair, other draws); this shader pair
+  has 1,288 / 1,367 indirect draws a frame, so the bush's own draw is not singled out by the box alone.
+Next, offline: the bush's draw in 6448 (args 0x2ed48080) identified by its per-draw data (object position or
+constants) and looked for in 7788: issued with zero groups, issued and drawn elsewhere, or not issued.

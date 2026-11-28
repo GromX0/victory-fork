@@ -90,6 +90,10 @@ fn code_patched(path: &std::path::Path, code: &[u8]) -> Vec<u8> {
         }
         for (i, word) in words.filter_map(hex).enumerate() {
             let o = at as usize + 4 * i;
+            // As the translator does: past the end the code grows.
+            if code.len() < o + 4 && o < 1 << 20 {
+                code.resize(o + 4, 0);
+            }
             if let Some(b) = code.get_mut(o..o + 4) {
                 b.copy_from_slice(&(word as u32).to_le_bytes());
             }

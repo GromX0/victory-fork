@@ -361,7 +361,15 @@ fn translate(container: &[u8], hash: &str) -> Result<Translated, String> {
         None => Vec::new(),
     };
     // A diagnostic patch of the same shader (VICTORY_CODE_PATCH) replaces this one.
-    let patched = code_patched(container, hash).or_else(|| lod_near_patch(container, hash));
+    // The tree pass's detail-level change is made outside the cache; that
+    // shader's built-in changes (`crate::builtin`) go with it.
+    let patched = code_patched(container, hash).or_else(|| {
+        let mut near = lod_near_patch(container, hash)?;
+        if crate::builtin::has(hash) {
+            near.extend(crate::builtin::patch(container, hash).unwrap_or_default());
+        }
+        Some(near)
+    });
     let host = if wave32(hash) || patched.is_some() {
         let wave32 = wave32(hash);
         if wave32 {

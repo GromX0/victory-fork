@@ -461,6 +461,11 @@ fn translate_plain(container: &[u8]) -> Result<HostShader, ShaderError> {
         })?;
     CODE_PATCH.with_borrow(|patch| {
         for &(at, word) in patch {
+            // Past the program's end the code grows (zeros between): room
+            // for code a patch adds and branches to (a recorder's detour).
+            if native.code.len() < at + 4 && at < 1 << 20 {
+                native.code.resize(at + 4, 0);
+            }
             if let Some(bytes) = native.code.get_mut(at..at + 4) {
                 bytes.copy_from_slice(&word.to_le_bytes());
             }
