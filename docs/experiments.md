@@ -1262,3 +1262,17 @@ None of their code is in shaders.rpf (`VICTORY_FIND_CODE`, checked on a known sh
 containers nor in any other record it unpacks: where the serialized pipelines come from is not known, so what they
 draw is not known. The bush and palm close up are mesh-shader draws (89a62261); a link between the refused pipelines
 and the vanishing objects is not shown.
+
+### route2: the bush and palm traced at close and middle (28 Nov, pixel tracer, user's save, night)
+
+Close (frame 2457): the bush is `mesh 89a62261 / pixel 6539386a`, root3 0xc8df00000 (39 groups) and 0xc35a00000 (45);
+the palm the same pair at root3 0xcbb600000 (73), 0xcbb6c13b0 (12), 0xcbb6da5d0 (4) and `fe660f2d / b0e293b1` at
+0xcbb6e9780 (4): 260-1,024 of 1,024 box pixels each. Middle (frame 3776, both gone): **every one of those draws is
+issued, in both lists, with 0 mesh groups**; the boxes on their spots are written only by other things: the foliage
+behind (`adc5c689 / d3bf7d8d`), the house (`cf43bdbf`), another palm (`89a62261` at another slot) and the full-screen
+lighting (`vertex 25ebc920`, kind 0). No middle version of either is drawn. So the geometry is missing (count 0,
+nothing rasterized), not transparent and not overwritten. The dark shapes on their spots are other objects.
+Candidate (not shown): the middle level of such objects needs one of the refused deserialized pipelines (they are
+vertex + pixel pipelines; the close versions are mesh-shader draws), so the title issues nothing for it.
+The SDK does not document the graphics packet's contents (no register layouts in d3d12_xs.h); the kit's PC-side
+pipeline tools (xgs12_pc_xs.dll, PhSO_xs.exe) may make known pipelines to compare packets against.
