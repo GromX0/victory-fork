@@ -434,6 +434,76 @@ pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> 
     unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
 }
 
+/// `MEMORYSTATUSEX`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MemoryStatusEx {
+    pub length: u32,
+    pub load: u32,
+    pub total_phys: u64,
+    pub avail_phys: u64,
+    pub total_page_file: u64,
+    pub avail_page_file: u64,
+    pub total_virtual: u64,
+    pub avail_virtual: u64,
+    pub avail_extended_virtual: u64,
+}
+
+/// The console's answer, not the PC's: the title's memory (Series X 13.5 GB,
+/// Series S 7.6 GB) with `VICTORY_MEMSTATUS_AVAIL_MB` of it free (default
+/// 6,144). Bound to the host, the title read the PC's: 32 GB with a few free,
+/// our process holding ~30 GB (28 Nov: the close versions of objects dropped
+/// at ~20 m of their ~200 m on this 32 GB PC, not on a reported 64 GB one).
+/// `VICTORY_MEMSTATUS=host`: the PC's, as before. The PC's figures are logged
+/// at the first asking and every 4,096th.
+pub extern "system" fn GlobalMemoryStatusEx(out: *mut MemoryStatusEx) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    let host = || {
+        let mut s = MemoryStatusEx { length: size_of::<MemoryStatusEx>() as u32, ..Default::default() };
+        // SAFETY: a sized structure of our own.
+        unsafe {
+            windows_sys::Win32::System::SystemInformation::GlobalMemoryStatusEx(std::ptr::from_mut(&mut s).cast())
+        };
+        s
+    };
+    static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if ASKED.fetch_add(1, std::sync::atomic::Ordering::Relaxed).is_multiple_of(4096) {
+        let h = host();
+        tracing::info!(
+            total_mb = h.total_phys >> 20,
+            avail_mb = h.avail_phys >> 20,
+            page_total_mb = h.total_page_file >> 20,
+            page_avail_mb = h.avail_page_file >> 20,
+            "the title asks GlobalMemoryStatusEx (the PC's figures)"
+        );
+    }
+    let as_host = std::env::var("VICTORY_MEMSTATUS").is_ok_and(|v| v.trim() == "host");
+    let s = if as_host {
+        host()
+    } else {
+        let (gpu_optimal, standard) = victory_gpu::console::current().title_memory();
+        let total = (gpu_optimal + standard) as u64;
+        let avail_mb = std::env::var("VICTORY_MEMSTATUS_AVAIL_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(6144);
+        let avail = (avail_mb << 20).min(total);
+        MemoryStatusEx {
+            length: size_of::<MemoryStatusEx>() as u32,
+            load: (100 - avail * 100 / total.max(1)) as u32,
+            total_phys: total,
+            avail_phys: avail,
+            total_page_file: total,
+            avail_page_file: avail,
+            total_virtual: 1 << 47,
+            avail_virtual: 1 << 46,
+            avail_extended_virtual: 0,
+        }
+    };
+    // SAFETY: checked non-null; the title passes a MEMORYSTATUSEX.
+    unsafe { out.write(s) };
+    1
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "kernel",
@@ -445,6 +515,7 @@ pub(crate) fn module() -> HleModule {
             "api-ms-win-core-debug-*",
             "api-ms-win-core-errorhandling-*",
             "api-ms-win-crt-runtime-*",
+            "api-ms-win-core-sysinfo-*",
         ],
         exports: vec![
             hle_export!(__p___argc),
@@ -468,6 +539,7 @@ pub(crate) fn module() -> HleModule {
             hle_export!(_invalid_parameter_noinfo_noreturn),
             hle_export!(TerminateProcess),
             hle_export!(SetUnhandledExceptionFilter),
+            hle_export!(GlobalMemoryStatusEx),
             hle_export!(SetThreadPriority),
         ],
     }

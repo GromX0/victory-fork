@@ -1219,3 +1219,9 @@ back: the CPU lists no instance of it there. Forcing the GPU families' gates (pr
 the same reason; forcing the Slod gate drew the far versions everywhere (the broken textures). Next: the CPU's
 level-of-detail distance (the entity's lodDist times the title's LOD scale; the title's structures name LodScale and
 LodMult per level): why it cuts the close versions at ~1/10 of their range here.
+
+memstat (`GlobalMemoryStatusEx` answered as the console, not the PC; kernel.rs): still pops (user), and the log shows
+**the title never called it** (0 calls; it is only imported). The memory figures the title gets are not the input. Not
+called either: `XMemGetWorkingSetStatistics` on Series X. Left: the title's CPU code that picks the close version
+against its distance (a disassembly of game_scarlett_master.exe around the draw callers +0x4e315bb, +0x32472 and
++0x555e97c), to find the scale it multiplies the entity's lodDist by and what feeds it.
