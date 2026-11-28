@@ -1480,3 +1480,33 @@ Later the same morning (still unattended):
   are filled (visibility), not by a missing model at this point.
 - Per-slot draws `fe660f2d` / `903776ba` dropped at the start view (slotdrop1): no visible change, but none of them
   ran in the single captured frames: inconclusive.
+
+### The CPU's close-version distance, read from the code and live (28 Nov, ~10:30) — corrects "cut ~10x too early"
+
+- **Map data** (live scan for `rage__fwEntityDef`-shaped records, ~19,000 hits, most of them noise at lodDist 1):
+  1,666 orphan-HD entities (`lodLevel` 5), 1,440 of them with **lodDist 10-30 m**; HD with a parent (level 0)
+  120-250 m; LOD (1) 250-500 m; SLOD1 (2) over 1,500 m.
+- **Load** (+0x5290688): the entity keeps `(u16) lodDist` at +0x88, the level in +0x96 bits 0-3, its definition at +0x110.
+- **The distance the scan uses** (+0x51f9070, +0x51f90d0, +0x4f2e350): `lodDist x scale`, `scale` = a category factor
+  (1 here) x a per-level factor from the table at title+0xA15E080 (bank by a per-thread flag; +0xAC / +0x12C per
+  level), plus for orphan HD +5 m (lodDist < 21) or +20 m (a table at +0x61778b8; others +20). Type 2: min(lodDist,
+  200). **Live: the per-level factor is 1.4079 for every level in both banks**; other factors 1, 1, 0.64, 1, 1, 1
+  and per-level 0.3/0.8/.../1 and 0.8/0.6/0.5/0.5/0.85/0.8/1 for the categories (alternatives).
+- So a 20 m orphan-HD bush is drawn by the CPU path to 20 x 1.41 + 5 = ~33 m: **what the data and this scale say**,
+  not a cut 10x too early. With the far version from (220 - 25) x 1.0 = 195 m, the band 33-195 m has nothing.
+- **The console fills it**: Digital Foundry's Series X|S analysis (Nov 2026, through press and forum summaries:
+  purexbox.com, neogaf.com) describes Series X pop-in as very minor and at long distance; Series S draws foliage much
+  closer to the camera. So the gap is a defect here, and the per-level scale (or the far versions' start scale s38,
+  1.0 here) is where a Series X differs. Next: hold the table at a larger value live and look.
+
+**Where the per-level factor comes from** (lodscale7, lodtab2): held at 7.0 live, bank 0 was rewritten by the title
+every frame (to 1.203 then), bank 1 kept 7.0. The writer is +0x3e571f0: `g = base x [table+0x180] (1.0) x
+max(1, tan(22.5 deg) / tan(fov / 2))` (+0x3298360, the camera's field of view: >1 only for a camera narrower than
+45 deg, the opening and idle shots), eased over time; per level `1.0 x g`. The base (title+0xab4a20c) is a block of
+settings blended toward targets (+0xab4a284, unset: -1) and copied from parsed records only behind a flag
+(+0x497aa0, [title+0xaaec154] = 1). Live: base 1.0, targets unset. **So the CPU path's distance is `lodDist x ~1
+(+5/+20 m)`: data and camera only, nothing of the machine.** A Series X computes the same ~25-33 m for these
+orphan-HD props. Since it fills the band (DF), the band must come from the GPU instance families' middle levels,
+which are empty here (title side: 0 of 495 empty slots filled, run dm; forcing level 0 in all 24 culling shaders
+changed nothing, userfamily: all of an archetype's family levels are empty, not only level 1). Next: why the title
+never fills the GPU family's mesh records (its streaming of those LOD meshes, or the pass that builds them).
