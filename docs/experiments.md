@@ -1225,3 +1225,20 @@ memstat (`GlobalMemoryStatusEx` answered as the console, not the PC; kernel.rs):
 called either: `XMemGetWorkingSetStatistics` on Series X. Left: the title's CPU code that picks the close version
 against its distance (a disassembly of game_scarlett_master.exe around the draw callers +0x4e315bb, +0x32472 and
 +0x555e97c), to find the scale it multiplies the entity's lodDist by and what feeds it.
+
+### Overnight 28 Nov: tracing the CPU's choice of the close version (tools and findings so far)
+
+Tools (D:\victory-scratch, not in the repo): `x64dis` (iced-x86; modes sections, dis, func (by .pdata), xref, callers,
+floats, grep, after, imports) on game_scarlett_master.exe; WinDbg's cdb (C:\Program Files\WindowsApps\
+Microsoft.WinDbg_1.2611.4001.0_x64__8wekyb3d8bbwe\amd64\cdb.exe), attached with `sxi av; sxi gp; ...` (the layer's
+own faults). A `ba` write breakpoint left a single-step exception (0x80000004) in a thread after `bc *; qd`: the title
+crashed after the detach (its crash reporter's upload was blocked). Imports the layer does not answer and that report
+the machine: GetLogicalProcessorInformation, Get/SetThreadGroupAffinity, IsProcessorFeaturePresent, the timers.
+`GlobalMemoryStatusEx` is answered now (never called). Public: the PC GDK on GitHub; the console GDKX is NDA-only.
+
+The CPU's per-frame list for the CPU-submitted batches (CS_PackInstances' SRV s0+0, three per pass: 0x7c, 0x14d0,
+0xa08 bytes in the frame's upload ring) holds words `(n << 29) | batch`, n 1-4. It is packed by title +0x4e4b690
+(called from +0x4e4af37, in +0x4e4af00) from four arrays of an object (`[rbx+50h..68h]`, each of items with a word
+count at +0x36 and entries at +8; n from +0x3a990, a descriptor's log2 size). The visibility choice is made where
+those four arrays are filled. Next: a code breakpoint at +0x4e4b6c0 for the object, then a write breakpoint on an
+array's storage to catch the code that fills it.

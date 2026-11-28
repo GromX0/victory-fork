@@ -784,6 +784,18 @@ fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
     }))
 }
 
+/// A compute pipeline from a shader container we put together (device method
+/// 0x218, the console's pipelines from loose native parts: [`crate::device`]).
+pub(crate) fn create_compute_from(container: &[u8], iid: *const Iid, out: *mut This) -> HRESULT {
+    hand_out(
+        vec![shader("compute", container)],
+        #[cfg(windows)]
+        None,
+        iid,
+        out,
+    )
+}
+
 fn hand_out(
     shaders: Vec<Arc<Shader>>,
     #[cfg(windows)] graphics: Option<Box<host::GraphicsState>>,

@@ -346,14 +346,16 @@ fn feature_levels(data: *mut c_void) -> HRESULT {
     }
 }
 
-/// Device methods 0x1c8 and 0x218 (`SLOT`). The title calls both
-/// (title+0x2477578 and title+0x24800d5) as `(this, description, interface
-/// id, out)`, asks for `ID3D12PipelineState`, and on success keeps the
-/// object `out` names and draws with it; on failure it goes without that
-/// pipeline, silently. What the descriptions hold is not known: the calls
-/// fail as they always did, with `out` null, and the first ones log the
-/// description's words and what its first word points at, so that the two
-/// methods can be written.
+/// Device methods 0x1c8 and 0x218 (`SLOT`): `DeserializeGraphicsPipelineStateX`
+/// and `DeserializeComputePipelineStateX` (the console's pipelines serialized
+/// at build time: a GPU packet, metadata, and per stage the GPU instructions
+/// and their metadata; compiled shaders, never compiled at runtime). The
+/// title calls both (title+0x2477578 and title+0x24800d5) as `(this,
+/// description, interface id, out)`, asks for `ID3D12PipelineState`, and on
+/// success keeps the object `out` names and draws with it; on failure it goes
+/// without that pipeline, silently (+0x2477a07: on to the next one, no other
+/// way of making it). The graphics ones are not made yet: the calls fail as
+/// they always did, with `out` null, and the first ones log the description.
 /// shortcut: not implemented. Answering `S_OK` here without making the
 /// pipeline would hand the title whatever its stack held as an object.
 extern "system" fn unknown_pipeline<const SLOT: usize>(
@@ -368,6 +370,31 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
     if !out.is_null() {
         // SAFETY: the title's out pointer (a local of its own).
         unsafe { *out = std::ptr::null() };
+    }
+    // `VICTORY_DESER_DUMP=<dir>`: the first 64 descriptions whole (the
+    // description's 0x88 bytes, then each named part) as `<slot>-<n>-<k>.bin`,
+    // for working out the graphics packet and the stages' metadata.
+    #[cfg(windows)]
+    if calls <= 64
+        && let Some(dir) = std::env::var_os("VICTORY_DESER_DUMP")
+    {
+        let dir = std::path::PathBuf::from(dir);
+        let mut head = [0u8; 0x88];
+        if !desc.is_null() && crate::host::read_into(desc, &mut head) {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join(format!("{SLOT:x}-{calls}-desc.bin")), head);
+            let w = |i: usize| u64::from_le_bytes(head[8 * i..8 * i + 8].try_into().unwrap_or_default());
+            for k in 0..8 {
+                let (at, size) = (w(1 + 2 * k) as usize, w(2 + 2 * k) as usize);
+                if at == 0 || size == 0 || size > 1 << 20 {
+                    continue;
+                }
+                let mut b = vec![0u8; size];
+                if crate::host::read_into(at as *const u8, &mut b) {
+                    let _ = std::fs::write(dir.join(format!("{SLOT:x}-{calls}-{k}.bin")), b);
+                }
+            }
+        }
     }
     if calls <= 4 || calls.is_power_of_two() {
         // Sixteen 64-bit words at `at`, read through the kernel: neither
@@ -429,6 +456,86 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
     E_NOTIMPL
 }
 
+/// Device method 0x218: a compute pipeline from loose native parts (28 Nov,
+/// from the descriptions the title passes): `(this, description, iid, out)`,
+/// the description `[root signature, (address, size) x 4, ...]`; the parts are
+/// the pieces of an `FSPX` blob (as the AMD upscaler's `ACCC` parts carry
+/// them): the pipeline registers (0x1c bytes: thread-group size at +0x0c,
+/// flags, COMPUTE_PGM_RSRC1/2), a 0x14-byte hash, the GFX10 code, and the
+/// program metadata (0x403, size - 0x14, code dwords, then 0x41 resource
+/// records). They are put back into an `FSPX` blob in a container with an
+/// `ACCC` part and made as any compute pipeline. Parts that do not look so are
+/// refused as before (logged). Opt-in (`VICTORY_PIPELINE_218=1`) until tested.
+extern "system" fn pipeline_218(this: This, desc: *const u8, iid: *const Iid, out: *mut This) -> HRESULT {
+    let off = !std::env::var("VICTORY_PIPELINE_218").is_ok_and(|v| v.trim() == "1");
+    if !off && let Some(container) = fspx_container(desc) {
+        return crate::pipeline::create_compute_from(&container, iid, out);
+    }
+    unknown_pipeline::<0x218>(this, desc, iid, out)
+}
+
+/// The `ACCC` container of the four parts a 0x218 description names, if they
+/// are what that method's parts have been seen to be.
+fn fspx_container(desc: *const u8) -> Option<Vec<u8>> {
+    let mut words = [0u8; 9 * 8];
+    if desc.is_null() || !crate::host::read_into(desc, &mut words) {
+        return None;
+    }
+    let w = |i: usize| u64::from_le_bytes(words[8 * i..8 * i + 8].try_into().unwrap_or_default());
+    let piece = |i: usize| -> Option<Vec<u8>> {
+        let (at, size) = (w(1 + 2 * i) as usize, w(2 + 2 * i) as usize);
+        if at == 0 || size == 0 || size > 1 << 20 {
+            return None;
+        }
+        let mut b = vec![0u8; size];
+        crate::host::read_into(at as *const u8, &mut b).then_some(b)
+    };
+    let (packet, hash, code, meta) = (piece(0)?, piece(1)?, piece(2)?, piece(3)?);
+    let le = |b: &[u8], at: usize| b.get(at..at + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+    if packet.len() != 0x1c || meta.len() < 0x18 || le(&meta, 0)? != 0x403
+        || le(&meta, 4)? as usize + 0x14 != meta.len() || le(&meta, 8)? as usize * 4 != code.len()
+    {
+        return None;
+    }
+    // FSPX: "FSPX", version 1, entry count, size; 16-byte entries (kind, offset, size, 0).
+    let entries: [(u32, &[u8]); 4] = [(0, &packet), (1, &hash), (6, &code), (7, &meta)];
+    let head = 0x10 + 16 * entries.len();
+    let mut fspx = Vec::with_capacity(head + entries.iter().map(|e| e.1.len() + 3).sum::<usize>());
+    fspx.extend_from_slice(b"FSPX");
+    fspx.extend_from_slice(&1u32.to_le_bytes());
+    fspx.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    fspx.extend_from_slice(&0u32.to_le_bytes());
+    let mut at = head;
+    for (kind, data) in &entries {
+        for v in [*kind, at as u32, data.len() as u32, 0] {
+            fspx.extend_from_slice(&v.to_le_bytes());
+        }
+        at += data.len().next_multiple_of(4);
+    }
+    for (_, data) in &entries {
+        fspx.extend_from_slice(data);
+        fspx.resize(fspx.len().next_multiple_of(4), 0);
+    }
+    let size = fspx.len() as u32;
+    fspx[12..16].copy_from_slice(&size.to_le_bytes());
+    // DXBC: "DXBC", digest (unchecked), version 1.0, total size, one part; the
+    // part: "ACCC", size, the FSPX blob.
+    let part_at = 0x20 + 4;
+    let total = part_at + 8 + fspx.len();
+    let mut c = Vec::with_capacity(total);
+    c.extend_from_slice(b"DXBC");
+    c.extend_from_slice(&blake3::hash(&fspx).as_bytes()[..16]);
+    c.extend_from_slice(&1u16.to_le_bytes());
+    c.extend_from_slice(&0u16.to_le_bytes());
+    c.extend_from_slice(&(total as u32).to_le_bytes());
+    c.extend_from_slice(&1u32.to_le_bytes());
+    c.extend_from_slice(&(part_at as u32).to_le_bytes());
+    c.extend_from_slice(b"ACCC");
+    c.extend_from_slice(&(fspx.len() as u32).to_le_bytes());
+    c.extend_from_slice(&fspx);
+    Some(c)
+}
+
 /// The host device's state: the console's device is removed when the host's is
 /// (VIctory 13185f5: the default answer, E_NOTIMPL, reads as a lost device).
 extern "system" fn removed_reason(_: This) -> HRESULT {
@@ -482,7 +589,7 @@ static FUNCTIONS: Table<160> = {
     f[57] = unknown_pipeline::<0x1c8> as *const (); // 0x1c8
     f[61] = descriptor::create_sampler_x as *const (); // 0x1e8
     f[62] = pipeline::create_compute_x as *const (); // 0x1f0
-    f[67] = unknown_pipeline::<0x218> as *const (); // 0x218
+    f[67] = pipeline_218 as *const (); // 0x218
     f[69] = object::ignore as *const (); // 0x228 debug error filter
     f[70] = descriptor::create_placed_srv as *const (); // 0x230
     f[71] = descriptor::create_placed_uav as *const (); // 0x238
