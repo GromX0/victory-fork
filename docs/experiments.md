@@ -1369,3 +1369,23 @@ stopped at the same check (frame ~256, 16 s)**: not the serialized pipelines. Bo
 25,788 translations were rewritten by the new translator (`victory shaders`, 0 of 4,441 previously cached ones
 different); the last good run on this save was deser2 at cc70032e (03:11, 621 s). Under test: whether title shaders
 that newly translate (the new ops and mask forms) are behind it (the 17fe65ea translator's failure list against today's).
+
+### deser1c-f, deserdbg: the serialized pipelines in game, made only where they work (28 Nov, 05:20-06:05, save 'openworld')
+
+- deser1d (227e12ff): the user saw most things black and the face gone but for eyes and hair: the title had swapped
+  objects onto serialized pipelines whose stages did not translate (~700 draws a frame dropped). Since 22916b52 a
+  serialized pipeline is made only when both stages translate (and, since 8f55d3b7, when its host root signature fits
+  in 64 dwords); otherwise it is refused as before and the title draws the object its old way. deser1e/1f: face and
+  lighting back (shots D:\victory-scratch\shots\deser1e, \deser1f), no crash, 8,192+ made.
+- Of the 2,116 distinct shaders the title's serialized pipelines held that did not translate (deser1c dump), the
+  newer-compiler forms since (selects through joins, wave32 data, spilled mask pairs, XOR swaps, joins of one table
+  address, lane-0 sections, v_ldexp_f32) translate 557; deser1f refused 1,595. Left, largest first: whole-wave sections
+  whose result is read in the next section (477), opaque masks (225), wave-wide loop branches in mesh programs (165),
+  descriptors read as data (101), partial image stores (85).
+- deserdbg (debug layer): the 14 host mesh pipelines the host refused were blend states with dual-source factors in
+  slots above the target count (fixed: D3D12 defaults there) and 7 root signatures over 64 dwords (refused at
+  creation). deserdbg2: none refused.
+- The title's own shaders: 0 of 25,790 translations differ from the 17fe65ea translator after every change (the
+  newer-compiler forms apply only to containers with the VXSP part).
+- Not shown yet: the bush/palm middle level (route test far / middle / close). A magenta tint on trees in deser1f's
+  152 s shot is unexplained (the known purple-texture issue or not: the control drifted to another scene).
