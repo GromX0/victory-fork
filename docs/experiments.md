@@ -1283,3 +1283,18 @@ with no input layout, 32 of them with large material pixel shaders (0x1740-0xb40
 only). On Series X|S, mesh shaders and NGG geometry are the hardware GS stage: about 4,800 of the refused pipelines are
 mesh-style world-material pipelines, the kind an object's detail level draws with. Packet sizes 0x184-0x208, pipeline
 metadata 0x50 for the GS ones (0xbc with an input layout). Building DeserializeGraphicsPipelineStateX is next.
+
+### The serialized graphics packet, from the console runtime (28 Nov; reference: the kit's xgs12_10.dll + public symbols, read only)
+
+The runtime's DeserializeGraphicsPipelineStateX copies the packet's register block as it is and patches each stage's
+code address (>> 8) into it; the render-target data that follows goes to its secondary-block database. The runtime's
+own `ReverseAPIDescsFromPsoContext_2004` turns the register structs back into D3D12 descriptions (depth-stencil,
+rasterizer, blend, sample mask, Xbox pixel-shader and depth options, shader limits); its caller gives the layout.
+Layout (offsets from the packet's start), confirmed on the game's 163 dumped packets:
+- +0x04 u32: low 2 bits a configuration: bit 0 tessellation, bit 1 a GS-stage (mesh/NGG) pipeline. PS+VS: 0; PS+GS: 2.
+- +0x28 u16: register block size (0x11c, 0x170 with the GS struct); +0x2a u16: render-target block size.
+- +0x2c `PsoSpi_Standard` (0x2c bytes); then, with tessellation, `PsoSpi_Tessellation` (0x18); with GS,
+  `PsoSpi_GeometryShader` (0x54); with tessellation `PsoContext_Tessellation` (0x10); then `PsoContext_Standard`
+  (0xe0), ending at 0x1c + the register block size.
+- Then the render-target block: 0x44 + 8 bytes per render target (0x44 with none: the depth-only pipelines).
+Next: the field-level mapping from ReverseAPIDescsFromPsoContext_2004 and PsoSecondaryBlockRTVDataHelper.
