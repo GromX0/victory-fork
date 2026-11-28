@@ -1510,3 +1510,17 @@ orphan-HD props. Since it fills the band (DF), the band must come from the GPU i
 which are empty here (title side: 0 of 495 empty slots filled, run dm; forcing level 0 in all 24 culling shaders
 changed nothing, userfamily: all of an archetype's family levels are empty, not only level 1). Next: why the title
 never fills the GPU family's mesh records (its streaming of those LOD meshes, or the pass that builds them).
+
+The per-slot path (`fe660f2d` / `903776ba`, the GPU families' slots without a mesh record) at the start view:
+dropped through VICTORY_SKIP_ARGS, desktop screenshots unchanged (slotdrop2) and the G-buffer colour target
+(f27, slotdump2, three-frame spans; frames 3065 kept / 3068 dropped) differing only in scattered specks of the
+distant shore vegetation. Earlier statistics (userstats2): they rasterise real geometry (~160 M pixel invocations
+each against 4.5 G for the close version's 89a62261). In this view they carry next to nothing: not what fills a
+middle band here.
+
+State at 11:00: the CPU path (data x camera, ~25-33 m for small orphan-HD props) and the far versions ((start - 25)
+x s38, s38 = 1.0, start 130-800 m per model) leave the band; on a Series X something fills it (DF). Not found yet:
+which pass the console draws these props with between ~30 m and the far start. Candidates left: (1) the GPU
+families hold these archetypes with all levels' records empty (the title's streaming of family LOD meshes), (2) a
+far-version scale s38 the CPU writes as 1.0 here (its writer not found by immediates; the 248-byte block's
+-1/-1/1/1/1/25 are copied, not stored as constants).
