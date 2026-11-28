@@ -1389,3 +1389,14 @@ that newly translate (the new ops and mask forms) are behind it (the 17fe65ea tr
   newer-compiler forms apply only to containers with the VXSP part).
 - Not shown yet: the bush/palm middle level (route test far / middle / close). A magenta tint on trees in deser1f's
   152 s shot is unexplained (the known purple-texture issue or not: the control drifted to another scene).
+
+### route3: the bush and palm route with the serialized mesh pipelines made (28 Nov, 06:15-06:25, user's save, night)
+
+f1b5a2cc + VICTORY_PIPELINE_1C8=1 (GS-stage serialized pipelines made where both stages translate; vertex-stage ones
+still refused). The user walked the route of route1/route2 and called far / middle / close (shots
+D:\victory-scratch\shots\route3: far = the yard by the jet ski, middle, close = the bush in front). **The user saw the
+bush and palm still vanish at the middle spot and come back close up: no change.** The magenta foliage is as it was
+before (user), not from this switch. So the serialized *mesh* pipelines are not the middle level of these objects. Left
+of the hypothesis: the serialized *vertex-stage* pipelines (8,192+ refused every run, "not rebuilt yet"), which route1
+found to be vertex + pixel pipelines; and the ~1,600 mesh pipelines still refused for untranslatable stages. Not shown
+which (if any) of them the bush's middle level needs.
