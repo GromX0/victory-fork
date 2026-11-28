@@ -1305,3 +1305,13 @@ PA_SU_SC_MODE_CNTL (cull bits 0-1, front face bit 2, fill bits 8-10), 0x54/0x58/
 (floats), 0x44 bit 26 and 0xc8 bit 0 multisample / depth clip, 0x70 alpha to coverage and independent blend, 0x74
 CB_TARGET_MASK (4 bits per target), 0x78 + 8n the blend controls (factors and operations through tables), 0x98 the sample
 mask, 0x10/0x1c the pixel-shader options. Stage inputs and outputs: in the SPI structs (not decoded yet).
+Render targets (the block after the register block): the runtime reads three dwords at block + 4 * (packet[0x0c] & 0x3f)
++ 0x38: 8 number types of 3 bits, 8 swaps of 2 bits (bits 24-31, then the next dword's bits 0-7), 8 formats of 5 bits
+(the second dword from bit 8, the third from bit 0), the target count in the second dword's top 4 bits, and samples as
+1 << the third dword's bits 20-22; formats go to DXGI through the runtime's own converter (8_8_8_8 + UNORM -> R8G8B8A8
+UNORM, swap 1 -> B8G8R8A8, 10_11_11 FLOAT -> R11G11B10, 16_16_16_16 -> R16G16B16A16, 2_10_10_10 -> R10G10B10A2, ...;
+formats 30/31 give Xbox-only DXGI values 116/117). Checked on the game's packets (UI pipeline: one 8_8_8_8 target,
+DB_DEPTH_CONTROL 0x007007f0, blend 0xe5040504 = alpha blending, masks 0xff, sample mask all).
+Context +0xa8 (16 halves, pairs per target) is the SX blend-optimisation per target, not the pixel inputs. Where the
+pixel inputs' parameter mapping is kept is not found yet: in the SPI structs, or implied (attribute n = parameter n) by
+compiling the stages together; to be checked against the code (exp param / v_interp attr).
