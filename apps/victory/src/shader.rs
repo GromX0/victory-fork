@@ -102,6 +102,26 @@ fn code_patched(path: &std::path::Path, code: &[u8]) -> Vec<u8> {
     code
 }
 
+/// The prefixes `VICTORY_FIND_CODE` names: lines `<label> <hex bytes>`.
+fn find_code() -> Option<&'static Vec<(String, Vec<u8>)>> {
+    static WANTED: std::sync::OnceLock<Option<Vec<(String, Vec<u8>)>>> = std::sync::OnceLock::new();
+    WANTED
+        .get_or_init(|| {
+            let text = std::fs::read_to_string(std::env::var_os("VICTORY_FIND_CODE")?).ok()?;
+            Some(
+                text.lines()
+                    .filter_map(|l| {
+                        let (label, hex) = l.split_once(' ')?;
+                        let hex = hex.trim();
+                        let bytes = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()).collect::<Vec<_>>();
+                        (bytes.len() >= 16).then(|| (label.to_owned(), bytes))
+                    })
+                    .collect(),
+            )
+        })
+        .as_ref()
+}
+
 pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
     let paths = crate::default_paths(paths)?;
     let mut t = Totals::default();
@@ -114,6 +134,17 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
                     eprintln!("corrupt record {}{}", path.display(), source.label());
                     continue;
                 };
+                // `VICTORY_FIND_CODE` in every record's bytes too (records that are not
+                // shader containers: the title's serialized pipelines may be such).
+                if let Some(wanted) = find_code()
+                    && Container::parse(&bytes).is_err()
+                {
+                    for (label, prefix) in wanted {
+                        if let Some(at) = memchr::memmem::find(&bytes, prefix) {
+                            println!("FOUND-RAW {label}: {}{} at {at:#x} of {} B", path.display(), source.label(), bytes.len());
+                        }
+                    }
+                }
                 let Ok(container) = Container::parse(&bytes) else {
                     continue;
                 };
@@ -138,6 +169,17 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
                             }
                             // `VICTORY_CODE_PATCH=<file>` as in a run (lines `<hash> <offset> <dword>...`,
                             // the hash a prefix of the file's name): the listing of the patched code.
+                            // `VICTORY_FIND_CODE=<file>`: lines of hex (a native program's first
+                            // bytes, as a deserialized pipeline's blob starts): the containers whose
+                            // program of that stage starts so are named (28 Nov: what the title's
+                            // serialized pipelines are).
+                            if let Some(wanted) = find_code() {
+                                for (label, prefix) in wanted {
+                                    if (0..=64).step_by(4).any(|o| n.code.get(o..o + prefix.len()) == Some(&prefix[..])) {
+                                        println!("FOUND {label}: {}{} {:?} {} B", path.display(), source.label(), n.stage, n.code.len());
+                                    }
+                                }
+                            }
                             let code = code_patched(&path, &n.code);
                             match gfx10::decode(&code) {
                                 Ok(insts) => {

@@ -1242,3 +1242,23 @@ The CPU's per-frame list for the CPU-submitted batches (CS_PackInstances' SRV s0
 count at +0x36 and entries at +8; n from +0x3a990, a descriptor's log2 size). The visibility choice is made where
 those four arrays are filled. Next: a code breakpoint at +0x4e4b6c0 for the object, then a write breakpoint on an
 array's storage to catch the code that fills it.
+
+### route1: the bush and palm route, with the GDKX as reference (28 Nov, 02:51-02:57)
+
+Kit: E:\2026.10-GDKX-10.0.26100.9661 (1.ZIP (Oct 2026, 10.0.26100.9661), 192 files, 7-Zip CRC test OK, extracted
+copy identical; Authenticode valid (Microsoft Corporation) on every exe/msi/cab/appx/ps1, the 42 vsix not checkable
+that way. Used from D:\victory-scratch\gdkx (headers) and \gdkx-docs (Markdown, from the kit's own zip); nothing in the
+repository. The title's markers: April 2026 GXDK Update 5 (260405, 10.0.26100.7901), parts from Oct and Apr 2025.
+
+Route (user's save, build 9a5c2cbd+, capture on): far frame 2848 (02:51:08, bush and palm drawn); middle 6559
+(02:54:32.5), 6613 (+10 s), 6855 (+30 s): both gone in all three, standing still: **no recovery in 30 s / 296
+frames**; a dark low-detail shrub and fan shape where they stand; close 9217 (02:57:23, both drawn). 396 objects with
+groups close and none in the middle frames over ~50 shader pairs (confounded by the view; no tracer boxes this run).
+
+Deserialized pipelines (`VICTORY_DESER_DUMP`, 64 each): the graphics ones fill the VS and PS slots (classic vertex
+pipeline; one VS only), packet 0x184 (0x17c), metadata 0xbc; each stage's code starts with the shader hash as three
+VOP3+literal triples (as the containers' native code does) and the stage metadata ends with the 0x43 hash record.
+None of their code is in shaders.rpf (`VICTORY_FIND_CODE`, checked on a known shader: found), neither in its DXBC
+containers nor in any other record it unpacks: where the serialized pipelines come from is not known, so what they
+draw is not known. The bush and palm close up are mesh-shader draws (89a62261); a link between the refused pipelines
+and the vanishing objects is not shown.
