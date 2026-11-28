@@ -928,6 +928,10 @@ impl<'a> Lanes<'a> {
             if !seen.insert(v) || seen.len() > 16 {
                 continue;
             }
+            // (through joins: `vcc` from the select on one path, -1 on another)
+            for b in &self.p.blocks {
+                work.extend(b.phis.iter().filter(|f| f.args.contains(&v)).map(|f| f.value));
+            }
             for i in self.p.blocks.iter().flat_map(|b| &b.insts) {
                 match &i.fields {
                     Fields::Valu(u) if i.name() == "v_cndmask_b32" => {
@@ -962,11 +966,34 @@ impl<'a> Lanes<'a> {
             let inst = &p.blocks[b].insts[i];
             return match &inst.fields {
                 Fields::Smem { .. } => true,
-                // (in wave32 a 32-bit operation may be a mask's)
-                Fields::Sop { .. } if p.wave64 => {
+                // (in wave32 a 32-bit logic operation may be a mask's)
+                Fields::Sop { src, .. } if p.wave64 => {
                     let n = inst.name();
+                    if n == "s_mov_b64" {
+                        // A copy of a pair: what the pair holds.
+                        let Some(&Operand::Scalar { code, .. }) = src.first() else { return false };
+                        let half = |h: u8| inst.read(Reg::S(code + h)).is_some_and(|s| depth > 0 && self.data(s, depth - 1));
+                        return code != NULL && half(0) && half(1);
+                    }
                     !n.ends_with("_b64") && !n.contains("saveexec") && !n.contains("wrexec") && !n.starts_with("s_cselect")
                 }
+                Fields::Sop { src, .. } => {
+                    let n = inst.name();
+                    let logic = ["s_and_", "s_or_", "s_xor_", "s_andn2_", "s_orn2_", "s_nand_", "s_nor_", "s_xnor_", "s_not_", "s_cselect_", "s_wqm_", "s_cmov", "s_brev_"];
+                    match n {
+                        // A copy holds what its source holds.
+                        "s_mov_b32" => match src.first() {
+                            Some(&Operand::Scalar { code, .. }) if code != NULL => {
+                                depth > 0 && inst.read(Reg::S(code)).is_some_and(|s| self.data(s, depth - 1))
+                            }
+                            _ => false,
+                        },
+                        // Arithmetic never makes a mask.
+                        _ => !logic.iter().any(|l| n.starts_with(l)) && !n.contains("exec") && !n.starts_with("s_mov"),
+                    }
+                }
+                // A lane's dword taken to a scalar: a number.
+                Fields::Valu(_) => matches!(inst.name(), "v_readfirstlane_b32" | "v_readlane_b32"),
                 _ => false,
             };
         }
@@ -1022,7 +1049,29 @@ impl<'a> Lanes<'a> {
                         i.write(Reg::S(EXEC)) == Some(v) || i.write(Reg::S(EXEC + 1)) == Some(v)
                     })
                 };
-                let derived = exec_write(lo, k.0) || exec_write(hi, k.1);
+                let mut derived = exec_write(lo, k.0) || exec_write(hi, k.1);
+                // The newer compiler's spills: a wave64 mask kept in two VGPR
+                // lanes and taken back (`v_writelane` / `v_readlane`, which
+                // the IR makes copies through parked registers) arrives as two
+                // `s_mov_b32`; it is the pair they copy (SSA: no cycle).
+                let copied = |d: Option<(usize, usize)>| {
+                    let i = def(d).filter(|i| i.name() == "s_mov_b32")?;
+                    match &i.fields {
+                        Fields::Sop { src, .. } => match src.first() {
+                            Some(&Operand::Scalar { code, .. }) if code != NULL => i.read(Reg::S(code)),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                };
+                let m = match (m, copied(lo), copied(hi)) {
+                    (None, Some(a), Some(b)) if NEWER_COMPILER.get() && p.wave64 && (a, b) != k => {
+                        let (c, d) = self.mask((a, b));
+                        derived |= d;
+                        Some(c)
+                    }
+                    (m, ..) => m,
+                };
                 // shortcut: the atom names the pair by its low dword, and
                 // lowering takes the high dword written beside it. For halves
                 // written apart (two `s_mov_b32`) lanes 32-63 are wrong unless

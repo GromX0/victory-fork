@@ -204,6 +204,12 @@ fn dumped_containers_translate() {
         }
     }
     println!("{ok} of {n} translate");
+    // `VICTORY_CDXIL_OUT=<file>`: one line per failing container, file then reason.
+    if let Ok(out) = std::env::var("VICTORY_CDXIL_OUT") {
+        let lines: String = why.iter().flat_map(|(k, f)| f.iter().map(move |f| format!("{f}	{k}
+"))).collect();
+        let _ = std::fs::write(out, lines);
+    }
     let mut v: Vec<_> = why.into_iter().collect();
     v.sort_by_key(|(_, f)| std::cmp::Reverse(f.len()));
     for (k, f) in v {
