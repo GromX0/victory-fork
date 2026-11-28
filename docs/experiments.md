@@ -1458,3 +1458,25 @@ one left on warm-bad.txt) and its 1-5 dispatches a frame are dropped; DirectStor
 memory request was refused; the "prepare failed" drops (item 12) are 0 in every run tonight. The fork
 XaviFortes/VIctory-RDNA lists LOD pop-in as open; its one pop-in commit (7ab13ed) orders indirect draws in its
 in-place "port 1" memory mode, which we do not run (our batching shortcuts were off in s3-safe: still popped).
+
+Later the same morning (still unattended):
+- **Clock** (`VICTORY_CLOCK_SCALE`, new `victory-hle` module `clock`: QueryPerformanceCounter, `_Query_perf_counter`,
+  GetTickCount64 slowed for the title; its own 30 fps limiter then holds it at 30 by its own clock): to test a
+  quality governor driven by frame time (we run 17-21 fps, the console 30). The world runs at half speed with 0.5
+  (the opening flight takes twice as long, the frame rate rose 17 -> 21). The loading-screen view of the house across
+  the water (clk/flyc runs) has the same objects at both speeds. No sign of a frame-time governor there (weak: a view
+  with no known pop-in).
+- **Buffer sizes** (counter in `resource::place`): the title asks GetResourceAllocationInfo for ~128 buffers (566 MB,
+  our 64 KiB rounding adds ~2 MB) and 131,000+ textures (sizes it checks itself against the streamed layouts). The
+  kit says console buffers need no 64 KiB alignment, but the title does not size its streaming by our buffer answers:
+  not the cause.
+- **The batch list packer, live** (`VICTORY_LOD_PROBE=1`, new `victory_loader::lod_probe`: the packer +0x4e4b690's
+  entry hooked, its object walked from a thread with reads that cannot fault). It is called per batch group
+  (~45,000 calls a second). Its entries' descriptor word `[resource+8]`: bits 0-14 a part count (1-9), bits 16-38
+  and 40-62 two sizes (vertices / primitives); +0x3a990 passes only one part with both sizes at most 64, i.e. the
+  single-meshlet meshes this packed list is for; the others go another way (by design, not dropped). **In ~10,000
+  sampled entries none lacked its resource** (`no_resource` 0 throughout, start view and the stairs drive): the
+  arrays the packer reads hold only resident batches; what leaves an object out is decided where those arrays
+  are filled (visibility), not by a missing model at this point.
+- Per-slot draws `fe660f2d` / `903776ba` dropped at the start view (slotdrop1): no visible change, but none of them
+  ran in the single captured frames: inconclusive.

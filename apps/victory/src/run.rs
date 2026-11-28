@@ -171,6 +171,14 @@ pub fn run(
         // SAFETY: the image stays mapped, and nothing of it has run yet.
         unsafe { victory_loader::write_sites::apply_asked(&image_name, image.base(), size) };
     }
+    // A diagnostic (VICTORY_LOD_PROBE=1): what the batch list packer leaves out.
+    #[cfg(windows)]
+    if execute && victory_loader::lod_probe::asked() {
+        let size = image.info().size_of_image as usize;
+        // SAFETY: the image stays mapped and nothing of it has run yet.
+        let done = unsafe { victory_loader::lod_probe::apply(image.base(), size) };
+        println!("VICTORY_LOD_PROBE: {}", if done { "the batch list packer hooked" } else { "not hooked (see the log)" });
+    }
     // Renderer port #2 (VICTORY_PORT_DESCRIPTORS=1): the title's stores of
     // descriptor records tell the layer their slots.
     #[cfg(windows)]

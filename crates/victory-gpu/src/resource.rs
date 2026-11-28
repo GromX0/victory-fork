@@ -896,6 +896,30 @@ pub(crate) extern "system" fn allocation_info2(
 
 /// Resources placed one after another: the whole footprint, telling `each`
 /// where every resource goes. Unknown sizes give the documented `u64::MAX`.
+/// What the title asks sizes for (`GetResourceAllocationInfo`): per kind
+/// (buffers, textures) the count, the bytes asked for (a buffer's width) and
+/// the bytes answered, logged at each power of two. The console's buffers
+/// need no 64 KiB alignment (the kit's "differences from the PC"); this
+/// tells whether the title sizes its buffers by our answer at all.
+fn note_asked(desc: &ResourceDesc, one: &AllocationInfo) {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static N: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+    let kind = usize::from(desc.dimension != BUFFER);
+    let n = N[kind][0].fetch_add(1, Relaxed) + 1;
+    let asked = N[kind][1].fetch_add(if desc.dimension == BUFFER { desc.width } else { 0 }, Relaxed)
+        + if desc.dimension == BUFFER { desc.width } else { 0 };
+    let answered = N[kind][2].fetch_add(one.size, Relaxed) + one.size;
+    if n.is_power_of_two() {
+        tracing::info!(
+            kind = if kind == 0 { "buffer" } else { "texture" },
+            n,
+            asked_mb = asked >> 20,
+            answered_mb = answered >> 20,
+            "sizes the title asked for (GetResourceAllocationInfo), since the start"
+        );
+    }
+}
+
 fn place<'a>(
     descs: impl Iterator<Item = &'a ResourceDesc>,
     mut each: impl FnMut(usize, AllocationInfo1),
@@ -921,6 +945,7 @@ fn place<'a>(
             };
         };
         tracing::debug!(?desc, ?one, "allocation info");
+        note_asked(desc, &one);
         let offset = total.size.next_multiple_of(one.alignment);
         each(
             i,
