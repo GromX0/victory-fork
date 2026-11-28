@@ -1203,3 +1203,19 @@ only one that holds 0x5c; the 480-byte `s1+40` is the camera block, inside the c
 version is drawn from (its start - 25 m) to its end, scale 1: sane numbers (a 25 m overlap for the crossfade), not
 an obviously wrong scale. What is left is the per-object band (the instance's +16 start and +20 end in the 64-byte
 records of `s0+232`, 5000 of them) against where the near version stops, for the bush and palm.
+
+### slodk: the far versions' per-model bands; the close version is cut ~10x too early (28 Nov, 03:20)
+
+The log's `s0+N` names are table offsets in dwords: `s0+632` is table byte 0x9e0, so s38 = 1.0 and s25 = 25.0 are
+confirmed. The per-instance band reads table offset 0 (`s0+0`, a 64 KB buffer at title 0xdba561ab0, 64-byte
+per-model records; capture frame 7124, user at the house with the bush and palm gone; 777 records): +0..+8 the
+bounding sphere's centre, +12 its radius, **+16 the far version's start, +20 its end** (e.g. radius 1.06 m: 220 m to
+2,000 m; radius 6.6 m: 550 to 6,000 m). With the 25 m overlap a bush-sized model's far version draws from ~195 m.
+So the close version should draw out to ~200 m; here it is gone at ~15-20 m. That is the gap: the close version is
+dropped about ten times too early, not the far version started too late.
+The close bush is submitted by the title's CPU (its draw's group count comes from `BatchCullBatchCSMeshlets`, the
+CPU-submitted batches), issued at middle distance with 0 groups, and keeping every meshlet (mall) did not bring it
+back: the CPU lists no instance of it there. Forcing the GPU families' gates (props, trees, simple) did nothing for
+the same reason; forcing the Slod gate drew the far versions everywhere (the broken textures). Next: the CPU's
+level-of-detail distance (the entity's lodDist times the title's LOD scale; the title's structures name LodScale and
+LodMult per level): why it cuts the close versions at ~1/10 of their range here.
