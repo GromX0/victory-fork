@@ -2920,6 +2920,16 @@ impl<'a> Lower<'a> {
                     None if n <= 105 && self.x.io.initialized_sgprs.is_some_and(|k| n >= k) => {
                         Val::I32(self.s.m.i32(0))
                     }
+                    // Mesh: the same above the system SGPRs and the user data
+                    // the root layout fills.
+                    None if n <= 105
+                        && self.x.native.stage == HwStage::Ms
+                        && n >= HwStage::Ms.user_sgpr(
+                            self.x.native.layout.iter().map(|p| p.user_data + p.sgprs as u8).max().unwrap_or(0),
+                        ) =>
+                    {
+                        Val::I32(self.s.m.i32(0))
+                    }
                     // A scalar parked in a VGPR lane (`ir::unspill`), read where the
                     // paths only seem to allow it before any save: the lane of a VGPR
                     // nobody wrote, and VGPRs nobody set read as zero.
@@ -6484,6 +6494,12 @@ impl<'a> Lower<'a> {
             "s_quadmask_b32" => {
                 let pixels = src32(self, 0)?;
                 (self.quad_mask(pixels), None)
+            }
+            "s_sext_i32_i8" | "s_sext_i32_i16" => {
+                let a = src32(self, 0)?;
+                let k = self.s.m.i32(if name.ends_with("i8") { 24 } else { 16 });
+                let up = self.s.m.bin(c, Bin::Shl, a, k);
+                (self.s.m.bin(c, Bin::AShr, up, k), None)
             }
             "s_cmov_b32" | "s_cmovk_i32" if crate::structure::newer_compiler() => {
                 // The source where SCC is set, else what the register held.

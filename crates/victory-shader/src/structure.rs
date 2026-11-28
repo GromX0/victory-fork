@@ -935,7 +935,7 @@ impl<'a> Lanes<'a> {
                             return true;
                         }
                     }
-                    Fields::Sop { src, .. } if i.name().ends_with("_b64") => {
+                    Fields::Sop { src, .. } if i.name().ends_with(if self.p.wave64 { "_b64" } else { "_b32" }) => {
                         let reads = src.iter().any(|s| matches!(*s, Operand::Scalar { code, .. } if code != NULL && i.read(Reg::S(code)) == Some(v)));
                         if reads && let Some(&(_, out)) = i.writes.first() {
                             work.push(out);
@@ -1316,12 +1316,11 @@ impl<'a> Lanes<'a> {
                 }
                 let touches_exec =
                     inst.write(Reg::S(EXEC)).is_some() || inst.read(Reg::S(EXEC)).is_some();
-                // Wave64: all lanes or none by SCC (`s_cselect_b64 vcc, -1, 0`), a
+                // All lanes or none by SCC (`s_cselect_b64 vcc, -1, 0`, wave32's `_b32`), a
                 // mask where a `v_cndmask_b32` selects by it (elsewhere such a
                 // result is a number the wave agrees on).
                 let all_or_none = |s: &Operand| matches!(s, Operand::Const(128 | 193));
-                let lane_select = self.p.wave64
-                    && name == "s_cselect_b64"
+                let lane_select = name == if self.p.wave64 { "s_cselect_b64" } else { "s_cselect_b32" }
                     && src.len() == 2
                     && src.iter().all(|s| all_or_none(s) || takes_mask)
                     && inst.writes.first().is_some_and(|&(_, lo)| self.selects_by(lo))

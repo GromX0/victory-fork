@@ -180,12 +180,21 @@ impl Shader {
                         samplers = t.host.samplers.len(),
                         "shader translated"
                     ),
-                    Err(e) => tracing::warn!(
-                        stage = self.stage,
-                        hash = %self.hash,
-                        error = %e,
-                        "shader does not translate; its pipelines' draws are dropped"
-                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            stage = self.stage,
+                            hash = %self.hash,
+                            error = %e,
+                            "shader does not translate; its pipelines' draws are dropped"
+                        );
+                        // `VICTORY_FAILED_DUMP=<dir>`: the container, as `<hash>-<stage>.cdxil`,
+                        // to translate again offline (`shader-info`, the translator's tests).
+                        if let Some(dir) = std::env::var_os("VICTORY_FAILED_DUMP") {
+                            let dir = std::path::PathBuf::from(dir);
+                            let _ = std::fs::create_dir_all(&dir);
+                            let _ = std::fs::write(dir.join(format!("{}-{}.cdxil", self.hash, self.stage)), &self.container);
+                        }
+                    }
                 }
                 done.ok()
             })
