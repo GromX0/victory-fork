@@ -1400,3 +1400,16 @@ before (user), not from this switch. So the serialized *mesh* pipelines are not 
 of the hypothesis: the serialized *vertex-stage* pipelines (8,192+ refused every run, "not rebuilt yet"), which route1
 found to be vertex + pixel pipelines; and the ~1,600 mesh pipelines still refused for untranslatable stages. Not shown
 which (if any) of them the bush's middle level needs.
+
+### route4sync: the same route with the layer waiting for the card (28 Nov, 06:27-06:40, user's save)
+
+5f921d89, VICTORY_RELAY=0 VICTORY_LATE_WAIT=0 (no submission sent ahead: every GPU result is back before the title
+reads it), serialized pipelines off. 7 fps. Shots D:\victory-scratch\shots\route4: far, the purple-flowered bush right
+of the jet ski drawn; middle, a dark plain shrub shape in its place; close, the bush and the palm drawn. **Pop-in as
+before: not the timing of the copy-back.** The user then walked further back from the middle spot: still missing, and
+**back when further still**. So there is a band of distances, between the close level's end and the far version's start,
+where nothing of the object is drawn: the middle detail level(s) are missing, not culled (occlusion would not follow
+distance). With route2 (the close version issued with 0 groups at middle, no other version drawn) and the title's silent
+skip of a pipeline it is refused, the candidate is the serialized vertex-stage pipelines (8,192+ refused every run: far
+more than UI and effects need; a low level's vertex layout of POSITION / COLOR / TEXCOORD is no sign of 2D). Next:
+build them (VS + PS) behind the switch and repeat this route.
