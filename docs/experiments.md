@@ -1418,8 +1418,8 @@ build them (VS + PS) behind the switch and repeat this route.
 
 Vertex pipelines that fetch their own vertices (pipeline metadata 0x50 bytes: `v0` vertex index, `v3` instance index,
 no input layout) rebuilt like the mesh ones (VS slot, PsoSpi_Standard +0x0c/+0x10 RSRC1/2_VS): 2,048+ made in game,
-8,192+ with an input layout still refused. **The bush and palm still pop (user).** And the vertex ones draw wrong: a
-green fog over the whole scene and black triangles over the skin. They now need `VICTORY_PIPELINE_1C8_VS=1` besides
+8,192+ with an input layout still refused. **The bush and palm still pop (user).** And the vertex ones draw wrong: black
+triangles over the skin (the green fog in those shots is the game's weather, user). They now need `VICTORY_PIPELINE_1C8_VS=1` besides
 `VICTORY_PIPELINE_1C8=1`. **The serialized pipelines are not the pop-in** (mesh: route3; vertex: here). What is left is
 the finding of slodk: the title's CPU drops the close version at ~15-20 m where its far version starts at ~195 m, so
 the close version is cut ~10x too early by the CPU's level-of-detail distance. Next: that comparison in the title's

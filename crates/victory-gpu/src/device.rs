@@ -519,8 +519,8 @@ fn deserialized_mesh(desc: *const u8) -> Result<(Vec<u8>, Option<Vec<u8>>, crate
     // A vertex stage: only those that fetch their own vertices (no input
     // layout: pipeline metadata of 0x50 bytes) are rebuilt yet.
     let vertex = part(4).is_some();
-    // (opt-in of their own, `VICTORY_PIPELINE_1C8_VS=1`: route5vs drew a green fog over
-    // the scene and black triangles on the skin with them)
+    // (opt-in of their own, `VICTORY_PIPELINE_1C8_VS=1`: route5vs drew black triangles on
+    // the skin with them)
     if vertex && !std::env::var("VICTORY_PIPELINE_1C8_VS").is_ok_and(|v| v.trim() == "1") {
         return Err("a vertex-stage pipeline (VICTORY_PIPELINE_1C8_VS off)".into());
     }
