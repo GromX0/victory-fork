@@ -206,6 +206,21 @@ extern "system" fn release(this: This) -> u32 {
     object::release_boxed::<RootSignature>(this)
 }
 
+/// The serialized form of `object`, if it is one of our root signatures
+/// (device method 0x1c8 lays the stages' user data out by it).
+pub(crate) fn blob_of(object: This) -> Option<Vec<u8>> {
+    if object.is_null() {
+        return None;
+    }
+    // SAFETY: a COM object's first word is its function table.
+    let vtable = unsafe { *object.cast::<usize>() };
+    if !is_root_table(vtable) {
+        return None;
+    }
+    // SAFETY: our root signatures are `RootSignature`s.
+    Some(unsafe { &*object.cast::<RootSignature>() }.blob.clone())
+}
+
 /// Whether an object whose first word is `vtable` is one of our root
 /// signatures (diagnostics for device methods 0x1c8/0x218).
 pub(crate) fn is_root_table(vtable: usize) -> bool {

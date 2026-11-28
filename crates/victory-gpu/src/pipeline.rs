@@ -796,6 +796,22 @@ pub(crate) fn create_compute_from(container: &[u8], iid: *const Iid, out: *mut T
     )
 }
 
+/// A mesh pipeline from shader containers we put together (device method
+/// 0x1c8, a serialized pipeline: [`crate::device`]), with the state its
+/// packet holds.
+#[cfg(windows)]
+pub(crate) fn create_mesh_from(
+    mesh: &[u8],
+    pixel: Option<&[u8]>,
+    state: host::GraphicsState,
+    iid: *const Iid,
+    out: *mut This,
+) -> HRESULT {
+    let mut shaders = vec![shader("mesh", mesh)];
+    shaders.extend(pixel.map(|p| shader("pixel", p)));
+    hand_out(shaders, Some(Box::new(state)), iid, out)
+}
+
 fn hand_out(
     shaders: Vec<Arc<Shader>>,
     #[cfg(windows)] graphics: Option<Box<host::GraphicsState>>,

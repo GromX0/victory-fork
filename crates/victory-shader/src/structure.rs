@@ -729,6 +729,9 @@ impl<'a> Lanes<'a> {
                 for (n, a) in self.joins[j].args.clone().into_iter().enumerate() {
                     let (q, taken) = self.incoming[block][n];
                     let e = self.edge(cond[q], q, taken);
+                    if self.loaded(a) {
+                        continue;
+                    }
                     let (mut m, d) = self.mask(a);
                     if !was_derived
                         && d
@@ -750,6 +753,9 @@ impl<'a> Lanes<'a> {
             while p < self.phi_joins.len() {
                 let (id, was_derived) = (self.phi_joins[p].id, self.phi_joins[p].derived);
                 for a in self.phi_joins[p].args.clone() {
+                    if self.loaded(a) {
+                        continue;
+                    }
                     let (_, d) = self.mask(a);
                     if !was_derived
                         && d
@@ -780,6 +786,9 @@ impl<'a> Lanes<'a> {
                 .map(|(n, a)| {
                     let (q, taken) = self.incoming[pj.block][n];
                     let e = self.edge(cond[q], q, taken);
+                    if self.loaded(a) {
+                        return Bool::FALSE;
+                    }
                     let m = self.mask(a).0;
                     self.b.given(m, e)
                 })
@@ -885,6 +894,62 @@ impl<'a> Lanes<'a> {
         Some((lo, hi))
     }
 
+    /// Whether a `v_cndmask_b32` selects by the mask whose low dword is `lo`,
+    /// or by one a lane-width operation makes of it (`s_or_b64 vcc, vcc, ..`).
+    fn selects_by(&self, lo: Value) -> bool {
+        let mut work = vec![lo];
+        let mut seen = HashSet::new();
+        while let Some(v) = work.pop() {
+            if !seen.insert(v) || seen.len() > 16 {
+                continue;
+            }
+            for i in self.p.blocks.iter().flat_map(|b| &b.insts) {
+                match &i.fields {
+                    Fields::Valu(u) if i.name() == "v_cndmask_b32" => {
+                        if matches!(u.src.get(2), Some(&Operand::Scalar { code, .. }) if i.read(Reg::S(code)) == Some(v)) {
+                            return true;
+                        }
+                    }
+                    Fields::Sop { src, .. } if i.name().ends_with("_b64") => {
+                        let reads = src.iter().any(|s| matches!(*s, Operand::Scalar { code, .. } if code != NULL && i.read(Reg::S(code)) == Some(v)));
+                        if reads && let Some(&(_, out)) = i.writes.first() {
+                            work.push(out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
+    /// Whether the pair holds plain data, no lane mask (see `join`): each
+    /// half written by a scalar memory load or, in wave64 code, by a 32-bit
+    /// scalar operation (descriptor words being patched), or joined from
+    /// such values only.
+    fn loaded(&self, k: Key) -> bool {
+        self.p.wave64 && self.data(k.0, 8) && self.data(k.1, 8)
+    }
+
+    fn data(&self, v: Value, depth: u8) -> bool {
+        let p = self.p;
+        if let Some(&(b, i)) = self.defs.get(&v) {
+            let inst = &p.blocks[b].insts[i];
+            return match &inst.fields {
+                Fields::Smem { .. } => true,
+                Fields::Sop { .. } => {
+                    let n = inst.name();
+                    !n.ends_with("_b64") && !n.contains("saveexec") && !n.contains("wrexec") && !n.starts_with("s_cselect")
+                }
+                _ => false,
+            };
+        }
+        match self.phis.get(&v) {
+            Some(&(b, i)) if depth > 0 => p.blocks[b].phis[i].args.iter().all(|&a| a == v || self.data(a, depth - 1)),
+            _ => false,
+        }
+    }
+
     fn born(&self, v: Value) -> usize {
         match (self.defs.get(&v), self.phis.get(&v)) {
             (Some(&(b, _)), _) | (_, Some(&(b, _))) => self.index[b],
@@ -972,19 +1037,29 @@ impl<'a> Lanes<'a> {
         let id = lo.map_or(k.1, |_| k.0);
         let mut derived = self.derived_phis.contains(&id);
         // (edge condition, mask) per forward edge; back edges come later.
+        // A pair a scalar memory load wrote is no lane mask: the console's
+        // newer compiler reuses a compare's pair for descriptor words, and
+        // on the way around the compare (`s_cbranch_execz`) the join gets
+        // those, which it only ever reads ANDed with an EXEC that is empty
+        // there. Such an edge is left out (an undefined mask).
         let mut forward = Vec::new();
+        let mut empty = 0;
         for (n, &a) in args.iter().enumerate() {
             let (q, taken) = self.incoming[block][n];
             if self.index[q] < self.index[block] {
+                let e = self.edge(self.first[q], q, taken);
+                if self.loaded(a) {
+                    empty += 1;
+                    continue;
+                }
                 let (m, d) = self.mask(a);
                 derived |= d;
-                let e = self.edge(self.first[q], q, taken);
                 forward.push((e, m));
             } else {
                 self.seen.push(a);
             }
         }
-        if forward.len() == args.len()
+        if forward.len() + empty == args.len()
             && let Some(&(_, m)) = forward.first()
             && forward.iter().all(|f| f.1 == m)
         {
@@ -1119,6 +1194,10 @@ impl<'a> Lanes<'a> {
                 (r, Some(r))
             }
         };
+        // A lane-width select of masks by SCC is a mask too, constants or not:
+        // the console's newer compiler makes a uniform condition every lane's
+        // or no lane's this way (`s_cselect_b64 vcc, -1, 0`) for `v_cndmask`.
+        let derived = derived || op == "cselect";
         Some(SopMasks {
             dst: dst.map(|d| (d, result)),
             exec: exec_out.map(|e| (e, result)),
@@ -1207,7 +1286,16 @@ impl<'a> Lanes<'a> {
                 }
                 let touches_exec =
                     inst.write(Reg::S(EXEC)).is_some() || inst.read(Reg::S(EXEC)).is_some();
-                if (takes_mask || touches_exec)
+                // Wave64: all lanes or none by SCC (`s_cselect_b64 vcc, -1, 0`), a
+                // mask where a `v_cndmask_b32` selects by it (elsewhere such a
+                // result is a number the wave agrees on).
+                let all_or_none = |s: &Operand| matches!(s, Operand::Const(128 | 193));
+                let lane_select = self.p.wave64
+                    && name == "s_cselect_b64"
+                    && src.len() == 2
+                    && src.iter().all(|s| all_or_none(s) || takes_mask)
+                    && inst.writes.first().is_some_and(|&(_, lo)| self.selects_by(lo));
+                if (takes_mask || touches_exec || lane_select)
                     && let Some(r) = self.sop(inst).filter(|r| r.derived)
                 {
                     for (k, m) in r.dst.into_iter().chain(r.exec) {

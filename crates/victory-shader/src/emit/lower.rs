@@ -4623,13 +4623,21 @@ impl<'a> Lower<'a> {
                     .copied()
                     .unwrap_or("a lane mask from a carry")
             }),
-            Atom::Uniform(v) => match self.get(v)? {
-                Val::Bit(x) => Ok(x),
-                Val::I32(x) => {
+            Atom::Uniform(v) => match self.get(v) {
+                Ok(Val::Bit(x)) => Ok(x),
+                Ok(Val::I32(x)) => {
                     let z = self.s.m.i32(0);
                     Ok(self.s.m.cmp(at, pred::NE, x, z))
                 }
-                Val::Missing(w) => Err(w),
+                Ok(Val::Missing(w)) => Err(w),
+                // SCC of a mask operation in a pixel or mesh program: per lane
+                // ([`Self::scc_some`]), as `s_cselect_b64 exec, exec, 0` reads it.
+                Err(LANE_MASK)
+                    if !self.console_lanes && matches!(self.x.native.stage, HwStage::Ps | HwStage::Ms) =>
+                {
+                    self.scc_some(v)
+                }
+                Err(w) => Err(w),
             },
             Atom::Phi(id) => {
                 if let Some(&v) = self.mask_phis.get(&id) {
@@ -4670,8 +4678,28 @@ impl<'a> Lower<'a> {
                 let hi = self.s.m.i32((k >> 32) as u32);
                 Ok(self.lane_bit(at, lo, Some(hi)))
             }
-            Atom::Opaque(_) => Err("an opaque lane mask"),
-            Atom::Constant(_) => Err("a constant lane mask"),
+            Atom::Opaque(v) => {
+                // `VICTORY_MASK_WHY=1`: the instruction that wrote the mask.
+                if std::env::var_os("VICTORY_MASK_WHY").is_some() {
+                    let def = self.x.p.blocks.iter().flat_map(|b| &b.insts).find(|i| i.writes.iter().any(|w| w.1 == v));
+                    let phi = self.x.p.blocks.iter().find(|b| b.phis.iter().any(|f| f.value == v));
+                    let readers: Vec<_> = self.x.p.blocks.iter().flat_map(|b| &b.insts).filter(|i| i.reads.iter().any(|r| r.1 == v)).map(|i| (i.machine.offset, i.machine.text(true))).take(6).collect();
+                    let phi_args: Vec<_> = self.x.p.blocks.iter().filter(|b| b.phis.iter().any(|f| f.args.contains(&v))).map(|b| b.offset).collect();
+                    eprintln!("MASK-WHY readers {readers:?}, an argument of phis at {phi_args:x?}");
+                    eprintln!(
+                        "MASK-WHY opaque {v:?}: written by {:?}, a phi of block at {:?}",
+                        def.map(|i| (i.machine.offset, i.machine.text(true))),
+                        phi.map(|b| b.offset)
+                    );
+                }
+                Err("an opaque lane mask")
+            }
+            Atom::Constant(k) => {
+                if std::env::var_os("VICTORY_MASK_WHY").is_some() {
+                    eprintln!("MASK-WHY constant {k:#x}");
+                }
+                Err("a constant lane mask")
+            }
         }
     }
 
@@ -4818,6 +4846,19 @@ impl<'a> Lower<'a> {
     /// exchange theirs, which needs every lane there.
     fn scc_some(&mut self, scc: Value) -> Result<V, Why> {
         let &m = self.x.st.scc_some.get(&scc).ok_or(LANE_MASK)?;
+        // Pixels and mesh lanes have no console wave on the host: the lane's
+        // own bit, as their branches on such a decision go per lane.
+        // shortcut: where the console wave disagrees, its lanes without the
+        // bit took the "some lane" way too.
+        if !self.console_lanes && matches!(self.x.native.stage, HwStage::Ps | HwStage::Ms) {
+            let made = self.def_block.get(&scc).copied();
+            let at = match made {
+                None => self.s.entry,
+                Some(b) if b == self.cur_ir => self.cur,
+                Some(b) => self.tail[b].ok_or("a lane mask written after its use")?,
+            };
+            return self.boolean(m, at);
+        }
         // (not for a console wave cut into host waves that do not exchange)
         if !self.console_lanes || self.local || self.exchange.is_none() && self.halves.is_some() {
             return Err(LANE_MASK);
@@ -6413,6 +6454,25 @@ impl<'a> Lower<'a> {
                     }
                     Ok(())
                 }
+                // A mask of src0 bits from bit src1, of constants (a sampler's
+                // first two words in the console's serialized pipelines).
+                "s_bfm_b64" => {
+                    let Fields::Sop { src, .. } = &inst.fields else { return Err(name) };
+                    let constant = |o: Option<&Operand>| match o {
+                        Some(&Operand::Const(k)) => crate::resource::inline(k),
+                        Some(&Operand::Literal(x)) => Some(x),
+                        _ => None,
+                    };
+                    let (Some(w), Some(at)) = (constant(src.first()), constant(src.get(1))) else {
+                        return Err("s_bfm_b64 of a computed width or offset");
+                    };
+                    let mask = ((1u64 << (w & 63)) - 1) << (at & 63);
+                    for (h, v) in [(0, lo), (1, hi)] {
+                        let k = self.s.m.i32((mask >> (32 * h)) as u32);
+                        self.set(v, Val::I32(k));
+                    }
+                    Ok(())
+                }
                 _ => Err(name),
             };
         }
@@ -6691,6 +6751,13 @@ impl<'a> Lower<'a> {
             // Of a mask operation whose result lies within EXEC: whether
             // some lane is left.
             Err(LANE_MASK) if self.within_exec(v) => self.scc_some(v),
+            // Pixels and mesh lanes take it per lane ([`Self::scc_some`]): a
+            // lane outside EXEC runs nothing that reads it.
+            Err(LANE_MASK)
+                if !self.console_lanes && matches!(self.x.native.stage, HwStage::Ps | HwStage::Ms) =>
+            {
+                self.scc_some(v)
+            }
             Err(why) => Err(why),
         }
     }
@@ -9350,7 +9417,19 @@ impl<'a> Lower<'a> {
                         self.cross_lane(false)?;
                         self.lane_bit(c, lo, hi)
                     }
-                    None => return Err(UNTRACKED),
+                    None => {
+                        if std::env::var_os("VICTORY_MASK_WHY").is_some() {
+                            let def = mask.and_then(|m| self.x.p.blocks.iter().flat_map(|b| &b.insts).find(|i| i.writes.iter().any(|w| w.1 == m)));
+                            let phi = mask.and_then(|m| self.x.p.blocks.iter().find(|b| b.phis.iter().any(|f| f.value == m)).map(|b| b.offset));
+                            eprintln!(
+                                "MASK-WHY untracked select at {:#x} ({}): mask {mask:?} written by {:?}, a phi at {phi:x?}",
+                                inst.machine.offset,
+                                inst.machine.text(true),
+                                def.map(|i| (i.machine.offset, i.machine.text(true)))
+                            );
+                        }
+                        return Err(UNTRACKED);
+                    }
                 };
                 if v.abs != 0 || v.neg != 0 {
                     let (a, bb) = (f(self, 0)?, f(self, 1)?);
@@ -12804,6 +12883,7 @@ impl<'a> Lower<'a> {
         let c = self.cur;
         if let Some(g) = guard
             && !mesh
+            && !self.guarded_like_done(b, i)
         {
             if !(e.done && self.s.pixel) {
                 return Err("a conditional export");
@@ -13027,6 +13107,21 @@ impl<'a> Lower<'a> {
         Ok(())
     }
 
+    /// Whether the pixel export at instruction `i` of block `b` is not the
+    /// last and has the guard of the `done` export after it in its block:
+    /// that one discards the lanes outside the guard, so this one stores
+    /// without it (the console's exports after a discard, under the lanes
+    /// still alive).
+    fn guarded_like_done(&self, b: usize, i: usize) -> bool {
+        let guards = &self.x.st.guards[b];
+        let g = guards[i];
+        let insts = &self.x.p.blocks[b].insts;
+        self.s.pixel
+            && g.is_some()
+            && !matches!(insts[i].fields, Fields::Exp { done: true, .. })
+            && (i + 1..insts.len()).any(|k| matches!(insts[k].fields, Fields::Exp { done: true, .. }) && guards[k] == g)
+    }
+
     /// A color export in the console's export format `format`
     /// ([`with_color_formats`]): compressed, two 16-bit values per VGPR
     /// (channel 2k in the low half of the k-th source, 2k + 1 in its high
@@ -13034,7 +13129,9 @@ impl<'a> Lower<'a> {
     /// channel 1 (Mesa's `si_export_mrt_color`, GFX10 and later).
     fn export_formatted(&mut self, b: usize, i: usize, e: &Export, n: u8, format: u32) -> Result<(), Why> {
         let guard = self.guard(b, i)?;
-        if let Some(g) = guard {
+        if let Some(g) = guard
+            && !self.guarded_like_done(b, i)
+        {
             if !(e.done && self.s.pixel) {
                 return Err("a conditional export");
             }

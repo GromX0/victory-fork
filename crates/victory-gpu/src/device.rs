@@ -456,6 +456,84 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
     E_NOTIMPL
 }
 
+/// Device method 0x1c8, `DeserializeGraphicsPipelineStateX` (d3d12_xs.h's
+/// `D3D12XBOX_DESERIALIZE_GRAPHICS_PIPELINE_STATE`: root signature, packet,
+/// pipeline metadata, then per stage PS VS GS ES HS LS FS its code and
+/// metadata). GS-stage pipelines (the console's mesh shaders) are rebuilt as
+/// console shader containers ([`victory_shader::deserialized`]) and made as
+/// mesh pipelines with the state the packet holds; the others are refused as
+/// before. Opt-in (`VICTORY_PIPELINE_1C8=1`) until a route test shows it.
+extern "system" fn pipeline_1c8(this: This, desc: *const u8, iid: *const Iid, out: *mut This) -> HRESULT {
+    #[cfg(windows)]
+    if std::env::var("VICTORY_PIPELINE_1C8").is_ok_and(|v| v.trim() == "1") {
+        match deserialized_mesh(desc) {
+            Ok((mesh, pixel, state)) => {
+                deserialized_note("made");
+                return crate::pipeline::create_mesh_from(&mesh, pixel.as_deref(), state, iid, out);
+            }
+            Err(why) => deserialized_note(&why),
+        }
+    }
+    unknown_pipeline::<0x1c8>(this, desc, iid, out)
+}
+
+/// Counts what came of the serialized graphics pipelines, by outcome; logs
+/// each outcome at its 1st, 2nd, 4th, 8th ... time.
+#[cfg(windows)]
+fn deserialized_note(what: &str) {
+    static SEEN: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let n = seen.get_or_insert_with(Default::default).entry(what.to_owned()).or_default();
+    *n += 1;
+    if n.is_power_of_two() {
+        tracing::info!(outcome = what, count = *n, "serialized graphics pipeline (0x1c8)");
+    }
+}
+
+/// The containers and state of the serialized mesh pipeline `desc` names.
+#[cfg(windows)]
+fn deserialized_mesh(desc: *const u8) -> Result<(Vec<u8>, Option<Vec<u8>>, crate::pipeline::host::GraphicsState), String> {
+    use victory_shader::deserialized::{self, Packet, RootLayout, StageParts};
+    let mut head = [0u8; 0x108];
+    if desc.is_null() || !crate::host::read_into(desc, &mut head) {
+        return Err("description unreadable".into());
+    }
+    let w = |i: usize| u64::from_le_bytes(head[8 * i..8 * i + 8].try_into().unwrap_or_default());
+    // Part k: (address, size) at words 1 + 2k, 2 + 2k (0 packet, 1 pipeline
+    // metadata, then code and metadata of PS, VS, GS, ES, HS, LS, FS).
+    let part = |k: usize| -> Option<Vec<u8>> {
+        let (at, size) = (w(1 + 2 * k) as usize, w(2 + 2 * k) as usize);
+        if at == 0 || size == 0 || size > 4 << 20 {
+            return None;
+        }
+        let mut b = vec![0u8; size];
+        crate::host::read_into(at as *const u8, &mut b).then_some(b)
+    };
+    if (8..16).any(|k| w(1 + 2 * k) != 0) {
+        return Err("a pipeline with ES, HS, LS or fetch stages".into());
+    }
+    if part(4).is_some() {
+        return Err("a vertex-stage pipeline (not rebuilt yet)".into());
+    }
+    let packet = part(0).ok_or("no packet")?;
+    let (Some(gs), Some(gs_meta)) = (part(6), part(7)) else {
+        return Err("no GS stage".into());
+    };
+    let ps = part(2).zip(part(3));
+    let root = crate::root::blob_of(w(0) as This).ok_or("the root signature is not one of ours")?;
+    let layout = RootLayout::from_blob(&root).map_err(|e| format!("root signature: {e}"))?;
+    let g = deserialized::mesh_pipeline(
+        &packet,
+        &layout,
+        StageParts { code: &gs, meta: &gs_meta },
+        ps.as_ref().map(|(c, m)| StageParts { code: c, meta: m }),
+    )
+    .map_err(|e| format!("not rebuilt: {e}"))?;
+    let p = Packet::new(&packet).map_err(|e| e.to_string())?;
+    let state = crate::pipeline::host::GraphicsState::from_packet(&p)?;
+    Ok((g.mesh, g.pixel, state))
+}
+
 /// Device method 0x218: a compute pipeline from loose native parts (28 Nov,
 /// from the descriptions the title passes): `(this, description, iid, out)`,
 /// the description `[root signature, (address, size) x 4, ...]`; the parts are
@@ -586,7 +664,7 @@ static FUNCTIONS: Table<160> = {
     f[39] = query::create as *const (); // 0x138
     f[41] = signature::create as *const (); // 0x148
     f[48] = queue::create_x as *const (); // 0x180
-    f[57] = unknown_pipeline::<0x1c8> as *const (); // 0x1c8
+    f[57] = pipeline_1c8 as *const (); // 0x1c8
     f[61] = descriptor::create_sampler_x as *const (); // 0x1e8
     f[62] = pipeline::create_compute_x as *const (); // 0x1f0
     f[67] = pipeline_218 as *const (); // 0x218

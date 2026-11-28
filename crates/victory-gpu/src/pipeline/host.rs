@@ -151,6 +151,143 @@ fn host_blend(blend: &D3D12_BLEND_DESC, targets: &D3D12_RT_FORMAT_ARRAY) -> D3D1
 }
 
 impl GraphicsState {
+    /// The state a serialized pipeline's packet holds (device method 0x1c8),
+    /// read back as the console runtime's `ReverseAPIDescsFromPsoContext_2004`
+    /// reads it (kit's xgs12_10.dll, 28 Nov; `PsoContext_Standard` offsets):
+    /// +0x60 DB_DEPTH_CONTROL (bit 0 stencil, 1 depth, 2 depth write, 3 depth
+    /// bounds, 4-6 depth function, 7 back-face stencil, 8-10 / 20-22 stencil
+    /// functions; functions + 1 are D3D12's), +0x64 DB_STENCIL_CONTROL (4-bit
+    /// fail, pass, depth-fail, then the back face's, through the runtime's
+    /// table), +0x69 / +0x6a stencil read / write masks, +0x48
+    /// PA_SU_SC_MODE_CNTL (cull bits 0-1, front face bit 2, fill bits 8-10),
+    /// +0x44 PA_CL_CLIP_CNTL bit 26 (depth clip off), +0x54 / +0x58 / +0x5c
+    /// bias clamp, slope (x 1/16) and bias, +0x4c 0x0b multisample, +0xc8
+    /// bit 0 conservative, +0x70 bit 0 alpha to coverage, +0x74
+    /// CB_TARGET_MASK, +0x78 + 4n CB_BLEND{n}_CONTROL (factors + 1, the
+    /// operations through the runtime's table; bit 29 separate alpha, 30
+    /// enable). Targets from the render-target block, as its converter makes
+    /// them DXGI formats. The depth format is not in the packet (on the
+    /// console it is the bound view's): D32_FLOAT_S8X24 where depth or
+    /// stencil is used with color targets, D16 without (the title's own world
+    /// and shadow mesh pipelines have those).
+    pub(crate) fn from_packet(p: &victory_shader::deserialized::Packet) -> Result<Self, String> {
+        let mut g = GraphicsState::default();
+        let ctx = |at: usize| p.context(at);
+        let bit = |v: u32, n: u32| v >> n & 1 != 0;
+        let dc = ctx(0x60);
+        let sc = ctx(0x64);
+        // AMD stencil operation -> D3D12 (the runtime's table, by D3D12 value).
+        let stencil_op = |code: u32| {
+            D3D12_STENCIL_OP(match code {
+                0 => 1,
+                1 => 2,
+                3 => 3,
+                5 => 4,
+                6 => 5,
+                7 => 6,
+                8 => 7,
+                9 => 8,
+                // The console's own operations (D3D12 values 9-16): no PC form.
+                _ => 1,
+            })
+        };
+        let func = |shift: u32| D3D12_COMPARISON_FUNC((dc >> shift & 7) as i32 + 1);
+        let front = D3D12_DEPTH_STENCILOP_DESC {
+            StencilFailOp: stencil_op(sc & 0xF),
+            StencilDepthFailOp: stencil_op(sc >> 8 & 0xF),
+            StencilPassOp: stencil_op(sc >> 4 & 0xF),
+            StencilFunc: func(8),
+        };
+        let back = if bit(dc, 7) {
+            D3D12_DEPTH_STENCILOP_DESC {
+                StencilFailOp: stencil_op(sc >> 12 & 0xF),
+                StencilDepthFailOp: stencil_op(sc >> 20 & 0xF),
+                StencilPassOp: stencil_op(sc >> 16 & 0xF),
+                StencilFunc: func(20),
+            }
+        } else {
+            front
+        };
+        g.depth = D3D12_DEPTH_STENCIL_DESC {
+            DepthEnable: bit(dc, 1).into(),
+            DepthWriteMask: if bit(dc, 2) { D3D12_DEPTH_WRITE_MASK_ALL } else { D3D12_DEPTH_WRITE_MASK_ZERO },
+            DepthFunc: func(4),
+            StencilEnable: bit(dc, 0).into(),
+            StencilReadMask: (ctx(0x68) >> 8) as u8,
+            StencilWriteMask: (ctx(0x68) >> 16) as u8,
+            FrontFace: front,
+            BackFace: back,
+        };
+        g.depth_bounds = bit(dc, 3);
+        let mode = ctx(0x48);
+        g.rasterizer = D3D12_RASTERIZER_DESC {
+            FillMode: D3D12_FILL_MODE((mode >> 8 & 7) as i32 + 1),
+            CullMode: D3D12_CULL_MODE(match mode & 3 {
+                0 => 1,
+                m => (((m & 2) | 4) >> 1) as i32,
+            }),
+            FrontCounterClockwise: (!bit(mode, 2)).into(),
+            DepthBias: f32::from_bits(ctx(0x5c)) as i32,
+            DepthBiasClamp: f32::from_bits(ctx(0x54)),
+            SlopeScaledDepthBias: f32::from_bits(ctx(0x58)) * 0.0625,
+            DepthClipEnable: (!bit(ctx(0x44), 26)).into(),
+            MultisampleEnable: (ctx(0x4c) == 0x0b).into(),
+            AntialiasedLineEnable: (ctx(0x4c) == 0x10).into(),
+            ForcedSampleCount: 0,
+            ConservativeRaster: if bit(ctx(0xc8), 0) {
+                D3D12_CONSERVATIVE_RASTERIZATION_MODE_ON
+            } else {
+                D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF
+            },
+        };
+        let blend_op = |code: u32| {
+            D3D12_BLEND_OP(match code {
+                1 => 2,
+                4 => 3,
+                2 => 4,
+                3 => 5,
+                _ => 1,
+            })
+        };
+        g.blend.AlphaToCoverageEnable = bit(ctx(0x70), 0).into();
+        g.blend.IndependentBlendEnable = true.into();
+        let mask = ctx(0x74);
+        for (n, t) in g.blend.RenderTarget.iter_mut().enumerate() {
+            let c = ctx(0x78 + 4 * n);
+            let separate = bit(c, 29);
+            let factor = |v: u32| D3D12_BLEND((v & 0x1f) as i32 + 1);
+            t.BlendEnable = bit(c, 30).into();
+            t.SrcBlend = factor(c);
+            t.DestBlend = factor(c >> 8);
+            t.BlendOp = blend_op(c >> 5 & 7);
+            (t.SrcBlendAlpha, t.DestBlendAlpha, t.BlendOpAlpha) = if separate {
+                (factor(c >> 16), factor(c >> 24), blend_op(c >> 21 & 7))
+            } else {
+                (t.SrcBlend, t.DestBlend, t.BlendOp)
+            };
+            t.RenderTargetWriteMask = (mask >> (4 * n) & 0xF) as u8;
+        }
+        g.sample_mask = ctx(0x98);
+        g.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        let (targets, samples) = p.render_targets().map_err(|e| e.to_string())?;
+        g.targets.NumRenderTargets = targets.len() as u32;
+        for (n, &t) in targets.iter().enumerate() {
+            let f = victory_shader::deserialized::dxgi_format(t)
+                .ok_or_else(|| format!("render target {n}: no DXGI form of {t:?}"))?;
+            g.targets.RTFormats[n] =
+                DXGI_FORMAT(crate::resource::target_format(crate::resource::pc_format(f)) as i32);
+        }
+        g.depth_format = if !(g.depth.DepthEnable.as_bool() || g.depth.StencilEnable.as_bool()) {
+            DXGI_FORMAT_UNKNOWN
+        } else if targets.is_empty() {
+            DXGI_FORMAT_D16_UNORM
+        } else {
+            DXGI_FORMAT_D32_FLOAT_S8X24_UINT
+        };
+        g.samples = DXGI_SAMPLE_DESC { Count: samples, Quality: 0 };
+        Ok(g)
+    }
+
     /// Whether the draws are a pass over the screen: no vertex input, no
     /// depth or stencil, a target. Such passes fill tables once; their shaders
     /// are few. (After Belobug/VIctory-Belobug-AMD 18e57db8.)
