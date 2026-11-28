@@ -171,6 +171,8 @@ if ($Tests) {
 $exe = Join-Path $repo $(if ($Diag) { 'target\diag\victory.exe' } else { 'target\release\victory.exe' })
 # Keep this exact build next to its results, so a good one survives later experiments.
 $kept = Join-Path $outFull ("builds\$short" + $(if ($Diag) { '-diag' } else { '' }))
+# VICTORY_KEPT_DIR: one fixed folder for the launched copy (a desktop-control grant is per path).
+if ($env:VICTORY_KEPT_DIR) { $kept = $env:VICTORY_KEPT_DIR }
 New-Item -ItemType Directory -Force -Path $kept | Out-Null
 Copy-Item -Force $exe $kept
 (Get-FileHash -Algorithm SHA256 $exe).Hash | Set-Content (Join-Path $run 'victory.exe.sha256')

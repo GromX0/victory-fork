@@ -794,15 +794,42 @@ fn copy(stage: &'static str, code: &Bytecode) -> Option<Arc<Shader>> {
 }
 
 /// A compute pipeline from a shader container we put together (device method
-/// 0x218, the console's pipelines from loose native parts: [`crate::device`]).
-pub(crate) fn create_compute_from(container: &[u8], iid: *const Iid, out: *mut This) -> HRESULT {
-    hand_out(
-        vec![shader("compute", container)],
+/// 0x218, the console's pipelines from loose native parts: [`crate::device`]);
+/// `None` (made nothing) where the program does not translate.
+pub(crate) fn create_compute_from(container: &[u8], iid: *const Iid, out: *mut This) -> Option<HRESULT> {
+    let compute = shader("compute", container);
+    // `VICTORY_PIPELINE_218_HASH=<hex digits>`: only those whose shader hash
+    // starts with one of them, or (with commas) one of the listed hash
+    // prefixes: to find one that draws wrong by halves.
+    static ONLY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    if let Some(only) = ONLY.get_or_init(|| std::env::var("VICTORY_PIPELINE_218_HASH").ok())
+        && !(if only.contains(',') {
+            only.split(',').any(|h| !h.trim().is_empty() && compute.hash.starts_with(h.trim()))
+        } else {
+            compute.hash.chars().next().is_some_and(|c| only.contains(c))
+        })
+    {
+        return None;
+    }
+    // `VICTORY_PIPELINE_218_SKIP=<hash prefixes, comma-separated>`: those refused.
+    static SKIP: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let skip = SKIP.get_or_init(|| {
+        std::env::var("VICTORY_PIPELINE_218_SKIP")
+            .map(|v| v.split(',').map(|h| h.trim().to_owned()).filter(|h| !h.is_empty()).collect())
+            .unwrap_or_default()
+    });
+    if skip.iter().any(|h| compute.hash.starts_with(h.as_str())) {
+        return None;
+    }
+    compute.translated()?;
+    tracing::info!(hash = %compute.hash, "serialized compute pipeline made");
+    Some(hand_out(
+        vec![compute],
         #[cfg(windows)]
         None,
         iid,
         out,
-    )
+    ))
 }
 
 /// A mesh pipeline from shader containers we put together (device method

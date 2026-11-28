@@ -228,3 +228,53 @@ fn dumped_containers_translate() {
         println!("{:4} {k}  (e.g. {})", f.len(), f[0]);
     }
 }
+
+/// The game's serialized compute pipelines (device method 0x218, dumped by
+/// `VICTORY_DESER_DUMP` as `218-<n>-<part>.bin` in `VICTORY_DESER_DIR`) as
+/// the device makes them: how many translate, and why the others do not.
+/// `VICTORY_DESER_PLAIN=1`: without the newer-compiler marker, to compare.
+#[test]
+#[ignore = "diagnostic: needs VICTORY_DESER_DIR"]
+fn deserialized_compute_pipelines_translate() {
+    let Ok(dir) = std::env::var("VICTORY_DESER_DIR") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    let plain = std::env::var("VICTORY_DESER_PLAIN").is_ok_and(|v| v == "1");
+    let read = |n: &str, k: u32| std::fs::read(dir.join(format!("218-{n}-{k}.bin"))).ok();
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the dump directory")
+        .filter_map(|e| {
+            let f = e.ok()?.file_name().into_string().ok()?;
+            Some(f.strip_prefix("218-")?.strip_suffix("-desc.bin")?.to_owned())
+        })
+        .collect();
+    names.sort_by_key(|n| n.parse::<u32>().unwrap_or(0));
+    let (mut built, mut ok, mut why) = (0, 0, std::collections::BTreeMap::<String, u32>::new());
+    for n in &names {
+        let (Some(packet), Some(hash), Some(code), Some(meta)) = (read(n, 0), read(n, 1), read(n, 2), read(n, 3)) else {
+            continue;
+        };
+        let Some(mut c) = crate::deserialized::compute_container(&packet, &hash, &code, &meta) else {
+            println!("{n}: parts not as expected");
+            *why.entry("parts".into()).or_default() += 1;
+            continue;
+        };
+        if plain {
+            // The same container with the marker renamed (an unknown part).
+            if let Some(at) = c.windows(4).position(|w| w == crate::deserialized::SERIALIZED_PART) {
+                c[at..at + 4].copy_from_slice(b"XXXX");
+            }
+        }
+        built += 1;
+        match crate::emit::translate(&c) {
+            Ok(_) => ok += 1,
+            Err(e) => {
+                println!("{n}: {e}");
+                *why.entry(e.to_string()).or_default() += 1;
+            }
+        }
+    }
+    println!("{built} built, {ok} translated");
+    for (w, k) in &why {
+        println!("{k:4} {w}");
+    }
+}

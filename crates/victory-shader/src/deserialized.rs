@@ -1113,3 +1113,44 @@ mod tests {
         assert_eq!(group_prologue(&code).unwrap(), code);
     }
 }
+
+/// The container for a serialized compute pipeline (device method 0x218,
+/// `DeserializeComputePipelineStateX`) from the four parts its description
+/// names: the pipeline registers (0x1c bytes: thread-group size at +0x0c,
+/// flags, COMPUTE_PGM_RSRC1/2), a 0x14-byte hash, the GFX10 code and the
+/// program metadata (0x403, size - 0x14, code dwords, then 0x41 resource
+/// records). They go back into an `FSPX` blob (as the AMD upscaler's `ACCC`
+/// parts carry them) in a container with an `ACCC` part, and a
+/// [`SERIALIZED_PART`] marker: these programs come from the same serialized
+/// set (the console's newer compiler) as the graphics ones. `None` where the
+/// parts do not look so.
+pub fn compute_container(packet: &[u8], hash: &[u8], code: &[u8], meta: &[u8]) -> Option<Vec<u8>> {
+    let le = |b: &[u8], at: usize| b.get(at..at + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
+    if packet.len() != 0x1c || meta.len() < 0x18 || le(meta, 0)? != 0x403
+        || le(meta, 4)? as usize + 0x14 != meta.len() || le(meta, 8)? as usize * 4 != code.len()
+    {
+        return None;
+    }
+    // FSPX: "FSPX", version 1, entry count, size; 16-byte entries (kind, offset, size, 0).
+    let entries: [(u32, &[u8]); 4] = [(0, packet), (1, hash), (6, code), (7, meta)];
+    let head = 0x10 + 16 * entries.len();
+    let mut fspx = Vec::with_capacity(head + entries.iter().map(|e| e.1.len() + 3).sum::<usize>());
+    fspx.extend_from_slice(b"FSPX");
+    fspx.extend_from_slice(&1u32.to_le_bytes());
+    fspx.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    fspx.extend_from_slice(&0u32.to_le_bytes());
+    let mut at = head;
+    for (kind, data) in &entries {
+        for v in [*kind, at as u32, data.len() as u32, 0] {
+            fspx.extend_from_slice(&v.to_le_bytes());
+        }
+        at += data.len().next_multiple_of(4);
+    }
+    for (_, data) in &entries {
+        fspx.extend_from_slice(data);
+        fspx.resize(fspx.len().next_multiple_of(4), 0);
+    }
+    let size = fspx.len() as u32;
+    fspx[12..16].copy_from_slice(&size.to_le_bytes());
+    Some(crate::emit::container_build(&[(&SERIALIZED_PART, &[]), (b"ACCC", &fspx)]))
+}

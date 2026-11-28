@@ -554,12 +554,18 @@ fn deserialized_mesh(desc: *const u8) -> Result<(Vec<u8>, Option<Vec<u8>>, crate
 /// flags, COMPUTE_PGM_RSRC1/2), a 0x14-byte hash, the GFX10 code, and the
 /// program metadata (0x403, size - 0x14, code dwords, then 0x41 resource
 /// records). They are put back into an `FSPX` blob in a container with an
-/// `ACCC` part and made as any compute pipeline. Parts that do not look so are
-/// refused as before (logged). Opt-in (`VICTORY_PIPELINE_218=1`) until tested.
+/// `ACCC` part and made as any compute pipeline
+/// ([`victory_shader::deserialized::compute_container`]), only when the
+/// program translates: else, and where the parts do not look so, refused as
+/// before (logged; the title goes without, as it does with a refused graphics
+/// one, rather than being handed a pipeline whose dispatches are dropped).
+/// Opt-in (`VICTORY_PIPELINE_218=1`) until tested.
 extern "system" fn pipeline_218(this: This, desc: *const u8, iid: *const Iid, out: *mut This) -> HRESULT {
     let off = !std::env::var("VICTORY_PIPELINE_218").is_ok_and(|v| v.trim() == "1");
-    if !off && let Some(container) = fspx_container(desc) {
-        return crate::pipeline::create_compute_from(&container, iid, out);
+    if !off && let Some(container) = fspx_container(desc)
+        && let Some(made) = crate::pipeline::create_compute_from(&container, iid, out)
+    {
+        return made;
     }
     unknown_pipeline::<0x218>(this, desc, iid, out)
 }
@@ -581,49 +587,7 @@ fn fspx_container(desc: *const u8) -> Option<Vec<u8>> {
         crate::host::read_into(at as *const u8, &mut b).then_some(b)
     };
     let (packet, hash, code, meta) = (piece(0)?, piece(1)?, piece(2)?, piece(3)?);
-    let le = |b: &[u8], at: usize| b.get(at..at + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]));
-    if packet.len() != 0x1c || meta.len() < 0x18 || le(&meta, 0)? != 0x403
-        || le(&meta, 4)? as usize + 0x14 != meta.len() || le(&meta, 8)? as usize * 4 != code.len()
-    {
-        return None;
-    }
-    // FSPX: "FSPX", version 1, entry count, size; 16-byte entries (kind, offset, size, 0).
-    let entries: [(u32, &[u8]); 4] = [(0, &packet), (1, &hash), (6, &code), (7, &meta)];
-    let head = 0x10 + 16 * entries.len();
-    let mut fspx = Vec::with_capacity(head + entries.iter().map(|e| e.1.len() + 3).sum::<usize>());
-    fspx.extend_from_slice(b"FSPX");
-    fspx.extend_from_slice(&1u32.to_le_bytes());
-    fspx.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    fspx.extend_from_slice(&0u32.to_le_bytes());
-    let mut at = head;
-    for (kind, data) in &entries {
-        for v in [*kind, at as u32, data.len() as u32, 0] {
-            fspx.extend_from_slice(&v.to_le_bytes());
-        }
-        at += data.len().next_multiple_of(4);
-    }
-    for (_, data) in &entries {
-        fspx.extend_from_slice(data);
-        fspx.resize(fspx.len().next_multiple_of(4), 0);
-    }
-    let size = fspx.len() as u32;
-    fspx[12..16].copy_from_slice(&size.to_le_bytes());
-    // DXBC: "DXBC", digest (unchecked), version 1.0, total size, one part; the
-    // part: "ACCC", size, the FSPX blob.
-    let part_at = 0x20 + 4;
-    let total = part_at + 8 + fspx.len();
-    let mut c = Vec::with_capacity(total);
-    c.extend_from_slice(b"DXBC");
-    c.extend_from_slice(&blake3::hash(&fspx).as_bytes()[..16]);
-    c.extend_from_slice(&1u16.to_le_bytes());
-    c.extend_from_slice(&0u16.to_le_bytes());
-    c.extend_from_slice(&(total as u32).to_le_bytes());
-    c.extend_from_slice(&1u32.to_le_bytes());
-    c.extend_from_slice(&(part_at as u32).to_le_bytes());
-    c.extend_from_slice(b"ACCC");
-    c.extend_from_slice(&(fspx.len() as u32).to_le_bytes());
-    c.extend_from_slice(&fspx);
-    Some(c)
+    victory_shader::deserialized::compute_container(&packet, &hash, &code, &meta)
 }
 
 /// The host device's state: the console's device is removed when the host's is

@@ -1424,3 +1424,37 @@ triangles over the skin (the green fog in those shots is the game's weather, use
 the finding of slodk: the title's CPU drops the close version at ~15-20 m where its far version starts at ~195 m, so
 the close version is cut ~10x too early by the CPU's level-of-detail distance. Next: that comparison in the title's
 code, and its inputs read live at a gap.
+
+### Overnight 28 Nov (07:00 on, user asleep): the console's other half of the serialized pipelines, and the LOD feedback
+
+Audit of what the title is told about the machine, against the kit (E:\2026.10-GDKX, XSystem.h): device type read
+through `ConsoleMode` (0x64 = Series X, mapped from the title's own code), display mode 3840x2160, HDR declined (SDR
+present), title memory reserved 13.5 GB in its own pools. Matches a Series X; nothing there to change.
+
+**Device method 0x218 (`DeserializeComputePipelineStateX`)** had never been turned on in a run (2,048+ compute
+pipelines the title goes without). `victory_shader::deserialized::compute_container` now builds its `ACCC` + `VXSP`
+container (moved out of the device), a program that does not translate is refused at creation as the graphics ones are
+(it used to be handed out with its dispatches dropped), `VICTORY_PIPELINE_218_HASH` / `_SKIP` choose which are made.
+Offline (`deserialized_compute_pipelines_translate`, deser2's 74 dumps): 45 translate, the same with or without the
+newer-compiler marker. In game 551-553 made.
+- All made: the picture is a flat grey (screenshot luminance spread 0.6) with the world running (6,000 draws a frame,
+  20 fps). The dispatch counts looked normal: the earlier "dispatches run" check was no picture check (corrected).
+- Bisection by screenshot (15 runs, `bisect218.sh`, flat = spread under 3): one program, **compute aa5b8e6fea243cc5**
+  (10,928 bytes, first bound at frame ~1336), greys the picture alone.
+- With the other 550 on (stairtest st218on against st218off, save 'openworld', `VICTORY_LOD_NEAR=0`): the start view
+  is the same in both, the stairs palm's spot as dark as before; the player character is drawn half dissolved (blocky
+  edges) with them on: another of them goes wrong. **0x218 does not bring the middle level back; left off by default.**
+  (The live-pad route does not land in the same place twice, as found on 27 Nov; only the start view is comparable.)
+
+**The tree pass's LOD feedback** (`55679a05`, end of each group): lane 0 ORs a flag word (bit 2: drawn with fade > 0,
+bit 4: detail asked) and takes the MIN of log2(screen size x detail) x 256 (from 0xf00) into a buffer of 802
+8-byte entries, index from the batch's constants (+64), when the batch's +52 is above zero. Bound in half the
+dispatches (the other half, the shadow views, bind a null view): a 6,416-byte buffer in a ring of three at
+0xdba571ab0, 0xdba5733c0, 0xdba574cd0. Read live from title memory (fb run, three reads 5 s apart): 72 of 802 entries
+carry values (or 0x3 / 0x17, min 0x8a-0x656). **The GPU's LOD feedback reaches the title's memory**: not the cause.
+
+Also found, not the cause: `compute f16876929fa64f9f` (21.7 KB) is never made (AMD's compiler crashed on it; it is the
+one left on warm-bad.txt) and its 1-5 dispatches a frame are dropped; DirectStorage reported 0 failed requests; no
+memory request was refused; the "prepare failed" drops (item 12) are 0 in every run tonight. The fork
+XaviFortes/VIctory-RDNA lists LOD pop-in as open; its one pop-in commit (7ab13ed) orders indirect draws in its
+in-place "port 1" memory mode, which we do not run (our batching shortcuts were off in s3-safe: still popped).
