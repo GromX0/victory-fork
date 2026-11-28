@@ -1524,3 +1524,12 @@ which pass the console draws these props with between ~30 m and the far start. C
 families hold these archetypes with all levels' records empty (the title's streaming of family LOD meshes), (2) a
 far-version scale s38 the CPU writes as 1.0 here (its writer not found by immediates; the 248-byte block's
 -1/-1/1/1/1/25 are copied, not stored as constants).
+
+**slod-start (prepared, not judged)**: `D:\victory-runs\patch-slod-start.txt` (`1c4b3c0547e3e6fa 644 0e1c1cf8`): the
+far-version pass's start test `dist >= (start - 25) x s38` with s38 replaced by the inline constant 1/(2 pi) = 0.159
+(the end test at 0x674 left as it is): a bush-sized prop's far version from (220 - 25) x 0.159 = 31 m, where its
+close version ends (~25-33 m). Loads and translates (log: old 0e1c1c26, new 0e1c1cf8). The start view has nothing in
+the middle band, the live-pad turns do not land on the same view twice, and the loading camera's timing differs
+between runs: no automatic picture of the band was obtained. To be judged on the route (VICTORY_CODE_PATCH set to
+that file). If the band fills, the next step is the CPU's source of s38 (written 1.0 here); if not, the far
+versions are not the console's middle band either.
