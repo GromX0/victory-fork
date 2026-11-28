@@ -300,7 +300,7 @@ pub fn mesh_pipeline(
     if !p.geometry() {
         return Err(Unsupported { offset: 0, what: "a serialized pipeline without a GS stage" });
     }
-    let gs_code = group_prologue(stage_code(gs)?)?;
+    let gs_code = lane0_sections(&group_prologue(stage_code(gs)?)?)?;
     let gs_code = &gs_code[..];
     let gs_insts = gfx10::decode(gs_code)?;
     if wave32_idiom(&gs_insts) {
@@ -641,6 +641,47 @@ fn group_prologue(code: &[u8]) -> Result<Vec<u8>, ShaderError> {
     }
     if !at_offset(branch.offset).is_some_and(|t| t.starts_with("s_branch")) {
         return Err(Malformed("serialized mesh stage: the prologue rewrite did not decode as intended"));
+    }
+    Ok(out)
+}
+
+/// The other lane-0 sections of the serialized mesh stages (the prologue's
+/// variant without a saved pair ends with two: `s_mov_b64 exec, 1`, then
+/// lane 0 writes the vertex and primitive counts to LDS, or reads them back,
+/// `s_mov_b64 exec, -1`): with every instruction in the section uniform
+/// work (scalar code, moves of scalars and constants, `v_readfirstlane`,
+/// `ds_read_b32` / `ds_write_b32`), every lane doing it gives the same
+/// result on the host, where those values are the same in every lane.
+/// Such a section's `exec, 1` becomes `exec, -1`; others are left.
+fn lane0_sections(code: &[u8]) -> Result<Vec<u8>, ShaderError> {
+    let insts = gfx10::decode(code)?;
+    let text: Vec<String> = insts.iter().map(|i| i.text(true)).collect();
+    let writes_exec = |t: &str| {
+        let mut w = t.split([' ', ',']).filter(|w| !w.is_empty());
+        let (name, dst) = (w.next().unwrap_or(""), w.next().unwrap_or(""));
+        (name.starts_with("s_") && (dst == "exec" || dst == "exec_lo")) || name.starts_with("v_cmpx") || name.contains("saveexec")
+    };
+    let uniform = |t: &str| {
+        let mut w = t.split([' ', ',']).filter(|w| !w.is_empty());
+        let name = w.next().unwrap_or("");
+        let ops: Vec<&str> = w.collect();
+        match name {
+            "v_mov_b32" => ops.get(1).is_some_and(|o| !o.starts_with('v')),
+            "v_readfirstlane_b32" | "ds_write_b32" | "ds_read_b32" => true,
+            _ => name.starts_with("s_") && !name.starts_with("s_sendmsg"),
+        }
+    };
+    let mut out = code.to_vec();
+    for (k, t) in text.iter().enumerate() {
+        if t != "s_mov_b64 exec, 1" {
+            continue;
+        }
+        let end = (k + 1..text.len()).find(|&j| writes_exec(&text[j])).unwrap_or(text.len());
+        if end == text.len() || !text[k + 1..end].iter().all(|t| uniform(t)) {
+            continue;
+        }
+        let at = insts[k].offset;
+        out[at..at + 4].copy_from_slice(&(insts[k].words[0] & !0xff | 0xc1).to_le_bytes());
     }
     Ok(out)
 }

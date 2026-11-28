@@ -517,7 +517,10 @@ impl<'a> Tracer<'a> {
                         let new = match copy_source(inst, k).or_else(|| self.restored(inst)) {
                             Some(Moved::Const(c)) => Some(Term::Const(c)),
                             Some(Moved::Value(s)) => o[s.0 as usize],
-                            None => Some(Term::Value(v)),
+                            None => match self.xor_swapped(inst, &o) {
+                                Some(t) => Some(t),
+                                None => Some(Term::Value(v)),
+                            },
                         };
                         if new.is_some() && new != o[v.0 as usize] {
                             o[v.0 as usize] = new;
@@ -538,6 +541,38 @@ impl<'a> Tracer<'a> {
             offset: 0,
             what: "copies that do not settle",
         })
+    }
+
+    /// `s_xor_b32` of a value and an `s_xor_b32` holding that value: the
+    /// other operand (`(a ^ b) ^ b = a`), as the newer compiler's register
+    /// swap `s74 ^= s70; s70 ^= s74; s74 ^= s70` moves a table's address.
+    fn xor_swapped(&self, inst: &Inst, o: &[Option<Term>]) -> Option<Term> {
+        if inst.name() != "s_xor_b32" || !crate::structure::newer_compiler() {
+            return None;
+        }
+        let operands = |i: &Inst| -> Option<[Term; 2]> {
+            let Fields::Sop { src, .. } = &i.fields else { return None };
+            let t = |op: &Operand| match *op {
+                Operand::Scalar { code, .. } if code != NULL => o[i.read(Reg::S(code))?.0 as usize],
+                _ => None,
+            };
+            Some([t(src.first()?)?, t(src.get(1)?)?])
+        };
+        let [a, b] = operands(inst)?;
+        for (p, q) in [(a, b), (b, a)] {
+            let Term::Value(pv) = p else { continue };
+            let Some(d) = self.def(pv).filter(|d| d.name() == "s_xor_b32" && d.writes.first().map(|w| w.1) == Some(pv)) else {
+                continue;
+            };
+            let [c, e] = operands(d)?;
+            if c == q {
+                return Some(e);
+            }
+            if e == q {
+                return Some(c);
+            }
+        }
+        None
     }
 
     /// Whether some lane can satisfy all of `conditions` ([`Bools::meet`]).
@@ -697,6 +732,9 @@ impl<'a> Tracer<'a> {
                 dynamic
             };
         }
+        if let Some(s) = self.phi_sum(v, 4) {
+            return s;
+        }
         let Some([a, b]) = self
             .sop2(v, &["s_add_u32", "s_add_i32"])
             .map(|(_, t)| t)
@@ -713,6 +751,60 @@ impl<'a> Tracer<'a> {
             offset: x.offset.wrapping_add(y.offset),
             dynamic: x.dynamic.or(y.dynamic),
         }
+    }
+
+    /// The console's newer compiler ([`crate::structure::newer_compiler`])
+    /// keeps a table's address in a register pair it also reuses for numbers
+    /// on paths that never reach the load; the join of them is the address
+    /// where every incoming value that is not a constant is the same base
+    /// plus offset (shortcut: the constants' paths are taken not to reach
+    /// the load, as a load there would read an unmapped page).
+    fn phi_sum(&self, v: Value, depth: u8) -> Option<Sum> {
+        if depth == 0 || !crate::structure::newer_compiler() {
+            return None;
+        }
+        let (b, i) = self.phis[v.0 as usize]?;
+        let mut found: Option<Sum> = None;
+        for &a in &self.p.blocks[b].phis[i].args {
+            let t = self.origin(a);
+            let s = match t {
+                Term::Const(_) => continue,
+                Term::Value(x) if x == v => continue,
+                Term::Value(x) if self.phis[x.0 as usize].is_some() => self.phi_sum(x, depth - 1)?,
+                Term::Value(_) => self.sum(t),
+            };
+            if s.base.is_none() || s.dynamic.is_some() {
+                return None;
+            }
+            match found {
+                Some(f) if f.base != s.base || f.offset != s.offset => return None,
+                _ => found = Some(s),
+            }
+        }
+        found
+    }
+
+    /// The high half `t` holds where it is a join of the same constant on
+    /// every path that is not a constant-free loop back (see [`Self::phi_sum`]).
+    fn phi_const(&self, t: Term, depth: u8) -> Option<Term> {
+        let Term::Value(v) = t else { return Some(t) };
+        if depth == 0 || !crate::structure::newer_compiler() {
+            return None;
+        }
+        let (b, i) = self.phis[v.0 as usize]?;
+        let mut found = None;
+        for &a in &self.p.blocks[b].phis[i].args {
+            let c = match self.origin(a) {
+                Term::Value(x) if x == v => continue,
+                c @ Term::Const(_) => c,
+                x => self.phi_const(x, depth - 1)?,
+            };
+            if found.is_some_and(|f| f != c) {
+                return None;
+            }
+            found = Some(c);
+        }
+        found
     }
 
     /// For a join `v` whose every incoming value adds to an `s_getpc_b64` low
@@ -942,7 +1034,8 @@ impl<'a> Tracer<'a> {
         let hi = match self.live(hi) {
             t @ Term::Const(_) => t,
             Term::Value(v) if self.inputs[v.0 as usize].is_some() => Term::Value(v),
-            _ => hi,
+            // (the newer compiler's joins, see `phi_sum`)
+            t => self.phi_const(t, 4).unwrap_or(hi),
         };
         let s = self.sum(lo);
         if s.dynamic.is_some() && extra.dynamic.is_some() {

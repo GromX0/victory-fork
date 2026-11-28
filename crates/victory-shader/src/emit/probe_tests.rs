@@ -181,3 +181,32 @@ fn deserialized_mesh_pipelines_translate() {
         println!("{k:5} {w}");
     }
 }
+
+/// `VICTORY_CDXIL_DIR=<dir>`: every container there (`VICTORY_FAILED_DUMP`'s
+/// `<hash>-<stage>.cdxil`) through `translate`, as a run translates it: why
+/// each one fails, counted.
+#[test]
+#[ignore = "diagnostic: needs VICTORY_CDXIL_DIR"]
+fn dumped_containers_translate() {
+    let Ok(dir) = std::env::var("VICTORY_CDXIL_DIR") else { return };
+    let mut why = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let (mut n, mut ok) = (0, 0);
+    for e in std::fs::read_dir(dir).expect("the directory").flatten() {
+        let Ok(c) = std::fs::read(e.path()) else { continue };
+        n += 1;
+        match crate::emit::translate(&c) {
+            Ok(_) => ok += 1,
+            Err(err) => {
+                let k = err.to_string();
+                let k = k.split_once(": ").map_or(k.clone(), |(_, r)| r.to_owned());
+                why.entry(k).or_default().push(e.file_name().to_string_lossy().into_owned());
+            }
+        }
+    }
+    println!("{ok} of {n} translate");
+    let mut v: Vec<_> = why.into_iter().collect();
+    v.sort_by_key(|(_, f)| std::cmp::Reverse(f.len()));
+    for (k, f) in v {
+        println!("{:4} {k}  (e.g. {})", f.len(), f[0]);
+    }
+}
