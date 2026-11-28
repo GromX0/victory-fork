@@ -807,7 +807,10 @@ pub(crate) fn create_compute_from(container: &[u8], iid: *const Iid, out: *mut T
 
 /// A mesh pipeline from shader containers we put together (device method
 /// 0x1c8, a serialized pipeline: [`crate::device`]), with the state its
-/// packet holds.
+/// packet holds; `None` (made nothing) where a stage does not translate.
+/// The title goes without a pipeline it is refused and draws the object as
+/// before; given one whose draws are then dropped, it drew nothing there
+/// (28 Nov, deser1d: ~700 draws a frame lost, faces gone but the eyes).
 #[cfg(windows)]
 pub(crate) fn create_mesh_from(
     mesh: &[u8],
@@ -815,10 +818,13 @@ pub(crate) fn create_mesh_from(
     state: host::GraphicsState,
     iid: *const Iid,
     out: *mut This,
-) -> HRESULT {
+) -> Option<HRESULT> {
     let mut shaders = vec![shader("mesh", mesh)];
     shaders.extend(pixel.map(|p| shader("pixel", p)));
-    hand_out(shaders, Some(Box::new(state)), iid, out)
+    if shaders.iter().any(|s| s.translated().is_none()) {
+        return None;
+    }
+    Some(hand_out(shaders, Some(Box::new(state)), iid, out))
 }
 
 fn hand_out(

@@ -467,10 +467,13 @@ extern "system" fn pipeline_1c8(this: This, desc: *const u8, iid: *const Iid, ou
     #[cfg(windows)]
     if std::env::var("VICTORY_PIPELINE_1C8").is_ok_and(|v| v.trim() == "1") {
         match deserialized_mesh(desc) {
-            Ok((mesh, pixel, state)) => {
-                deserialized_note("made");
-                return crate::pipeline::create_mesh_from(&mesh, pixel.as_deref(), state, iid, out);
-            }
+            Ok((mesh, pixel, state)) => match crate::pipeline::create_mesh_from(&mesh, pixel.as_deref(), state, iid, out) {
+                Some(hr) => {
+                    deserialized_note("made");
+                    return hr;
+                }
+                None => deserialized_note("a stage does not translate (refused: the title draws without it)"),
+            },
             Err(why) => deserialized_note(&why),
         }
     }
