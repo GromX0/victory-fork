@@ -3075,6 +3075,13 @@ impl State {
                 }
             }
         }
+        // The draw's root constants: which object a draw of a shared mesh
+        // shader is (28 Nov: the bush among 1,300 draws of one pair).
+        for (slot, root) in self.roots_ref(compute).iter().enumerate() {
+            if let Root::Constants(v) = root {
+                let _ = write!(text, " constants{slot} {:x?}", &v[..v.len().min(32)]);
+            }
+        }
         let _ = write!(text, " tables {:?}", self.reads(compute));
         if !compute && !list_slots().is_empty() {
             text.push_str(&self.slots_text());
