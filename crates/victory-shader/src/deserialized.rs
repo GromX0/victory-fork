@@ -261,7 +261,10 @@ impl RootLayout {
 /// The containers of a serialized mesh pipeline.
 #[derive(Debug, Default)]
 pub struct Graphics {
+    /// The stage before the pixel stage: a mesh program, or with `vertex`
+    /// a vertex program.
     pub mesh: Vec<u8>,
+    pub vertex: bool,
     /// None: a depth-only pipeline.
     pub pixel: Option<Vec<u8>>,
 }
@@ -296,15 +299,47 @@ pub fn mesh_pipeline(
     gs: StageParts,
     ps: Option<StageParts>,
 ) -> Result<Graphics, ShaderError> {
+    pipeline(packet, root, gs, ps, false)
+}
+
+/// The containers for a serialized vertex pipeline whose vertex program
+/// fetches its own vertices (no input layout: the pipeline metadata is
+/// 0x50 bytes; `v0` the vertex index, `v3` the instance index), with its
+/// pixel stage, if any. The world materials drawn with a classic vertex
+/// stage are of this kind (28 Nov, deser2: every sampled vertex pipeline with
+/// a material-sized pixel program).
+pub fn vertex_pipeline(
+    packet: &[u8],
+    root: &RootLayout,
+    vs: StageParts,
+    ps: Option<StageParts>,
+) -> Result<Graphics, ShaderError> {
+    pipeline(packet, root, vs, ps, true)
+}
+
+fn pipeline(
+    packet: &[u8],
+    root: &RootLayout,
+    gs: StageParts,
+    ps: Option<StageParts>,
+    vertex: bool,
+) -> Result<Graphics, ShaderError> {
     let p = Packet::new(packet)?;
-    if !p.geometry() {
-        return Err(Unsupported { offset: 0, what: "a serialized pipeline without a GS stage" });
+    if p.geometry() == vertex {
+        return Err(Unsupported {
+            offset: 0,
+            what: if vertex { "a vertex pipeline with a GS stage" } else { "a serialized pipeline without a GS stage" },
+        });
     }
-    let gs_code = lane0_sections(&group_prologue(stage_code(gs)?)?)?;
+    let gs_code = if vertex {
+        stage_code(gs)?.to_vec()
+    } else {
+        lane0_sections(&group_prologue(stage_code(gs)?)?)?
+    };
     let gs_code = &gs_code[..];
     let gs_insts = gfx10::decode(gs_code)?;
     if wave32_idiom(&gs_insts) {
-        return Err(Unsupported { offset: 0, what: "a wave32 serialized mesh stage" });
+        return Err(Unsupported { offset: 0, what: "a wave32 serialized vertex or mesh stage" });
     }
     // What the mesh stage exports.
     let mut params: BTreeMap<u8, u8> = BTreeMap::new();
@@ -355,7 +390,7 @@ pub fn mesh_pipeline(
     }
     for (&a, r) in &reads {
         if !params.contains_key(&a) {
-            return Err(Unsupported { offset: 0, what: "a pixel attribute the mesh stage does not export" });
+            return Err(Unsupported { offset: 0, what: "a pixel attribute the vertex or mesh stage does not export" });
         }
         if r.f16 && (r.f32 || r.flat) {
             return Err(Unsupported { offset: 0, what: "an attribute read both as 16-bit and 32-bit values" });
@@ -419,30 +454,16 @@ pub fn mesh_pipeline(
             next += 1;
         }
     }
-    let gs_block = |at: usize| p.word(SPI_GS + at);
-    let rsrc2 = gs_block(0x0c);
-    let topology = match gs_block(0x30) {
-        2 => 2,
-        1 => 1,
-        _ => return Err(Unsupported { offset: 0, what: "a serialized mesh stage of points" }),
+    let mesh_container = if vertex {
+        // PsoSpi_Standard: +0x0c RSRC1_VS, +0x10 RSRC2_VS.
+        let rsrc2 = p.word(SPI_STANDARD + 0x10);
+        let (layout, used) = records(gs.meta, user_sgprs(rsrc2), root)?;
+        let record = Record { code: gs_code, wave32: false, vgprs: vgprs(p.word(SPI_STANDARD + 0x0c), false), layout, used };
+        let blob = fssm(Slot::Vs, &record, &vertex_stage_data(&outputs), 0);
+        container(&blob, None, &[], &vertex_rows, true)
+    } else {
+        mesh_stage(&p, gs, gs_code, root, &outputs, clip_cntl, &vertex_rows)?
     };
-    let mesh = MeshInfo {
-        threads: gs_block(0x18) & 0x7ff,
-        max_vertices: gs_block(0x1c),
-        max_primitives: gs_block(0x20),
-        user_sgprs: (rsrc2 >> 1 & 0x1f | (rsrc2 >> 27 & 1) << 5) as u8,
-        topology,
-        lds_bytes: (rsrc2 >> 19 & 0xff) * 512,
-        clip_cntl,
-    };
-    if mesh.threads == 0 || mesh.max_vertices == 0 || mesh.max_primitives == 0 || mesh.max_vertices > 256 || mesh.max_primitives > 256 {
-        return Err(Malformed("serialized mesh stage: implausible group limits"));
-    }
-    let (layout, used) = records(gs.meta, u32::from(mesh.user_sgprs), root)?;
-    let gs_record = Record { code: gs_code, wave32: false, vgprs: vgprs(gs_block(0x08), false), layout, used };
-    let mesh_blob = fssm(Slot::Ms, &gs_record, &mesh_stage_data(&outputs, &mesh), mesh.lds_bytes);
-    let mesh_container = container(&mesh_blob, None, &[], &vertex_rows, false);
-
     let pixel = match ps {
         None => None,
         Some((s, code, insts)) => {
@@ -502,7 +523,42 @@ pub fn mesh_pipeline(
             Some(container(&blob, Some(col_format), &in_rows, &rows, true))
         }
     };
-    Ok(Graphics { mesh: mesh_container, pixel })
+    Ok(Graphics { mesh: mesh_container, vertex, pixel })
+}
+
+/// The mesh stage's container (GS-stage limits from `PsoSpi_GeometryShader`).
+fn mesh_stage(
+    p: &Packet,
+    gs: StageParts,
+    gs_code: &[u8],
+    root: &RootLayout,
+    outputs: &[(u8, u8, u8, u8)],
+    clip_cntl: u32,
+    vertex_rows: &[Row],
+) -> Result<Vec<u8>, ShaderError> {
+    let gs_block = |at: usize| p.word(SPI_GS + at);
+    let rsrc2 = gs_block(0x0c);
+    let topology = match gs_block(0x30) {
+        2 => 2,
+        1 => 1,
+        _ => return Err(Unsupported { offset: 0, what: "a serialized mesh stage of points" }),
+    };
+    let mesh = MeshInfo {
+        threads: gs_block(0x18) & 0x7ff,
+        max_vertices: gs_block(0x1c),
+        max_primitives: gs_block(0x20),
+        user_sgprs: (rsrc2 >> 1 & 0x1f | (rsrc2 >> 27 & 1) << 5) as u8,
+        topology,
+        lds_bytes: (rsrc2 >> 19 & 0xff) * 512,
+        clip_cntl,
+    };
+    if mesh.threads == 0 || mesh.max_vertices == 0 || mesh.max_primitives == 0 || mesh.max_vertices > 256 || mesh.max_primitives > 256 {
+        return Err(Malformed("serialized mesh stage: implausible group limits"));
+    }
+    let (layout, used) = records(gs.meta, u32::from(mesh.user_sgprs), root)?;
+    let gs_record = Record { code: gs_code, wave32: false, vgprs: vgprs(gs_block(0x08), false), layout, used };
+    let mesh_blob = fssm(Slot::Ms, &gs_record, &mesh_stage_data(outputs, &mesh), mesh.lds_bytes);
+    Ok(container(&mesh_blob, None, &[], vertex_rows, false))
 }
 
 /// User SGPRs of an `SPI_SHADER_PGM_RSRC2_*`.
@@ -783,6 +839,7 @@ struct Record<'a> {
 #[derive(Clone, Copy)]
 enum Slot {
     Ps,
+    Vs,
     Ms,
 }
 
@@ -812,6 +869,18 @@ fn pixel_stage_data(inputs: &[(u8, u8, u8, u8)], input_addr: u32) -> Vec<u8> {
     for mrt in 0..8 {
         put(&mut d, PS_PATCHES + mrt * PATCH_BYTES, u32::MAX);
     }
+    d
+}
+
+/// A vertex program's stage data: no fetched inputs (it pulls its own),
+/// the parameters it exports.
+fn vertex_stage_data(outputs: &[(u8, u8, u8, u8)]) -> Vec<u8> {
+    let mut d = vec![0u8; VS_OUTPUT_COUNT + 4];
+    for (k, &(usage, row, param, flags)) in outputs.iter().enumerate().take(32) {
+        let at = VS_OUTPUTS + 6 * k;
+        d[at..at + 6].copy_from_slice(&[usage, row, param, row, param, flags]);
+    }
+    put(&mut d, VS_OUTPUT_COUNT, outputs.len().min(32) as u32);
     d
 }
 
@@ -848,6 +917,7 @@ fn fssm(slot: Slot, r: &Record, stage_data: &[u8], lds: u32) -> Vec<u8> {
     }
     let slot_at = match slot {
         Slot::Ps => 0x30,
+        Slot::Vs => 0x28,
         Slot::Ms => 0x48,
     };
     payload[slot_at..slot_at + 8].copy_from_slice(&(record_at as u64).to_le_bytes());

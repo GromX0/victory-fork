@@ -816,10 +816,12 @@ pub(crate) fn create_mesh_from(
     mesh: &[u8],
     pixel: Option<&[u8]>,
     state: host::GraphicsState,
+    vertex: bool,
     iid: *const Iid,
     out: *mut This,
 ) -> Option<HRESULT> {
-    let mut shaders = vec![shader("mesh", mesh)];
+    // (`mesh` holds the vertex program for a vertex pipeline)
+    let mut shaders = vec![shader(if vertex { "vertex" } else { "mesh" }, mesh)];
     shaders.extend(pixel.map(|p| shader("pixel", p)));
     if shaders.iter().any(|s| s.translated().is_none()) {
         return None;

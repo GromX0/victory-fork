@@ -467,9 +467,9 @@ extern "system" fn pipeline_1c8(this: This, desc: *const u8, iid: *const Iid, ou
     #[cfg(windows)]
     if std::env::var("VICTORY_PIPELINE_1C8").is_ok_and(|v| v.trim() == "1") {
         match deserialized_mesh(desc) {
-            Ok((mesh, pixel, state)) => match crate::pipeline::create_mesh_from(&mesh, pixel.as_deref(), state, iid, out) {
+            Ok((mesh, pixel, state, vertex)) => match crate::pipeline::create_mesh_from(&mesh, pixel.as_deref(), state, vertex, iid, out) {
                 Some(hr) => {
-                    deserialized_note("made");
+                    deserialized_note(if vertex { "made (vertex)" } else { "made" });
                     return hr;
                 }
                 None => deserialized_note("a stage does not translate (refused: the title draws without it)"),
@@ -495,7 +495,7 @@ fn deserialized_note(what: &str) {
 
 /// The containers and state of the serialized mesh pipeline `desc` names.
 #[cfg(windows)]
-fn deserialized_mesh(desc: *const u8) -> Result<(Vec<u8>, Option<Vec<u8>>, crate::pipeline::host::GraphicsState), String> {
+fn deserialized_mesh(desc: *const u8) -> Result<(Vec<u8>, Option<Vec<u8>>, crate::pipeline::host::GraphicsState, bool), String> {
     use victory_shader::deserialized::{self, Packet, RootLayout, StageParts};
     let mut head = [0u8; 0x108];
     if desc.is_null() || !crate::host::read_into(desc, &mut head) {
@@ -515,17 +515,26 @@ fn deserialized_mesh(desc: *const u8) -> Result<(Vec<u8>, Option<Vec<u8>>, crate
     if (8..16).any(|k| w(1 + 2 * k) != 0) {
         return Err("a pipeline with ES, HS, LS or fetch stages".into());
     }
-    if part(4).is_some() {
-        return Err("a vertex-stage pipeline (not rebuilt yet)".into());
-    }
     let packet = part(0).ok_or("no packet")?;
-    let (Some(gs), Some(gs_meta)) = (part(6), part(7)) else {
-        return Err("no GS stage".into());
+    // A vertex stage: only those that fetch their own vertices (no input
+    // layout: pipeline metadata of 0x50 bytes) are rebuilt yet.
+    let vertex = part(4).is_some();
+    // (opt-in of their own, `VICTORY_PIPELINE_1C8_VS=1`: route5vs drew a green fog over
+    // the scene and black triangles on the skin with them)
+    if vertex && !std::env::var("VICTORY_PIPELINE_1C8_VS").is_ok_and(|v| v.trim() == "1") {
+        return Err("a vertex-stage pipeline (VICTORY_PIPELINE_1C8_VS off)".into());
+    }
+    if vertex && part(1).is_none_or(|m| m.len() != 0x50) {
+        return Err("a vertex-stage pipeline with an input layout (not rebuilt yet)".into());
+    }
+    let (Some(gs), Some(gs_meta)) = (if vertex { (part(4), part(5)) } else { (part(6), part(7)) }) else {
+        return Err("no vertex or GS stage".into());
     };
     let ps = part(2).zip(part(3));
     let root = crate::root::blob_of(w(0) as This).ok_or("the root signature is not one of ours")?;
     let layout = RootLayout::from_blob(&root).map_err(|e| format!("root signature: {e}"))?;
-    let g = deserialized::mesh_pipeline(
+    let build = if vertex { deserialized::vertex_pipeline } else { deserialized::mesh_pipeline };
+    let g = build(
         &packet,
         &layout,
         StageParts { code: &gs, meta: &gs_meta },
@@ -534,7 +543,7 @@ fn deserialized_mesh(desc: *const u8) -> Result<(Vec<u8>, Option<Vec<u8>>, crate
     .map_err(|e| format!("not rebuilt: {e}"))?;
     let p = Packet::new(&packet).map_err(|e| e.to_string())?;
     let state = crate::pipeline::host::GraphicsState::from_packet(&p)?;
-    Ok((g.mesh, g.pixel, state))
+    Ok((g.mesh, g.pixel, state, g.vertex))
 }
 
 /// Device method 0x218: a compute pipeline from loose native parts (28 Nov,

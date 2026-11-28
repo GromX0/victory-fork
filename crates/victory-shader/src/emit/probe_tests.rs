@@ -143,14 +143,26 @@ fn deserialized_mesh_pipelines_translate() {
     names.sort_by_key(|n| n.parse::<u32>().unwrap_or(0));
     let (mut built, mut ok, mut why) = (0, 0, std::collections::BTreeMap::<String, u32>::new());
     for n in &names {
-        let (Some(packet), Some(gs), Some(gs_meta)) = (read(n, 0), read(n, 6), read(n, 7)) else { continue };
+        let Some(packet) = read(n, 0) else { continue };
+        // GS-stage pipelines, and vertex ones without an input layout (pipeline metadata 0x50 bytes).
+        let (vertex, pre, pre_meta) = match (read(n, 6), read(n, 7), read(n, 4), read(n, 5)) {
+            (Some(c), Some(m), _, _) => (false, c, m),
+            (_, _, Some(c), Some(m)) if read(n, 1).is_some_and(|x| x.len() == 0x50) => (true, c, m),
+            _ => continue,
+        };
+        let (gs, gs_meta) = (pre, pre_meta);
         let ps = read(n, 2).zip(read(n, 3));
         let parts = crate::deserialized::StageParts { code: &gs, meta: &gs_meta };
         let ps_parts = ps.as_ref().map(|(c, m)| crate::deserialized::StageParts { code: c, meta: m });
         // The world root signature, as the title's own mesh containers lay it
         // out (MSNC_VS_PropFoliageSkinDeferred): records that disagree fail.
         let root = crate::deserialized::RootLayout { sizes: vec![1, 1, 1, 2, 2], resource_heap: true, sampler_heap: true };
-        let g = match crate::deserialized::mesh_pipeline(&packet, &root, parts, ps_parts) {
+        let made = if vertex {
+            crate::deserialized::vertex_pipeline(&packet, &root, parts, ps_parts)
+        } else {
+            crate::deserialized::mesh_pipeline(&packet, &root, parts, ps_parts)
+        };
+        let g = match made {
             Ok(g) => g,
             Err(e) => {
                 println!("{n}: not rebuilt: {e}");
@@ -160,7 +172,7 @@ fn deserialized_mesh_pipelines_translate() {
         };
         built += 1;
         let mut fine = true;
-        for (stage, c) in [("mesh", Some(&g.mesh)), ("pixel", g.pixel.as_ref())] {
+        for (stage, c) in [(if g.vertex { "vertex" } else { "mesh" }, Some(&g.mesh)), ("pixel", g.pixel.as_ref())] {
             let Some(c) = c else { continue };
             if let Ok(out) = std::env::var("VICTORY_DESER_OUT") {
                 let _ = std::fs::write(std::path::Path::new(&out).join(format!("{n}-{stage}.cdxil")), c);
