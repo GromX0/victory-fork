@@ -8992,6 +8992,25 @@ impl<'a> Lower<'a> {
                 let a = s(self, 0)?;
                 int(self, a)
             }
+            // src0 x 2^src1: the power built from its exponent bits, src1
+            // clamped to the normal exponents (shortcut: results that would be
+            // denormal from a smaller exponent come out 0 or rounded alike).
+            // The newer compiler's code only (title programs as before).
+            "v_ldexp_f32" if crate::structure::newer_compiler() => {
+                let a = f(self, 0)?;
+                let n = s(self, 1)?;
+                let (lo, hi) = (self.s.m.i32((-126i32) as u32), self.s.m.i32(127));
+                let below = self.s.m.cmp(c, pred::SLT, n, lo);
+                let n = self.s.m.select(c, below, lo, n);
+                let above = self.s.m.cmp(c, pred::SGT, n, hi);
+                let n = self.s.m.select(c, above, hi, n);
+                let (bias, k23) = (self.s.m.i32(127), self.s.m.i32(23));
+                let e = self.s.m.bin(c, Bin::Add, n, bias);
+                let e = self.s.m.bin(c, Bin::Shl, e, k23);
+                let p = self.as_float(e);
+                let r = self.s.m.bin(c, Bin::Mul, a, p);
+                float(self, r)
+            }
             "v_add_f32" | "v_sub_f32" | "v_subrev_f32" | "v_mul_f32" | "v_mul_legacy_f32"
             | "v_max_f32" | "v_min_f32" => {
                 let (a, bb) = (f(self, 0)?, f(self, 1)?);

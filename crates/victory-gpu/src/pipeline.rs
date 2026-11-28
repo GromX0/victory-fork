@@ -824,6 +824,19 @@ pub(crate) fn create_mesh_from(
     if shaders.iter().any(|s| s.translated().is_none()) {
         return None;
     }
+    // The host root signature holds at most 64 dwords: each stage's user
+    // data, root views 2 each (one-view tables 1; counted at 2, the larger).
+    let cost: u32 = shaders
+        .iter()
+        .filter_map(|s| s.translated())
+        .map(|t| {
+            let h = &t.host;
+            h.user_data_dwords() + 2 * (h.root_cbvs.len() + h.root_srvs.len() + h.root_uavs.len()) as u32
+        })
+        .sum();
+    if cost > 64 {
+        return None;
+    }
     Some(hand_out(shaders, Some(Box::new(state)), iid, out))
 }
 

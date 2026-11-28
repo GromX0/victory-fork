@@ -986,6 +986,9 @@ impl<'a> Lanes<'a> {
                             Some(&Operand::Scalar { code, .. }) if code != NULL => {
                                 depth > 0 && inst.read(Reg::S(code)).is_some_and(|s| self.data(s, depth - 1))
                             }
+                            // shortcut: a literal other than all lanes or none is a
+                            // number (a float constant), not a lane pattern.
+                            Some(&Operand::Literal(x)) => x != 0 && x != u32::MAX,
                             _ => false,
                         },
                         // Arithmetic never makes a mask.

@@ -267,9 +267,16 @@ impl GraphicsState {
             };
             t.RenderTargetWriteMask = (mask >> (4 * n) & 0xF) as u8;
         }
+        let (targets, samples) = p.render_targets().map_err(|e| e.to_string())?;
+        // Slots above the targets keep what the console leaves there (target
+        // 0's dual-source factors, say), which it never reads and D3D12
+        // refuses: D3D12's defaults.
+        let unused = GraphicsState::default().blend.RenderTarget[0];
+        for t in g.blend.RenderTarget.iter_mut().skip(targets.len()) {
+            *t = unused;
+        }
         g.sample_mask = ctx(0x98);
         g.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        let (targets, samples) = p.render_targets().map_err(|e| e.to_string())?;
         g.targets.NumRenderTargets = targets.len() as u32;
         for (n, &t) in targets.iter().enumerate() {
             let f = victory_shader::deserialized::dxgi_format(t)
