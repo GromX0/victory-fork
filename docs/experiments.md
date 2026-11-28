@@ -1298,3 +1298,10 @@ Layout (offsets from the packet's start), confirmed on the game's 163 dumped pac
   (0xe0), ending at 0x1c + the register block size.
 - Then the render-target block: 0x44 + 8 bytes per render target (0x44 with none: the depth-only pipelines).
 Next: the field-level mapping from ReverseAPIDescsFromPsoContext_2004 and PsoSecondaryBlockRTVDataHelper.
+`PsoContext_Standard` (offsets within it) holds standard AMD context registers, as the reverse code reads them back:
+0x60 DB_DEPTH_CONTROL (bit 0 stencil, 1 depth, 2 depth write, 4-6 depth function, 8-10 / 20-22 stencil functions),
+0x64/0x66 DB_STENCIL_CONTROL (operations through a table), 0x68-0x6f stencil reference and mask bytes, 0x48
+PA_SU_SC_MODE_CNTL (cull bits 0-1, front face bit 2, fill bits 8-10), 0x54/0x58/0x5c depth-bias clamp, slope and bias
+(floats), 0x44 bit 26 and 0xc8 bit 0 multisample / depth clip, 0x70 alpha to coverage and independent blend, 0x74
+CB_TARGET_MASK (4 bits per target), 0x78 + 8n the blend controls (factors and operations through tables), 0x98 the sample
+mask, 0x10/0x1c the pixel-shader options. Stage inputs and outputs: in the SPI structs (not decoded yet).
