@@ -1151,3 +1151,55 @@ the jet ski. Captures in D:\victory-scratch\capture\who5.
   has 1,288 / 1,367 indirect draws a frame, so the bush's own draw is not singled out by the box alone.
 Next, offline: the bush's draw in 6448 (args 0x2ed48080) identified by its per-draw data (object position or
 constants) and looked for in 7788: issued with zero groups, issued and drawn elsewhere, or not issued.
+
+### who6: the bush's and palm's draws go to 0 groups at middle distance (28 Nov, 02:00)
+
+Build 9fe59026 (each draw's root constants in the listing). Captures D:\victory-scratch\capture\who6: frame 2510 (bush
+and fan palm gone), 3390 (both drawn, close). The bush and palm identified in 3390 by the tracer (bush: `mesh 89a62261 /
+pixel 6539386a`, root3 0xd7f200000, constants4 [0, 0x30c0a50], 39 groups; palm: the same pair at root3 0xcd3b00000
+(73 groups), 0xcd3bc13b0 (12), 0xcd3bda5d0 (4), and `fe660f2d / b0e293b1` at 0xcd3be9780 (4)).
+**In 2510 the same draws are issued (same root3 and constants) with 0 groups** (frame-N-counts.txt; the title's CPU
+writes 0, the card fills the count in). Every 89a62261 / fe660f2d / c0f0db84 draw of those objects goes to 0; their
+neighbours with tree-leaf and other shaders (adc5c689, ff2afa5e) keep theirs. No other draw of the objects takes
+the groups over. The counts are written by the meshlet culling (`meshlet_culling:CS_BatchCullBatchCSMeshlets`
+4fb41636, `CS_PackInstances` c1488f48: their UAV covers the arguments), which no test so far changed. It has its own
+depth-pyramid occlusion tests (image_gather4 + `v_cmp_ge_f32 vcc` + `v_cndmask 0, -1`), two-phase (`_Prev`).
+Next: `patch-mhiz-main.txt` (scan/mhiz.js): those tests pass in BatchCullMeshlets, BatchCSMeshlets and their _Prev
+(16 sites; shadows left as they are).
+mhiz (patch-occl-mhiz.txt, the 16 meshlet occlusion tests passed): **still pops** (user). Meshlet occlusion ruled out.
+Prepared, not yet run: `patch-occl-mall.txt` (scan/mall.js): the meshlet pass's last decision before the count
+(`v_cmpx_eq_u32 exec, -1, vX` at 0x2588/0x2598 in 4fb41636 and its _Prev) made always true, every meshlet of every
+listed instance kept: the bush back means the meshlet pass drops it; still gone means it is not in the pass's list.
+mall (patch-occl-mall.txt, every meshlet of every listed instance kept): **still pops** (user). So the bush's and
+palm's instances are not in the meshlet pass's list at middle distance: they are lost in the instance culling after
+all (pop4, the gate forced in the 7 BatchCull shaders, is still the only change that brought them back), between the
+gate and the list (level choice, fade and size checks) or at the gate in a pass whose records were misread.
+propvis (only the Prop pass's gate forced, 17af15c4 0x23c8): **both still pop** (user). The bush and palm are not
+in the props pass; pop4's effect came from one of the other six (Tree, TreeImposter, Grass, Slod, SlodImposter, Simple).
+treevis (only the Tree pass's gate forced, 55679a05 0x27b8, with the built-in tree fix): **both still pop** (user).
+Not the trees pass either. Left from pop4: TreeImposter 89d08e56, Grass 9209777e, Slod 1c4b3c05, SlodImposter
+651c3e09, Simple 42f717f1 (or only the combination of passes).
+rest5vis (TreeImposter, Grass, Slod, SlodImposter, Simple gates forced): the game closed after 70 s in the world, no
+error logged, commit peak 82.2 GB: the grass pass forced visible draws all grass. Rerun without grass: rest4vis.
+rest4vis (TreeImposter 89d08e56, Slod 1c4b3c05, SlodImposter 651c3e09, Simple 42f717f1 gates forced): **both stay**
+(user). The bush and palm are culled by one of those four passes' gates. Next: Simple alone.
+simplevis (only Simple 42f717f1 forced): **still pops** (user). Left: TreeImposter 89d08e56, Slod 1c4b3c05,
+SlodImposter 651c3e09: the far-version and stand-in passes cull the bush and palm at middle distance.
+slodvis (only Slod 1c4b3c05 and SlodImposter 651c3e09 gates forced): **both stay** (user, 02:40). The bush and palm
+at middle distance are hidden by the far-version pass's gate. Its distance band (1c4b3c05 0x5c0-0x680): visible when
+dist^2 >= ((inst+16) - s25) * s38)^2 and dist^2 <= ((inst+20) * s38)^2; s38 and s25 from the constant buffer at table
++0x9e0, dwords 0x48+8 and 0x58+4 (the title's CPU writes it each frame).
+Its view constants are the 480-byte buffer of table s1+40 (title 0x748fd00 in who6 frame 3390; first floats the
+camera's forward vector, the same buffer the mesh draws bind at s1+96); s38 is its dword 0x50, s25 dword 0x5c. The
+listing logs only its first four floats. The title's own structures (the user's dump of the game's data types, used
+as reference only) name LOD multipliers per level (LodMultLod, LodMultSLod1-4) and a LodScale: the CPU's numbers
+that would feed such a scale. Next: those two dwords read in a capture (a dump of the constant ring after 1c4b3c05).
+
+### slodk: the far-version pass's distance constants (28 Nov, 03:00, normal build, captures in capture\slodk)
+
+The Slod pass reads s[36:39] at 0x48 and s[24:25] at 0x58 of a 248-byte buffer: by size the table's `s0+632` (the
+only one that holds 0x5c; the 480-byte `s1+40` is the camera block, inside the culling heap). Its words (frame
+2562): 0x48 -1, 0x4c -1, **0x50 1.0 (s38, the distance scale)**, 0x54 1.0, 0x58 1.0, **0x5c 25.0 (s25)**. So a far
+version is drawn from (its start - 25 m) to its end, scale 1: sane numbers (a 25 m overlap for the crossfade), not
+an obviously wrong scale. What is left is the per-object band (the instance's +16 start and +20 end in the 64-byte
+records of `s0+232`, 5000 of them) against where the near version stops, for the bush and palm.
